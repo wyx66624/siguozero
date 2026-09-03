@@ -917,7 +917,7 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
         [
             Paragraph("9. rev.14 实测吞吐与 30 亿步时间", s["h1"]),
             Paragraph(
-                "rev.14 已实现持久 COW 历史、逐 token causal KV、packed 棋盘、长度分桶和规则静态查表。RTX 4090 自然终局 main 探针：64 条 continuation 共 22,327 步，用时 51.76 s，即 431.37 步/s；完整训练栈常驻，CUDA 峰值分配 9.22 GiB。固定 256 步 A/B 从 179.6 提升到 435.4 步/s（2.42x）。",
+                "rev.14 正式第 1 个 RTX 4090 update：1,024 条 continuation 共 327,764 步；rollout 708.10 s（462.88 步/s），完整 update 723.85 s，原子检查点约 7.6 s。microbatch=24 完成 3 个 epoch、未回退，CUDA 峰值分配 7.68 GiB、缓存池 19.62 GiB。固定 256 步 A/B 从 179.6 提升到 435.4 步/s（2.42x）。",
                 s["body"],
             ),
             latex_box(
@@ -932,9 +932,9 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
             make_table(
                 [
                     ["硬件", "聚合吞吐", "纯 rollout", "含 learner/评测规划"],
-                    ["1× RTX 4090", "431 步/s（实测）", "80.5 天", "100-115 天"],
-                    ["2× RTX 4090", "约 759 步/s", "45.7 天", "55-65 天"],
-                    ["4× RTX 4090", "约 1,294 步/s", "26.8 天", "32-40 天"],
+                    ["1× RTX 4090", "463 步/s（实测）", "75.0 天", "85-100 天"],
+                    ["2× RTX 4090", "约 815 步/s", "42.6 天", "48-58 天"],
+                    ["4× RTX 4090", "约 1,389 步/s", "25.0 天", "29-36 天"],
                     ["1× RTX PRO 6000 96GB", "750-1,050 步/s", "33-46 天", "45-60 天"],
                     ["2× RTX PRO 6000 96GB", "1,300-1,850 步/s", "19-27 天", "26-38 天"],
                     ["1× H100 / B200 / B300", "850-1,650 步/s", "21-41 天", "27-55 天"],
@@ -953,7 +953,7 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
                 PALE_ORANGE,
             ),
             Paragraph(
-                "30 亿步是累计 continuation_plies，不是 optimizer step，也不是冠军保证。单卡当前先按 3.3-3.8 个月；完成首个 update 后使用至少 10 个 update 的移动中位数重算。",
+                "30 亿步是累计 continuation_plies，不是 optimizer step，也不是冠军保证。首轮平均 320.08 步/rollout，对应约 9,153 updates；当前循环连续运行约 77.5 天，含可用率、分布变化和训练外评测按 2.8-3.3 个月。仍须使用至少 10 个 update 的移动中位数重算。",
                 s["small"],
             ),
             PageBreak(),
@@ -991,7 +991,7 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
                 [
                     ["问题", "答案"],
                     ["每次 update", "每个模式 1,024 个终局 rollout"],
-                    ["二人 30 亿步", "取决于平均剩余局长；当前规划 8.6M-16.4M rollouts，约 8.4K-16.1K updates"],
+                    ["二人 30 亿步", "首轮折算 9.37M rollouts / 9.15K updates；规划范围仍为 8.6M-16.4M / 8.4K-16.1K"],
                     ["先完成可用主训练", "每模式累计 64M；二人 + 双明一共 128M"],
                     ["冲击顶尖棋力", "每模式累计 204.8M-614.4M；两模式合计 409.6M-1.2288B"],
                     ["是否保证顶尖", "不保证；每 10K-25K updates 依据历史回归、人类盲测和熵决定继续或停止"],

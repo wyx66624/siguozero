@@ -678,11 +678,11 @@ $$
 N_{outer\ update}=\frac{3.0\times10^9}{1024\bar H}.
 $$
 
-历史规划值 $\bar H=182.5$ 对应约 `16,054` updates / `16.44M` rollouts；rev.14 的随机初始局探针 $\bar H=348.9$ 对应约 `8,397` updates / `8.60M` rollouts。真实锚点来自进行中的基础局，并非都从开局分叉，所以只能先按 **8.4K～16.1K updates、8.6M～16.4M rollouts** 规划。每个外层 update 的 Policy 数据最多复用 3 个 epoch。实际停止条件应在完成某个原子 update 后检查累计 `continuation_plies >= 3,000,000,000`，不能根据预估 update 数假装精确命中。
+历史规划值 $\bar H=182.5$ 对应约 `16,054` updates / `16.44M` rollouts；rev.14 的随机初始局探针 $\bar H=348.9$ 对应约 `8,397` updates / `8.60M` rollouts。正式第 1 个 update 的 $\bar H=320.08$，对应约 `9,153` updates / `9.37M` rollouts。真实锚点来自进行中的基础局，局长分布会随策略改变，所以仍先按 **8.4K～16.1K updates、8.6M～16.4M rollouts** 规划。每个外层 update 的 Policy 数据最多复用 3 个 epoch。实际停止条件应在完成某个原子 update 后检查累计 `continuation_plies >= 3,000,000,000`，不能根据预估 update 数假装精确命中。
 
 30 亿步约为二人冷启动预算 `1.46B` 分叉步的 2.05 倍、正式主训练预算 `11.68B` 的 25.7%。因此它适合作为“冷启动后扩大验证”的首个里程碑，但不能作为战胜顶尖人类的最终样本保证。分别在 `0.5B / 1.0B / 1.5B / 2.0B / 3.0B` 步冻结候选并做训练外评测；若连续三个评测点没有统计显著进步，或出现非法动作、信息泄漏、熵坍缩和异常拖和，应提前停止或回滚。
 
-rev.14 在同一 RTX 4090、WSL2、PyTorch 2.11.0+cu130 上启用增量 KV、持久 COW 历史、packed 棋盘和规则查表后，自然终局 main 探针完成 `64` 条续局、`22,327` 步，用时 `51.76 s`，达到 `431.37` continuation plies/s；完整训练栈常驻，峰值 CUDA 分配 `9.22 GiB`。因此 30 亿步纯 rollout 约 `80.5` 个连续运行日，90% 可用率为 `89.4` 日；加入 learner、基础局、评测和检查点后先按 **100～115 天（3.3～3.8 个月）**规划。该估算已经比旧 bootstrap 探针的 `138.86` 步/s 快约 `3.1x`，但仍未达到 `2,000` 步/s 工程目标。首个正式 update 完成后，必须用至少 10 个 update 的 `rollout/plies_per_second` 移动中位数替换本段 ETA。
+rev.14 在同一 RTX 4090、WSL2、PyTorch 2.11.0+cu130 上启用增量 KV、持久 COW 历史、packed 棋盘和规则查表后，正式第 1 个 update 完成 `1,024` 条续局、`327,764` 步；rollout `708.10 s`、`462.88` continuation plies/s，完整 update `723.85 s`，原子检查点另用约 `7.6 s`。`microbatch=24` 完成 3 个 epoch 且没有回退，峰值 CUDA 分配 `7.68 GiB`、缓存池 `19.62 GiB`。据此 30 亿步纯 rollout 约 `75.0` 个连续运行日，计入当前基础局/learner/每轮检查点为 `77.5` 日；按 90% 可用率及训练外评测暂按 **85～100 天（2.8～3.3 个月）**规划。该吞吐比旧 bootstrap 探针的 `138.86` 步/s 快约 `3.33x`，但仍未达到 `2,000` 步/s 工程目标；必须继续用至少 10 个 update 的移动中位数更新 ETA。首批 learner 历史较短，`microbatch=24` 后续仍可能因长上下文自动回退到 `12`。
 
 ### 阶段 A：规则与随机策略验收
 
