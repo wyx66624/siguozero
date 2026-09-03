@@ -1,0 +1,518 @@
+"""Batched old-policy self-play and K=4, M=2 terminal continuations."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import random
+import time
+from typing import Any, Mapping, Sequence
+
+import torch
+
+from ..game import JunqiGame
+from .encoding import GameHistory, PolicyState
+from .models import (
+    GamePolicyTransformer,
+    LayoutSample,
+    PieceConditionedLayoutPointerDecoder,
+    layout_sample_from_trace,
+)
+from .modes import TrainingMode, mode_spec, new_game, normalize_mode
+
+
+ROOT_CANDIDATE_COUNT = 4
+REPLICAS_PER_CANDIDATE = 2
+TERMINAL_CONTINUATIONS_PER_ANCHOR = 8
+
+
+@dataclass(slots=True)
+class AnchorSnapshot:
+    game: JunqiGame
+    history: GameHistory
+    state: PolicyState
+    root_player: int
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyGroup:
+    state: PolicyState
+    candidate_actions: tuple[tuple[int, int], ...]
+    old_log_probs: tuple[float, ...]
+    replica_rewards: tuple[tuple[float, float], ...]
+    candidate_returns: tuple[float, ...]
+    advantages: tuple[float, ...]
+    continuation_plies: int
+    behavior_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class LayoutOutcome:
+    sample: LayoutSample
+    reward: float
+    seat: int
+    behavior_version: int
+
+
+@dataclass(slots=True)
+class RolloutMetrics:
+    anchors: int = 0
+    root_candidates: int = 0
+    terminal_continuations: int = 0
+    continuation_plies: int = 0
+    base_plies: int = 0
+    base_games_completed: int = 0
+    wins: int = 0
+    draws: int = 0
+    losses: int = 0
+    wall_seconds: float = 0.0
+
+    def as_dict(self) -> dict[str, float | int]:
+        return {
+            "rollout/anchors": self.anchors,
+            "rollout/root_candidates": self.root_candidates,
+            "rollout/terminal_continuations": self.terminal_continuations,
+            "rollout/continuation_plies": self.continuation_plies,
+            "rollout/base_plies": self.base_plies,
+            "rollout/base_games_completed": self.base_games_completed,
+            "rollout/wins": self.wins,
+            "rollout/draws": self.draws,
+            "rollout/losses": self.losses,
+            "rollout/wall_seconds": self.wall_seconds,
+            "rollout/continuations_per_second": (
+                self.terminal_continuations / max(self.wall_seconds, 1e-9)
+            ),
+            "rollout/plies_per_second": (
+                self.continuation_plies / max(self.wall_seconds, 1e-9)
+            ),
+        }
+
+
+@dataclass(slots=True)
+class BaseGameSlot:
+    game: JunqiGame
+    history: GameHistory
+    layouts: tuple[LayoutSample, ...]
+    layout_behavior_version: int
+
+
+class FrozenPolicyActor:
+    """One shared policy for every seat; categorical sampling, never argmax.
+
+    ``states`` may belong to different players and games.  They are batched into
+    this single module instance after each state has been rotated to its owner's
+    main perspective.  The trainer guarantees that parameters remain frozen for
+    the complete collection phase.
+    """
+
+    def __init__(
+        self,
+        policy: GamePolicyTransformer,
+        *,
+        amp_dtype: torch.dtype | None = None,
+        max_batch_size: int = 64,
+    ) -> None:
+        self.policy = policy
+        self.amp_dtype = amp_dtype
+        if max_batch_size <= 0:
+            raise ValueError("actor max batch size must be positive")
+        self.max_batch_size = max_batch_size
+        self.oom_reductions = 0
+
+    @property
+    def device_type(self) -> str:
+        return self.policy.device.type
+
+    def sample(
+        self,
+        states: Sequence[PolicyState],
+        *,
+        count: int = 1,
+        temperature: float = 1.0,
+    ) -> tuple[list[list[tuple[int, int]]], list[torch.Tensor]]:
+        enabled = self.amp_dtype is not None and self.device_type == "cuda"
+        all_actions: list[list[tuple[int, int]]] = []
+        all_logs: list[torch.Tensor] = []
+        with torch.inference_mode(), torch.autocast(
+            device_type=self.device_type,
+            dtype=self.amp_dtype or torch.float32,
+            enabled=enabled,
+        ):
+            start = 0
+            while start < len(states):
+                batch_size = min(self.max_batch_size, len(states) - start)
+                try:
+                    actions, logs = self.policy.sample_action_groups(
+                        states[start : start + batch_size],
+                        count=count,
+                        temperature=temperature,
+                    )
+                except torch.OutOfMemoryError:
+                    if self.device_type != "cuda" or batch_size <= 1:
+                        raise
+                    self.max_batch_size = max(1, batch_size // 2)
+                    self.oom_reductions += 1
+                    torch.cuda.empty_cache()
+                    continue
+                all_actions.extend(actions)
+                all_logs.extend(logs)
+                start += batch_size
+        return all_actions, all_logs
+
+
+class BaseGamePool:
+    """Persistent games whose seats all share one passed Policy/Layout pair."""
+
+    def __init__(
+        self,
+        mode: TrainingMode | str,
+        *,
+        pool_size: int,
+        max_transitions: int,
+        max_game_plies: int | None,
+        dead_rules_enabled: bool = True,
+        seed: int,
+    ) -> None:
+        if pool_size <= 0:
+            raise ValueError("base game pool size must be positive")
+        self.mode = normalize_mode(mode)
+        self.pool_size = pool_size
+        self.max_transitions = max_transitions
+        self.max_game_plies = max_game_plies
+        if not isinstance(dead_rules_enabled, bool):
+            raise ValueError("dead_rules_enabled must be a boolean")
+        self.dead_rules_enabled = dead_rules_enabled
+        self.rng = random.Random(seed)
+        self.slots: list[BaseGameSlot] = []
+
+    def _new_slot(
+        self,
+        layout: PieceConditionedLayoutPointerDecoder,
+        behavior_version: int,
+    ) -> BaseGameSlot:
+        spec = mode_spec(self.mode)
+        samples = tuple(
+            layout.sample_layouts(spec.player_count, self.mode, temperature=0.7)
+        )
+        game = new_game(
+            self.mode,
+            setups=[sample.setup for sample in samples],
+            seed=self.rng.randrange(2**63),
+            max_plies=self.max_game_plies,
+            dead_rules_enabled=self.dead_rules_enabled,
+        )
+        history = GameHistory.initialize(
+            game, self.mode, max_transitions=self.max_transitions
+        )
+        return BaseGameSlot(game, history, samples, behavior_version)
+
+    def fill(
+        self,
+        layout: PieceConditionedLayoutPointerDecoder,
+        behavior_version: int,
+    ) -> None:
+        while len(self.slots) < self.pool_size:
+            self.slots.append(self._new_slot(layout, behavior_version))
+
+    def state_dict(self) -> dict[str, Any]:
+        """Serialize every unfinished base game and player-view history exactly."""
+
+        return {
+            # Version 4 records the explicit dead-rule architecture variant.
+            "format_version": 4,
+            "mode": self.mode.value,
+            "dead_rules_enabled": self.dead_rules_enabled,
+            "pool_size": self.pool_size,
+            "max_transitions": self.max_transitions,
+            "max_game_plies": self.max_game_plies,
+            "rng_state": self.rng.getstate(),
+            "slots": [self._slot_state_dict(slot) for slot in self.slots],
+        }
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        if int(state.get("format_version", -1)) != 4:
+            raise ValueError("unsupported base-game-pool checkpoint format")
+        if normalize_mode(state["mode"]) is not self.mode:
+            raise ValueError("base-game-pool mode does not match trainer mode")
+        restored_dead_rules = state["dead_rules_enabled"]
+        if not isinstance(restored_dead_rules, bool):
+            raise ValueError("invalid base-game-pool dead-rule marker")
+        if restored_dead_rules != self.dead_rules_enabled:
+            raise ValueError("base-game-pool dead-rule variant changed across resume")
+        if int(state["pool_size"]) != self.pool_size:
+            raise ValueError("base-game-pool size changed across resume")
+        if int(state["max_transitions"]) != self.max_transitions:
+            raise ValueError("history window changed across resume")
+        if state["max_game_plies"] != self.max_game_plies:
+            raise ValueError("maximum game plies changed across resume")
+        slots = [self._slot_from_state_dict(item) for item in state["slots"]]
+        if len(slots) > self.pool_size:
+            raise ValueError("checkpoint contains too many base-game slots")
+        self.slots = slots
+        self.rng.setstate(state["rng_state"])
+
+    @staticmethod
+    def _slot_state_dict(slot: BaseGameSlot) -> dict[str, Any]:
+        game = slot.game
+        if game.is_terminal:
+            raise ValueError("terminal games must be replaced before checkpointing")
+        return {
+            "game": {
+                "config": game.config,
+                "pieces": dict(game.pieces),
+                "current_player": game.current_player,
+                "active_players": game.active_players,
+                "revealed_flags": game.revealed_flags,
+                "ply_count": game.ply_count,
+                "no_interaction_plies": game.no_interaction_plies,
+                "public_candidates": dict(game.public_candidates),
+                "known_identities": [
+                    dict(known) for known in game.known_identities
+                ],
+                "known_casualties": [
+                    [dict(counts) for counts in owner_tables]
+                    for owner_tables in game.known_casualties
+                ],
+                "public_history": game.public_history,
+            },
+            "history": slot.history.state_dict(),
+            "layouts": [
+                {
+                    "mode": sample.mode.value,
+                    "position_indices": sample.position_indices,
+                    "old_log_probs": sample.old_log_probs,
+                }
+                for sample in slot.layouts
+            ],
+            "layout_behavior_version": slot.layout_behavior_version,
+        }
+
+    def _slot_from_state_dict(self, state: Mapping[str, Any]) -> BaseGameSlot:
+        raw_game = state["game"]
+        game = JunqiGame.from_position(
+            raw_game["config"],
+            raw_game["pieces"],
+            current_player=raw_game["current_player"],
+            active_players=raw_game["active_players"],
+            revealed_flags=raw_game["revealed_flags"],
+            ply_count=int(raw_game["ply_count"]),
+            no_interaction_plies=int(raw_game["no_interaction_plies"]),
+            public_candidates=raw_game["public_candidates"],
+            known_identities=raw_game["known_identities"],
+            known_casualties=raw_game["known_casualties"],
+            public_history=raw_game["public_history"],
+        )
+        if game.is_terminal:
+            raise ValueError("checkpoint base-game slot unexpectedly terminal")
+        history = GameHistory.from_state_dict(state["history"])
+        if history.mode is not self.mode:
+            raise ValueError("base-game history mode does not match pool")
+        if (
+            history.players[0].dead_rules_enabled
+            != self.dead_rules_enabled
+        ):
+            raise ValueError("base-game history dead-rule variant does not match pool")
+        layouts = tuple(
+            layout_sample_from_trace(
+                item["mode"], item["position_indices"], item["old_log_probs"]
+            )
+            for item in state["layouts"]
+        )
+        expected_players = mode_spec(self.mode).player_count
+        if len(layouts) != expected_players:
+            raise ValueError("base-game checkpoint has the wrong layout count")
+        return BaseGameSlot(
+            game=game,
+            history=history,
+            layouts=layouts,
+            layout_behavior_version=int(state["layout_behavior_version"]),
+        )
+
+    def collect_anchors(
+        self,
+        actor: FrozenPolicyActor,
+        layout: PieceConditionedLayoutPointerDecoder,
+        *,
+        count: int,
+        behavior_version: int,
+    ) -> tuple[list[AnchorSnapshot], list[LayoutOutcome], int, int]:
+        if count <= 0:
+            raise ValueError("anchor count must be positive")
+        self.fill(layout, behavior_version)
+        anchors: list[AnchorSnapshot] = []
+        completed_layouts: list[LayoutOutcome] = []
+        base_plies = 0
+        completed_games = 0
+
+        while len(anchors) < count:
+            active_indices = list(
+                range(min(len(self.slots), count - len(anchors)))
+            )
+            states: list[PolicyState] = []
+            for index in active_indices:
+                slot = self.slots[index]
+                if slot.game.is_terminal:
+                    raise RuntimeError("terminal base game remained in pool")
+                root_player = slot.game.current_player
+                if root_player is None:
+                    raise RuntimeError("non-terminal base game has no current player")
+                state = slot.history.state_for(slot.game, root_player)
+                anchors.append(
+                    AnchorSnapshot(
+                        game=slot.game.clone(),
+                        history=slot.history.clone(),
+                        state=state,
+                        root_player=root_player,
+                    )
+                )
+                states.append(state)
+
+            sampled, _logs = actor.sample(states, count=1, temperature=1.0)
+            replacements: list[tuple[int, BaseGameSlot]] = []
+            for index, action_group in zip(active_indices, sampled, strict=True):
+                slot = self.slots[index]
+                slot.game.step(action_group[0])
+                slot.history.append_after_step(slot.game)
+                base_plies += 1
+                if slot.game.is_terminal:
+                    completed_games += 1
+                    rewards = slot.game.rewards()
+                    for seat, sample in enumerate(slot.layouts):
+                        completed_layouts.append(
+                            LayoutOutcome(
+                                sample=sample,
+                                reward=rewards[seat],
+                                seat=seat,
+                                behavior_version=slot.layout_behavior_version,
+                            )
+                        )
+                    replacements.append(
+                        (index, self._new_slot(layout, behavior_version))
+                    )
+            for index, replacement in replacements:
+                self.slots[index] = replacement
+        return anchors, completed_layouts, base_plies, completed_games
+
+
+@dataclass(slots=True)
+class _Branch:
+    anchor_index: int
+    candidate_index: int
+    replica_index: int
+    root_player: int
+    game: JunqiGame
+    history: GameHistory
+    starting_ply: int
+
+
+def _standardize(values: Sequence[float], epsilon: float) -> tuple[float, ...]:
+    tensor = torch.tensor(values, dtype=torch.float32)
+    mean = tensor.mean()
+    std = tensor.std(unbiased=False)
+    if float(std) < epsilon:
+        return tuple(0.0 for _ in values)
+    return tuple(((tensor - mean) / (std + epsilon)).tolist())
+
+
+def collect_policy_groups(
+    anchors: Sequence[AnchorSnapshot],
+    actor: FrozenPolicyActor,
+    *,
+    behavior_version: int,
+    advantage_epsilon: float = 1e-4,
+) -> tuple[list[PolicyGroup], RolloutMetrics]:
+    """Run exactly four root samples and two terminal replicas per anchor."""
+
+    started = time.perf_counter()
+    states = [anchor.state for anchor in anchors]
+    candidate_actions, old_log_probs = actor.sample(
+        states, count=ROOT_CANDIDATE_COUNT, temperature=1.0
+    )
+    branches: list[_Branch] = []
+    for anchor_index, anchor in enumerate(anchors):
+        for candidate_index, action in enumerate(candidate_actions[anchor_index]):
+            for replica_index in range(REPLICAS_PER_CANDIDATE):
+                game = anchor.game.clone()
+                history = anchor.history.clone()
+                starting_ply = game.ply_count
+                game.step(action)
+                history.append_after_step(game)
+                branches.append(
+                    _Branch(
+                        anchor_index=anchor_index,
+                        candidate_index=candidate_index,
+                        replica_index=replica_index,
+                        root_player=anchor.root_player,
+                        game=game,
+                        history=history,
+                        starting_ply=starting_ply,
+                    )
+                )
+
+    while True:
+        active = [branch for branch in branches if not branch.game.is_terminal]
+        if not active:
+            break
+        active_states = [branch.history.state_for(branch.game) for branch in active]
+        sampled, _logs = actor.sample(active_states, count=1, temperature=1.0)
+        for branch, actions in zip(active, sampled, strict=True):
+            branch.game.step(actions[0])
+            branch.history.append_after_step(branch.game)
+
+    reward_cube = [
+        [
+            [0.0 for _ in range(REPLICAS_PER_CANDIDATE)]
+            for _ in range(ROOT_CANDIDATE_COUNT)
+        ]
+        for _ in anchors
+    ]
+    continuation_plies = [0 for _ in anchors]
+    metrics = RolloutMetrics(
+        anchors=len(anchors),
+        root_candidates=len(anchors) * ROOT_CANDIDATE_COUNT,
+        terminal_continuations=(
+            len(anchors)
+            * ROOT_CANDIDATE_COUNT
+            * REPLICAS_PER_CANDIDATE
+        ),
+    )
+    for branch in branches:
+        reward = branch.game.rewards()[branch.root_player]
+        reward_cube[branch.anchor_index][branch.candidate_index][
+            branch.replica_index
+        ] = reward
+        continuation_plies[branch.anchor_index] += (
+            branch.game.ply_count - branch.starting_ply
+        )
+        if reward > 0:
+            metrics.wins += 1
+        elif reward < 0:
+            metrics.losses += 1
+        else:
+            metrics.draws += 1
+
+    groups: list[PolicyGroup] = []
+    for anchor_index, anchor in enumerate(anchors):
+        replica_rewards = tuple(
+            tuple(float(item) for item in rewards)
+            for rewards in reward_cube[anchor_index]
+        )
+        candidate_returns = tuple(
+            sum(rewards) / REPLICAS_PER_CANDIDATE
+            for rewards in replica_rewards
+        )
+        advantages = _standardize(candidate_returns, advantage_epsilon)
+        groups.append(
+            PolicyGroup(
+                state=anchor.state,
+                candidate_actions=tuple(candidate_actions[anchor_index]),
+                old_log_probs=tuple(float(value) for value in old_log_probs[anchor_index]),
+                replica_rewards=replica_rewards,
+                candidate_returns=candidate_returns,
+                advantages=advantages,
+                continuation_plies=continuation_plies[anchor_index],
+                behavior_version=behavior_version,
+            )
+        )
+    metrics.continuation_plies = sum(continuation_plies)
+    metrics.wall_seconds = time.perf_counter() - started
+    return groups, metrics
