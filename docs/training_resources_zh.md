@@ -198,6 +198,28 @@ $$
 
 即使达到 2,000 步/s，正式排期也应按约 `3～4` 周墙钟预留。当前代码已经支持单模式 `torchrun/DDP`，并实现增量 KV 与分支前缀 copy-on-write；第二张或第四张 GPU 会取得独立环境分片并同步 learner 梯度。继续达到该吞吐仍需要自定义 paged/CUDA Graph actor 或原生批量规则环境，并评估专用 actor GPU 上的一版本异步流水，不能把 DDP 卡数直接视为线性加速倍数。
 
+#### bootstrap 二人模型的同口径实测
+
+bootstrap 不是缩短 main 训练的无损替代品，而是约 `35.50M` 参数的阶段模型。RTX
+4090 上使用 `actor_batch=128`、`anchor_wave=16`、`temporal_cache_entries=384` 和
+`microbatch=24` 跑完一个正式 update：`1,024` 条续局共 `356,068` 步，rollout
+`551.63 s`、**645.48 步/s**，完整 update `560.39 s`，检查点约 `1.4 s`；峰值
+CUDA 分配 `3.82 GiB`、缓存池 `20.52 GiB`。`wave=8/actor=64` 的 600 步探针只有
+`596.24` 步/s；`wave=16/actor=128` 为 `756.33` 步/s。继续增到
+`wave=24/32` 会逼近 24GB 并明显退化，因此不用于 4090 长跑。
+
+按首轮平均 `347.72` 步/rollout，30 亿步折算约 `8,425` updates / `8.63M`
+rollouts。当前 4090 纯 rollout 为 `53.8` 个连续运行日，计入基础局、learner 和
+每轮检查点为约 `54.8` 日；按 90% 可用率、策略分布变化和训练外评测，工程排期取
+**60～70 天**。
+
+RTX PRO 6000 尚未在本项目实测。根据 bootstrap 首轮中 Policy inference 约占
+`81.2%`、Python 环境约占 `16.9%`，并结合 96GB 显存可安全起测
+`actor_batch=256`、`anchor_wave=32`、KV cache `768`，保守估算为
+`900～1,250` 步/s：30 亿步纯 rollout 约 `27.8～38.6` 天，工程排期约
+**33～48 天**。这不是 NVIDIA benchmark，必须在目标卡完成一个正式 update 后
+替换。启动入口为 `scripts/start_two_player_bootstrap.sh`。
+
 ### 7.3 RTX PRO 6000 Blackwell 96GB 时间规划
 
 NVIDIA 官方规格中，[RTX 4090](https://www.nvidia.com/en-us/geforce/graphics-cards/40-series/rtx-4090/) 为 `24 GB GDDR6X、83 FP32 TFLOPS、1,321 AI TOPS`；[RTX PRO 6000 Blackwell Workstation Edition](https://www.nvidia.com/en-au/products/workstations/professional-desktop-gpus/rtx-pro-6000/) 为 `96 GB GDDR7 ECC、1,792 GB/s、125 FP32 TFLOPS、4,000 AI TOPS、600 W`。其中 AI TOPS 采用的精度/稀疏口径不能直接等同本项目 BF16 速度；较可比的 FP32 峰值只约 `1.51x`，显存带宽约为 RTX 4090 的 `1.78x`，而容量为 `4x`。

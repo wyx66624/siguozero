@@ -920,6 +920,10 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
                 "rev.14 正式第 1 个 RTX 4090 update：1,024 条 continuation 共 327,764 步；rollout 708.10 s（462.88 步/s），完整 update 723.85 s，原子检查点约 7.6 s。microbatch=24 完成 3 个 epoch、未回退，CUDA 峰值分配 7.68 GiB、缓存池 19.62 GiB。固定 256 步 A/B 从 179.6 提升到 435.4 步/s（2.42x）。",
                 s["body"],
             ),
+            Paragraph(
+                "同口径 bootstrap（35.50M 参数）采用 actor=128 / wave=16 / KV=384：356,068 步，rollout 551.63 s（645.48 步/s），完整 update 560.39 s。4090 的 30 亿步工程排期约 60-70 天；RTX PRO 6000 估算 900-1,250 步/s、约 33-48 天，目标卡仍需实测。",
+                s["small"],
+            ),
             latex_box(
                 "wall_clock_projection",
                 r"T_{\mathrm{days}}=\frac{3\times10^9-N_{\mathrm{done}}}"
