@@ -17,7 +17,8 @@
 [docs/layout_decoder_training_zh.md](docs/layout_decoder_training_zh.md)，显存、batch、训练步数和总对局预算见
 [docs/compute_budget_zh.md](docs/compute_budget_zh.md)，三种模式的完整训练设置、硬件需求和耗时估算见
 [docs/training_resources_zh.md](docs/training_resources_zh.md)，经审核的冷启动
-参数见 [configs/bootstrap.yaml](configs/bootstrap.yaml)。
+参数见 [configs/bootstrap.yaml](configs/bootstrap.yaml)。多 GPU 启动、全局 batch
+语义和历史编码加速见 [docs/multi_gpu_and_performance_zh.md](docs/multi_gpu_and_performance_zh.md)。
 
 ## 快速使用
 
@@ -90,6 +91,13 @@ python -m unittest discover -s tests -v
 
 默认算法从冻结旧策略独立采样 `K=4` 个根路径，每个路径复制 `M=2` 次，后续每一步同样按旧策略概率分布采样直到终局。`--dead-rules` 开启持久确定性身份标注与阵亡先验；`--no-dead-rules` 同时关闭这些标注，并从 Policy 结构中彻底删除 75 维阵亡输入、投影层和融合层。默认值由 `runtime.dead_rules_enabled` 控制（当前为开启）。详细边界见 [docs/dead_rule_ablation_zh.md](docs/dead_rule_ablation_zh.md)。
 
+rev.14 的 frozen actor 使用逐 token causal KV、持久化 copy-on-write 历史、8 锚点有界波和 packed 棋盘输入；learner 仍对原始 token 完整前向并正常反传。可用 `--no-incremental-inference` 做精确 A/B，或用 `--temporal-cache-entries`、`--rollout-anchor-wave` 调整缓存。真实终局吞吐探针：
+
+```bash
+python tools/benchmark_rollout.py --mode two_player --model-scale main \
+  --anchors 8 --max-game-plies 600 --actor-batch 64 --full-stack
+```
+
 三种模式和两种死规则变体都使用独立目录。即使传入同一个 `--run-dir` 基目录，程序也会自动追加 `with_dead_rules` 或 `without_dead_rules`；检查点固化该开关并拒绝交叉续训/推理。启动时默认从各自的 `latest.pt` 原子检查点恢复；`--no-resume` 遇到已有检查点会拒绝启动，确保不会误覆盖训练状态。
 
 ```bash
@@ -101,6 +109,11 @@ python -m junqi.training.train_four_dark --run-dir runs/four_dark --dead-rules
 python -m junqi.training.train_double_open --run-dir runs/double_open --dead-rules
 python -m junqi.training.train_two_player --run-dir runs/two_player --dead-rules
 
+# 两卡共同训练同一个二人模型；anchor-batch 是全局值，microbatch 是每卡值
+torchrun --standalone --nproc-per-node=2 \
+  -m junqi.training.train_two_player --run-dir runs/two_player \
+  --dead-rules --anchor-batch 128 --microbatch 24
+
 # 无死规则消融；写入 runs/two_player/without_dead_rules
 python -m junqi.training.train_two_player --run-dir runs/two_player --no-dead-rules
 
@@ -109,4 +122,4 @@ python -m junqi.training.infer_double_open --checkpoint runs/double_open/with_de
 python -m junqi.training.infer_two_player --checkpoint runs/two_player/with_dead_rules/checkpoints/latest.pt
 ```
 
-单卡安装验收可为任一训练入口添加 `--smoke-test --device cuda`；该开关会自动使用 tiny 测试模型。新运行会先保存 update 0，再进入 rollout；训练指标写入各变体目录内的追加式 `metrics.jsonl`、文本日志和可选 TensorBoard。独立资源心跳写入 `resource_metrics.jsonl` 并原子更新 `resource_latest.json`，即使一轮 rollout 很长也能看到当前阶段、PID、GPU 利用率/显存/温度/功耗、进程 CUDA 峰值和磁盘余量。可用 `--resource-monitor-seconds` 调整间隔，`--checkpoint-every`、`--archive-every` 和 `--keep-checkpoint-archives` 调整保存策略。检查点包含变体标记、两个模型、参考模型、两个优化器、训练计数、有效 microbatch、布局样本缓冲区、未结束基础局、玩家历史窗口和 CPU/CUDA/环境随机状态；只有开启死规则时才保存持久确定身份与确定阵亡库存。
+单卡安装验收可为任一训练入口添加 `--smoke-test --device cuda`；双进程分布式验收可用 `torchrun --standalone --nproc-per-node=2 ... --smoke-test --device cpu --anchor-batch 2 --base-game-pool 2`。新运行会先保存 update 0，再进入 rollout；训练指标写入各变体目录内的追加式 `metrics.jsonl`、文本日志和可选 TensorBoard。独立资源心跳写入 `resource_metrics.jsonl` 并原子更新 `resource_latest.json`，其他 rank 使用带 `.rankNNN` 的独立日志。可用 `--resource-monitor-seconds` 调整间隔，`--checkpoint-every`、`--archive-every` 和 `--keep-checkpoint-archives` 调整保存策略。检查点包含变体标记、两个模型、参考模型、两个优化器、训练计数、有效 microbatch、布局样本缓冲区、所有 rank 的未结束基础局、玩家历史窗口和 CPU/CUDA/环境随机状态；只有开启死规则时才保存持久确定身份与确定阵亡库存。

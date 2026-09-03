@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 import json
 import math
 import os
@@ -14,8 +15,15 @@ from typing import Any, Sequence, TypeVar
 
 import torch
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel
 
-from .checkpoint import CheckpointManager, restore_training_state
+from .checkpoint import (
+    CheckpointManager,
+    capture_rng_state,
+    restore_rng_state,
+    restore_training_state,
+)
+from .distributed import DistributedContext
 from .losses import layout_grpo_loss, policy_grpo_loss
 from .metrics import MetricLogger
 from .models import (
@@ -29,6 +37,7 @@ from .rollout import (
     FrozenPolicyActor,
     LayoutOutcome,
     PolicyGroup,
+    RolloutMetrics,
     collect_policy_groups,
 )
 from .settings import TrainingSettings
@@ -57,18 +66,54 @@ class SelfPlayTrainer:
         *,
         run_directory: str | Path | None = None,
         auto_resume: bool = True,
+        distributed: DistributedContext | None = None,
     ) -> None:
         self.settings = settings
-        self.device = resolve_device(settings.device)
+        self.device = (
+            resolve_device(settings.device)
+            if distributed is None
+            else distributed.device
+        )
+        self.distributed = distributed or DistributedContext(
+            rank=0,
+            world_size=1,
+            local_rank=0,
+            device=self.device,
+        )
         if self.device.type == "cuda":
             torch.cuda.set_device(
                 torch.cuda.current_device()
                 if self.device.index is None
                 else self.device.index
             )
+        if settings.anchor_batch % self.distributed.world_size:
+            raise ValueError(
+                "global anchor_batch must be divisible by distributed world_size"
+            )
+        if settings.base_game_pool_size < self.distributed.world_size:
+            raise ValueError(
+                "global base_game_pool_size must be at least distributed world_size"
+            )
+        self.local_anchor_batch = (
+            settings.anchor_batch // self.distributed.world_size
+        )
+        pool_base, pool_remainder = divmod(
+            settings.base_game_pool_size, self.distributed.world_size
+        )
+        self.local_base_game_pool_size = pool_base + int(
+            self.distributed.rank < pool_remainder
+        )
+
         self.run_directory = settings.resolve_run_directory(run_directory).resolve()
-        self.run_directory.mkdir(parents=True, exist_ok=True)
-        self._had_existing_run_artifacts = any(self.run_directory.iterdir())
+        if self.distributed.primary:
+            self.run_directory.mkdir(parents=True, exist_ok=True)
+            had_existing_run_artifacts = any(self.run_directory.iterdir())
+        else:
+            had_existing_run_artifacts = False
+        self.distributed.barrier()
+        self._had_existing_run_artifacts = bool(
+            self.distributed.broadcast_object(had_existing_run_artifacts)
+        )
         if not auto_resume and self._had_existing_run_artifacts:
             raise RuntimeError(
                 "resume is disabled but the run directory is not empty; "
@@ -84,7 +129,12 @@ class SelfPlayTrainer:
                 "run directory contains prior artifacts but latest.pt is missing; "
                 "refusing to restart from random weights"
             )
-        self.logger = MetricLogger(self.run_directory, device=self.device)
+        self.logger = MetricLogger(
+            self.run_directory,
+            device=self.device,
+            rank=self.distributed.rank,
+            write_training_metrics=self.distributed.primary,
+        )
         self.checkpoints = CheckpointManager(
             self.run_directory,
             keep_archives=settings.keep_checkpoint_archives,
@@ -92,7 +142,9 @@ class SelfPlayTrainer:
         self.stop_requested = False
         self.update = 0
         self.phase = "initializing"
-        self.effective_policy_microbatch = settings.policy_microbatch
+        self.effective_policy_microbatch = min(
+            settings.policy_microbatch, self.local_anchor_batch
+        )
         self.effective_actor_inference_batch = settings.actor_inference_batch
         self.policy_lr_scale = 1.0
         self.cumulative: dict[str, int] = {
@@ -118,8 +170,29 @@ class SelfPlayTrainer:
         self.layout = PieceConditionedLayoutPointerDecoder(settings.model).to(
             self.device
         )
+        self.distributed.broadcast_module(self.policy)
+        self.distributed.broadcast_module(self.layout)
         self.reference_policy = copy.deepcopy(self.policy).eval().requires_grad_(False)
         self.reference_layout = copy.deepcopy(self.layout).eval().requires_grad_(False)
+        self.policy_parallel: nn.Module
+        if self.distributed.enabled:
+            self.policy_parallel = DistributedDataParallel(
+                self.policy,
+                device_ids=(
+                    [self.distributed.local_rank]
+                    if self.device.type == "cuda"
+                    else None
+                ),
+                output_device=(
+                    self.distributed.local_rank
+                    if self.device.type == "cuda"
+                    else None
+                ),
+                broadcast_buffers=False,
+                gradient_as_bucket_view=True,
+            )
+        else:
+            self.policy_parallel = self.policy
         self.policy_optimizer = torch.optim.AdamW(
             self.policy.parameters(),
             lr=settings.policy_learning_rate,
@@ -138,13 +211,17 @@ class SelfPlayTrainer:
         self.grad_scaler = torch.amp.GradScaler(
             "cuda", enabled=self.amp_dtype is torch.float16
         )
+        self.layout_grad_scaler = torch.amp.GradScaler(
+            "cuda", enabled=self.amp_dtype is torch.float16
+        )
+        self._seed_runtime()
         self.pool = BaseGamePool(
             settings.mode,
-            pool_size=settings.base_game_pool_size,
+            pool_size=self.local_base_game_pool_size,
             max_transitions=settings.model.max_transitions,
             max_game_plies=settings.max_game_plies,
             dead_rules_enabled=settings.dead_rules_enabled,
-            seed=settings.seed + 17,
+            seed=settings.seed + 17 + 1_000_003 * self.distributed.rank,
         )
         resumed = self._resume_if_available() if auto_resume else False
         self._write_run_config()
@@ -154,7 +231,8 @@ class SelfPlayTrainer:
         self.logger.event(
             "initialized mode=%s device=%s policy_params=%d layout_params=%d "
             "resume_update=%d dead_rules_enabled=%s target_continuation_plies=%s "
-            "player_models=1(shared_across_all_seats)"
+            "player_models=1(shared_across_all_seats) rank=%d/%d "
+            "local_anchor_batch=%d local_pool=%d per_device_microbatch=%d"
             % (
                 settings.mode.value,
                 self.device,
@@ -163,6 +241,11 @@ class SelfPlayTrainer:
                 self.update,
                 settings.dead_rules_enabled,
                 settings.target_continuation_plies,
+                self.distributed.rank,
+                self.distributed.world_size,
+                self.local_anchor_batch,
+                self.local_base_game_pool_size,
+                self.effective_policy_microbatch,
             )
         )
         self.logger.start_resource_monitor(
@@ -183,10 +266,19 @@ class SelfPlayTrainer:
                 "training/effective_actor_batch": (
                     self.effective_actor_inference_batch
                 ),
+                "distributed/rank": self.distributed.rank,
+                "distributed/world_size": self.distributed.world_size,
             },
             interval_seconds=settings.resource_monitor_interval_seconds,
         )
         self.phase = "ready"
+
+    def _seed_runtime(self) -> None:
+        runtime_seed = self.settings.seed + 1_000_003 * self.distributed.rank
+        random.seed(runtime_seed)
+        torch.manual_seed(runtime_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(runtime_seed)
 
     def _amp_dtype(self) -> torch.dtype | None:
         if self.device.type != "cuda" or self.settings.amp == "float32":
@@ -199,11 +291,27 @@ class SelfPlayTrainer:
         return torch.float16
 
     def _write_run_config(self) -> None:
+        if not self.distributed.primary:
+            return
         destination = self.run_directory / "resolved_config.json"
         temporary = self.run_directory / ".resolved_config.json.tmp"
+        resolved = self.settings.serializable()
+        resolved["distributed_runtime"] = {
+            "world_size": self.distributed.world_size,
+            "anchor_batch_semantics": "global",
+            "configured_anchor_batch": self.settings.anchor_batch,
+            "local_anchor_batch": self.local_anchor_batch,
+            "microbatch_semantics": "per_device",
+            "per_device_policy_microbatch": self.effective_policy_microbatch,
+            "global_base_game_pool_size": self.settings.base_game_pool_size,
+            "local_base_game_pool_size_rank0": (
+                self.settings.base_game_pool_size // self.distributed.world_size
+                + int(self.settings.base_game_pool_size % self.distributed.world_size > 0)
+            ),
+        }
         temporary.write_text(
             json.dumps(
-                self.settings.serializable(), ensure_ascii=False, indent=2, default=str
+                resolved, ensure_ascii=False, indent=2, default=str
             ),
             encoding="utf-8",
         )
@@ -242,6 +350,7 @@ class SelfPlayTrainer:
         self.effective_policy_microbatch = min(
             restored_microbatch,
             self.settings.policy_microbatch,
+            self.local_anchor_batch,
         )
         restored_actor_batch = int(
             trainer_state.get(
@@ -257,11 +366,15 @@ class SelfPlayTrainer:
         )
         if "grad_scaler" in trainer_state:
             self.grad_scaler.load_state_dict(trainer_state["grad_scaler"])
+        if "layout_grad_scaler" in trainer_state:
+            self.layout_grad_scaler.load_state_dict(
+                trainer_state["layout_grad_scaler"]
+            )
         restored_cumulative = trainer_state.get("cumulative", {})
         self.cumulative.update(
             {key: int(value) for key, value in restored_cumulative.items()}
         )
-        self.layout_buffer = [
+        restored_layout_buffer = [
             LayoutOutcome(
                 sample=layout_sample_from_trace(
                     item["mode"],
@@ -274,15 +387,97 @@ class SelfPlayTrainer:
             )
             for item in trainer_state.get("layout_buffer", [])
         ]
-        if "base_game_pool" in trainer_state:
+        self.layout_buffer = (
+            restored_layout_buffer if self.distributed.primary else []
+        )
+        distributed_state = trainer_state.get("distributed")
+        if distributed_state is not None:
+            saved_world_size = int(distributed_state["world_size"])
+            rank_states = distributed_state["rank_states"]
+            if len(rank_states) != saved_world_size:
+                raise RuntimeError("checkpoint rank-state count is inconsistent")
+            if saved_world_size == self.distributed.world_size:
+                local_state = rank_states[self.distributed.rank]
+                self.pool.load_state_dict(local_state["base_game_pool"])
+                restore_rng_state(local_state["rng_state"], self.device)
+            else:
+                saved_pools = [item["base_game_pool"] for item in rank_states]
+                all_slots = [
+                    slot
+                    for saved_pool in saved_pools
+                    for slot in saved_pool["slots"]
+                ]
+                saved_global_pool_size = sum(
+                    int(saved_pool["pool_size"])
+                    for saved_pool in saved_pools
+                )
+                if saved_global_pool_size != self.settings.base_game_pool_size:
+                    raise RuntimeError(
+                        "checkpoint global base-game pool size does not match config"
+                    )
+                sizes = [
+                    self.settings.base_game_pool_size
+                    // self.distributed.world_size
+                    + int(
+                        rank
+                        < self.settings.base_game_pool_size
+                        % self.distributed.world_size
+                    )
+                    for rank in range(self.distributed.world_size)
+                ]
+                start = sum(sizes[: self.distributed.rank])
+                repartitioned_pool = dict(saved_pools[0])
+                repartitioned_pool["pool_size"] = self.local_base_game_pool_size
+                repartitioned_pool["slots"] = all_slots[
+                    start : start + self.local_base_game_pool_size
+                ]
+                repartitioned_pool["rng_state"] = self.pool.rng.getstate()
+                self.pool.load_state_dict(repartitioned_pool)
+                self._seed_runtime()
+                self.logger.event(
+                    "repartitioned distributed checkpoint from world_size=%d "
+                    "to world_size=%d; unfinished games preserved and rank RNG "
+                    "streams deterministically restarted"
+                    % (saved_world_size, self.distributed.world_size)
+                )
+        elif "base_game_pool" in trainer_state and self.distributed.enabled:
+            # One-time migration from a legacy single-process checkpoint: split
+            # its global pool without duplicating unfinished games.  New rank
+            # RNG streams are deliberately made independent.
+            raw_pool = dict(trainer_state["base_game_pool"])
+            if int(raw_pool["pool_size"]) != self.settings.base_game_pool_size:
+                raise RuntimeError(
+                    "legacy checkpoint pool size does not match configured global pool"
+                )
+            sizes = [
+                self.settings.base_game_pool_size // self.distributed.world_size
+                + int(
+                    rank
+                    < self.settings.base_game_pool_size
+                    % self.distributed.world_size
+                )
+                for rank in range(self.distributed.world_size)
+            ]
+            start = sum(sizes[: self.distributed.rank])
+            raw_pool["pool_size"] = self.local_base_game_pool_size
+            raw_pool["slots"] = raw_pool["slots"][
+                start : start + self.local_base_game_pool_size
+            ]
+            raw_pool["rng_state"] = self.pool.rng.getstate()
+            self.pool.load_state_dict(raw_pool)
+            self._seed_runtime()
+            self.logger.event(
+                "migrated legacy single-process checkpoint pool to distributed shard"
+            )
+        elif "base_game_pool" in trainer_state:
             self.pool.load_state_dict(trainer_state["base_game_pool"])
         elif "base_pool_rng_state" in trainer_state:
             # Backward compatibility with checkpoints written before unfinished
             # base games and their history windows were persisted.
             self.pool.rng.setstate(trainer_state["base_pool_rng_state"])
         self.logger.event(
-            f"resumed checkpoint update={self.update}; models, optimizers, RNG, "
-            "layout buffer, and unfinished base games restored"
+            f"resumed checkpoint update={self.update}; models, optimizers, "
+            f"rank-{self.distributed.rank} RNG/pool, and layout state restored"
         )
         return True
 
@@ -336,19 +531,40 @@ class SelfPlayTrainer:
 
         self.policy_optimizer.zero_grad(set_to_none=True)
         epoch_metrics: dict[str, float] = {}
-        chunks = _chunks(groups, self.effective_policy_microbatch)
-        for chunk in chunks:
-            with self._autocast():
-                output = policy_grpo_loss(
-                    self.policy,
-                    self.reference_policy,
-                    chunk,
-                    clip_epsilon=self.settings.clip_epsilon,
-                    kl_coefficient=self.settings.kl_coefficient,
-                    entropy_coefficient=self.settings.entropy_coefficient,
-                )
-                scaled_loss = output.loss * (len(chunk) / len(groups))
-            self.grad_scaler.scale(scaled_loss).backward()
+        ordered_groups = (
+            sorted(groups, key=lambda group: len(group.state.records))
+            if self.settings.learner_length_bucketing
+            else list(groups)
+        )
+        chunks = _chunks(ordered_groups, self.effective_policy_microbatch)
+        padded_tokens = sum(
+            len(chunk) * max(len(group.state.records) for group in chunk)
+            for chunk in chunks
+        )
+        real_tokens = sum(len(group.state.records) for group in ordered_groups)
+        epoch_metrics["optimizer/temporal_padding_fraction"] = (
+            1.0 - real_tokens / max(padded_tokens, 1)
+        )
+        for chunk_index, chunk in enumerate(chunks):
+            synchronization = (
+                self.policy_parallel.no_sync()
+                if self.distributed.enabled and chunk_index < len(chunks) - 1
+                else nullcontext()
+            )
+            # DDP requires both forward and backward to be inside no_sync().
+            # The final normal pass synchronizes all accumulated gradients.
+            with synchronization:
+                with self._autocast():
+                    output = policy_grpo_loss(
+                        self.policy_parallel,
+                        self.reference_policy,
+                        chunk,
+                        clip_epsilon=self.settings.clip_epsilon,
+                        kl_coefficient=self.settings.kl_coefficient,
+                        entropy_coefficient=self.settings.entropy_coefficient,
+                    )
+                    scaled_loss = output.loss * (len(chunk) / len(groups))
+                self.grad_scaler.scale(scaled_loss).backward()
             for key, value in output.metrics.items():
                 epoch_metrics[key] = epoch_metrics.get(key, 0.0) + value * (
                     len(chunk) / len(groups)
@@ -371,6 +587,13 @@ class SelfPlayTrainer:
                         torch.cuda.empty_cache()
                     current = self.effective_policy_microbatch
                     minimum = self.settings.minimum_policy_microbatch
+                    if self.distributed.enabled:
+                        self.logger.event(
+                            "distributed learner OOM; aborting this launch to "
+                            "avoid asymmetric DDP retry. Relaunch every rank with "
+                            "a smaller --microbatch"
+                        )
+                        raise
                     if (
                         not self.settings.auto_reduce_microbatch_on_oom
                         or current <= minimum
@@ -387,11 +610,14 @@ class SelfPlayTrainer:
                         "unapplied epoch with microbatch=%d"
                         % (current, reduced)
                     )
+            epoch_metrics = self.distributed.mean_metrics(epoch_metrics)
             self.grad_scaler.unscale_(self.policy_optimizer)
             grad_norm = nn.utils.clip_grad_norm_(
                 self.policy.parameters(), self.settings.gradient_norm_clip
             )
-            grad_norm_value = float(grad_norm)
+            grad_norm_value = self.distributed.reduce_float(
+                float(grad_norm), operation="mean"
+            )
             self.grad_scaler.step(self.policy_optimizer)
             self.grad_scaler.update()
             epochs_completed += 1
@@ -427,25 +653,35 @@ class SelfPlayTrainer:
                 entropy_coefficient=self.settings.entropy_coefficient,
                 advantage_epsilon=self.settings.advantage_epsilon,
             )
-        self.grad_scaler.scale(output.loss).backward()
-        self.grad_scaler.unscale_(self.layout_optimizer)
+        self.layout_grad_scaler.scale(output.loss).backward()
+        self.layout_grad_scaler.unscale_(self.layout_optimizer)
         grad_norm = nn.utils.clip_grad_norm_(
             self.layout.parameters(), self.settings.gradient_norm_clip
         )
-        self.grad_scaler.step(self.layout_optimizer)
-        self.grad_scaler.update()
+        self.layout_grad_scaler.step(self.layout_optimizer)
+        self.layout_grad_scaler.update()
         output.metrics["optimizer/layout_grad_norm"] = float(grad_norm)
         output.metrics["layout/buffer_remaining"] = float(len(self.layout_buffer))
         return output.metrics
 
-    def _trainer_state(self) -> dict[str, Any]:
+    def _local_rank_state(self) -> dict[str, Any]:
         return {
+            "rank": self.distributed.rank,
+            "rng_state": capture_rng_state(self.device),
+            "base_game_pool": self.pool.state_dict(),
+        }
+
+    def _trainer_state(
+        self, rank_states: Sequence[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
+        state: dict[str, Any] = {
             "policy_lr_scale": self.policy_lr_scale,
             "effective_policy_microbatch": self.effective_policy_microbatch,
             "effective_actor_inference_batch": (
                 self.effective_actor_inference_batch
             ),
             "grad_scaler": self.grad_scaler.state_dict(),
+            "layout_grad_scaler": self.layout_grad_scaler.state_dict(),
             "cumulative": dict(self.cumulative),
             "layout_buffer": [
                 {
@@ -458,26 +694,49 @@ class SelfPlayTrainer:
                 }
                 for item in self.layout_buffer
             ],
-            "base_game_pool": self.pool.state_dict(),
         }
+        if self.distributed.enabled:
+            if rank_states is None or len(rank_states) != self.distributed.world_size:
+                raise ValueError("all rank states are required for distributed checkpoint")
+            state["distributed"] = {
+                "world_size": self.distributed.world_size,
+                "rank_states": list(rank_states),
+            }
+        else:
+            state["base_game_pool"] = self.pool.state_dict()
+        return state
 
     def save_checkpoint(self, *, reason: str, archive: bool) -> Path:
-        path = self.checkpoints.save(
-            update=self.update,
-            mode=self.settings.mode.value,
-            dead_rules_enabled=self.settings.dead_rules_enabled,
-            policy=self.policy,
-            layout=self.layout,
-            reference_policy=self.reference_policy,
-            reference_layout=self.reference_layout,
-            policy_optimizer=self.policy_optimizer,
-            layout_optimizer=self.layout_optimizer,
-            trainer_state=self._trainer_state(),
-            config=self.settings.serializable(),
-            archive=archive,
-            reason=reason,
-        )
-        self.logger.event(f"checkpoint saved: {path} reason={reason}")
+        gathered = self.distributed.gather_object(self._local_rank_state())
+        path = self.checkpoints.latest_path
+        if self.distributed.primary:
+            rank_states = (
+                None
+                if not self.distributed.enabled
+                else [dict(item) for item in gathered or []]
+            )
+            path = self.checkpoints.save(
+                update=self.update,
+                mode=self.settings.mode.value,
+                dead_rules_enabled=self.settings.dead_rules_enabled,
+                policy=self.policy,
+                layout=self.layout,
+                reference_policy=self.reference_policy,
+                reference_layout=self.reference_layout,
+                policy_optimizer=self.policy_optimizer,
+                layout_optimizer=self.layout_optimizer,
+                trainer_state=self._trainer_state(rank_states),
+                config=self.settings.serializable(),
+                archive=archive,
+                reason=reason,
+                rng_state=(
+                    capture_rng_state(self.device)
+                    if self.distributed.enabled
+                    else None
+                ),
+            )
+            self.logger.event(f"checkpoint saved: {path} reason={reason}")
+        self.distributed.barrier()
         return path
 
     def _continuation_target_reached(self) -> bool:
@@ -487,13 +746,46 @@ class SelfPlayTrainer:
             and self.cumulative["continuation_plies"] >= target
         )
 
+    def _aggregate_rollout_metrics(
+        self, metrics: RolloutMetrics
+    ) -> RolloutMetrics:
+        summed_fields = (
+            "anchors",
+            "root_candidates",
+            "terminal_continuations",
+            "continuation_plies",
+            "base_plies",
+            "base_games_completed",
+            "wins",
+            "draws",
+            "losses",
+        )
+        aggregated = RolloutMetrics()
+        for field in summed_fields:
+            setattr(
+                aggregated,
+                field,
+                self.distributed.reduce_int(int(getattr(metrics, field))),
+            )
+        aggregated.wall_seconds = self.distributed.reduce_float(
+            metrics.wall_seconds, operation="max"
+        )
+        aggregated.actor_inference_seconds = self.distributed.reduce_float(
+            metrics.actor_inference_seconds, operation="max"
+        )
+        aggregated.environment_step_seconds = self.distributed.reduce_float(
+            metrics.environment_step_seconds, operation="max"
+        )
+        return aggregated
+
     def train(self) -> None:
         try:
             while (
                 self.update < self.settings.total_updates
                 and not self._continuation_target_reached()
-                and not self.stop_requested
             ):
+                if self.distributed.any(self.stop_requested):
+                    break
                 started = time.perf_counter()
                 if self.device.type == "cuda":
                     torch.cuda.reset_peak_memory_stats(self.device)
@@ -512,13 +804,18 @@ class SelfPlayTrainer:
                     amp_dtype=self.amp_dtype,
                     max_batch_size=self.effective_actor_inference_batch,
                 )
+                base_collection_started = time.perf_counter()
                 anchors, layout_outcomes, base_plies, completed_games = (
                     self.pool.collect_anchors(
                         actor,
                         self.layout,
-                        count=self.settings.anchor_batch,
+                        count=self.local_anchor_batch,
                         behavior_version=self.update,
                     )
+                )
+                base_collection_seconds = self.distributed.reduce_float(
+                    time.perf_counter() - base_collection_started,
+                    operation="max",
                 )
                 self.phase = "terminal_rollouts"
                 groups, rollout_metrics = collect_policy_groups(
@@ -526,26 +823,54 @@ class SelfPlayTrainer:
                     actor,
                     behavior_version=self.update,
                     advantage_epsilon=self.settings.advantage_epsilon,
+                    anchor_wave_size=self.settings.rollout_anchor_wave_size,
+                    environment_workers=self.settings.rollout_environment_workers,
                 )
-                if actor.max_batch_size < self.effective_actor_inference_batch:
+                rollout_metrics.base_plies = base_plies
+                rollout_metrics.base_games_completed = completed_games
+                rollout_metrics = self._aggregate_rollout_metrics(rollout_metrics)
+                encoding_metrics = self.distributed.mean_metrics(
+                    self.policy.board_encoding_metrics()
+                )
+                previous_actor_batch = self.effective_actor_inference_batch
+                self.effective_actor_inference_batch = self.distributed.reduce_int(
+                    actor.max_batch_size, operation="min"
+                )
+                if self.effective_actor_inference_batch < previous_actor_batch:
                     self.logger.event(
                         "CUDA OOM reduced actor inference batch from %d to %d "
                         "during rollout"
                         % (
+                            previous_actor_batch,
                             self.effective_actor_inference_batch,
-                            actor.max_batch_size,
                         )
                     )
-                    self.effective_actor_inference_batch = actor.max_batch_size
-                rollout_metrics.base_plies = base_plies
-                rollout_metrics.base_games_completed = completed_games
                 self.phase = "policy_backward"
+                policy_backward_started = time.perf_counter()
                 policy_metrics = self._update_policy(groups)
-                self.layout_buffer.extend(layout_outcomes)
+                policy_backward_seconds = self.distributed.reduce_float(
+                    time.perf_counter() - policy_backward_started,
+                    operation="max",
+                )
+                gathered_layouts = self.distributed.gather_object(layout_outcomes)
+                if self.distributed.primary:
+                    for rank_outcomes in gathered_layouts or []:
+                        self.layout_buffer.extend(rank_outcomes)
                 layout_metrics: dict[str, float] = {}
+                layout_backward_seconds = 0.0
                 if next_update % self.settings.layout_update_interval == 0:
                     self.phase = "layout_backward"
-                    layout_metrics = self._update_layout()
+                    layout_backward_started = time.perf_counter()
+                    if self.distributed.primary:
+                        layout_metrics = self._update_layout()
+                    self.distributed.broadcast_module(self.layout)
+                    layout_metrics = dict(
+                        self.distributed.broadcast_object(layout_metrics)
+                    )
+                    layout_backward_seconds = self.distributed.reduce_float(
+                        time.perf_counter() - layout_backward_started,
+                        operation="max",
+                    )
                 self.update = next_update
 
                 for key, value in (
@@ -556,8 +881,8 @@ class SelfPlayTrainer:
                         rollout_metrics.terminal_continuations,
                     ),
                     ("continuation_plies", rollout_metrics.continuation_plies),
-                    ("base_plies", base_plies),
-                    ("base_games", completed_games),
+                    ("base_plies", rollout_metrics.base_plies),
+                    ("base_games", rollout_metrics.base_games_completed),
                 ):
                     self.cumulative[key] += int(value)
                 if self.update % self.settings.reference_refresh_updates == 0:
@@ -572,6 +897,9 @@ class SelfPlayTrainer:
                     ),
                     "model/shared_policy_instances_for_players": 1,
                     "model/shared_layout_instances_for_players": 1,
+                    "distributed/world_size": self.distributed.world_size,
+                    "distributed/local_anchor_batch": self.local_anchor_batch,
+                    "distributed/model_replicas": self.distributed.world_size,
                     "training/target_continuation_plies": (
                         -1
                         if self.settings.target_continuation_plies is None
@@ -584,8 +912,14 @@ class SelfPlayTrainer:
                         self.effective_actor_inference_batch
                     ),
                     "optimizer/policy_lr": policy_lr,
-                    "timing/update_seconds": time.perf_counter() - started,
+                    "timing/base_collection_seconds": base_collection_seconds,
+                    "timing/policy_backward_seconds": policy_backward_seconds,
+                    "timing/layout_backward_seconds": layout_backward_seconds,
+                    "timing/update_seconds": self.distributed.reduce_float(
+                        time.perf_counter() - started, operation="max"
+                    ),
                     **rollout_metrics.as_dict(),
+                    **encoding_metrics,
                     **policy_metrics,
                     **layout_metrics,
                 }
@@ -614,7 +948,13 @@ class SelfPlayTrainer:
             # exception.  SIGKILL and power loss cannot be intercepted, hence the
             # frequent atomic latest checkpoint above.
             self.phase = "emergency_checkpoint"
-            self.save_checkpoint(reason="emergency_exception", archive=False)
+            if self.distributed.enabled:
+                self.logger.event(
+                    "distributed exception: retaining the last completed atomic "
+                    "checkpoint; no potentially asymmetric emergency save"
+                )
+            else:
+                self.save_checkpoint(reason="emergency_exception", archive=False)
             raise
         finally:
             self.phase = "stopped"

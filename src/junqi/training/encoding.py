@@ -209,6 +209,15 @@ class StateTokenRecord:
     current_player: int
 
 
+@dataclass(frozen=True, slots=True)
+class _HistoryNode:
+    """Persistent transition node shared by cloned rollout branches."""
+
+    record: StateTokenRecord
+    previous: _HistoryNode | None
+    length: int
+
+
 def _bit_mask(values: Iterable[bool]) -> int:
     result = 0
     for index, value in enumerate(values):
@@ -259,7 +268,8 @@ class PlayerHistory:
         "max_transitions",
         "dead_rules_enabled",
         "_initial",
-        "_transitions",
+        "_transition_tail",
+        "_records_cache",
     )
 
     def __init__(
@@ -277,7 +287,8 @@ class PlayerHistory:
         self.max_transitions = max_transitions
         self.dead_rules_enabled = initial.known_casualty_bits is not None
         self._initial = initial
-        self._transitions: list[StateTokenRecord] = []
+        self._transition_tail: _HistoryNode | None = None
+        self._records_cache: tuple[StateTokenRecord, ...] | None = (initial,)
 
     @classmethod
     def from_initial_observation(
@@ -295,7 +306,16 @@ class PlayerHistory:
 
     @property
     def records(self) -> tuple[StateTokenRecord, ...]:
-        return (self._initial, *self._transitions[-self.max_transitions :])
+        if self._records_cache is not None:
+            return self._records_cache
+        recent: list[StateTokenRecord] = []
+        node = self._transition_tail
+        while node is not None and len(recent) < self.max_transitions:
+            recent.append(node.record)
+            node = node.previous
+        recent.reverse()
+        self._records_cache = (self._initial, *recent)
+        return self._records_cache
 
     def append_post_action(self, observation: Observation) -> None:
         if not observation.history:
@@ -303,9 +323,14 @@ class PlayerHistory:
         if observation.dead_rules_enabled != self.dead_rules_enabled:
             raise ValueError("dead-rule feature mode changed inside one history")
         action = ActionFeatures.from_event(observation.history[-1])
-        self._transitions.append(_record_from_observation(observation, action))
-        if len(self._transitions) > self.max_transitions:
-            del self._transitions[: len(self._transitions) - self.max_transitions]
+        record = _record_from_observation(observation, action)
+        previous = self._transition_tail
+        self._transition_tail = _HistoryNode(
+            record=record,
+            previous=previous,
+            length=1 if previous is None else previous.length + 1,
+        )
+        self._records_cache = None
 
     def as_policy_state(
         self, legal_actions: Iterable[tuple[int, int]]
@@ -321,7 +346,11 @@ class PlayerHistory:
             self._initial,
             max_transitions=self.max_transitions,
         )
-        copied._transitions = list(self._transitions)
+        # Immutable linked nodes provide O(1) structural sharing.  The first
+        # append on a child creates only one new node (true copy-on-write),
+        # rather than copying up to 1000 transition records eight times.
+        copied._transition_tail = self._transition_tail
+        copied._records_cache = self._records_cache
         return copied
 
     def state_dict(self) -> dict[str, Any]:
@@ -349,9 +378,16 @@ class PlayerHistory:
             raise ValueError("serialized dead-rule history flag is not boolean")
         if serialized_dead_rules != result.dead_rules_enabled:
             raise ValueError("serialized dead-rule history flag contradicts records")
-        result._transitions = list(records[1:])
-        if len(result._transitions) > result.max_transitions:
+        if len(records) - 1 > result.max_transitions:
             raise ValueError("serialized player history exceeds its context window")
+        for record in records[1:]:
+            previous = result._transition_tail
+            result._transition_tail = _HistoryNode(
+                record=record,
+                previous=previous,
+                length=1 if previous is None else previous.length + 1,
+            )
+        result._records_cache = records
         return result
 
 
@@ -385,7 +421,12 @@ class GameHistory:
         players = tuple(
             PlayerHistory.from_initial_observation(
                 normalized,
-                game.observe(player, history_limit=0),
+                game.observe(
+                    player,
+                    history_limit=0,
+                    include_legal_masks=False,
+                    include_candidate_masks=False,
+                ),
                 max_transitions=max_transitions,
             )
             for player in range(game.config.player_count)
@@ -394,7 +435,14 @@ class GameHistory:
 
     def append_after_step(self, game: JunqiGame) -> None:
         for player, history in enumerate(self.players):
-            history.append_post_action(game.observe(player, history_limit=1))
+            history.append_post_action(
+                game.observe(
+                    player,
+                    history_limit=1,
+                    include_legal_masks=False,
+                    include_candidate_masks=False,
+                )
+            )
 
     def state_for(self, game: JunqiGame, player: int | None = None) -> PolicyState:
         actor = game.current_player if player is None else player

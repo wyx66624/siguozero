@@ -1,8 +1,8 @@
 # 经审核采纳的冷启动配置。该配置用于打通规则、采样和 Game-GRPO 管线，
 # 不是最终冠军模型的容量上限；扩展门槛见 docs/reinforcement_learning_plan_zh.md。
 schema_version: 1
-config_revision: 13
-experiment_name: siguozero_bootstrap_v13
+config_revision: 14
+experiment_name: siguozero_bootstrap_v14_incremental_kv
 
 rules:
   game_modes:
@@ -333,6 +333,14 @@ runtime:
   amp: bfloat16
   enable_tf32: true
   enable_torch_compile: false
+  # 冻结 rollout 阶段在每个 rank/GPU 上缓存历史棋盘的 256 维全局向量。
+  # 只缓存 detached 推理结果，进入 learner 前清空；0 表示关闭。
+  inference_board_cache_entries: 65536
+  # rollout 使用逐 token causal KV；缓存条目是状态前缀而不是玩家模型副本。
+  # 8 个锚点一波对应最多 64 条分支，384 条 LRU 可覆盖两位玩家的
+  # 活跃前缀并留出写时追加空间；128 会发生抖动，实测 192 已无冷重算。
+  incremental_inference: true
+  inference_temporal_cache_entries: 192
   base_game_pool_size:
     four_dark: 32
     double_open: 32
@@ -344,6 +352,10 @@ runtime:
     main: 8
     extended: 6
   actor_inference_batch: 64
+  rollout_anchor_wave_size: 8
+  # CUDA 推理下一块时，由线程推进上一块独立规则环境；CPU-only 测试退化为串行。
+  rollout_environment_workers: 2
+  learner_length_bucketing: true
   policy_epochs: 3
   layout_update_interval: 8
   layout_outcomes_per_update: 64
@@ -355,7 +367,8 @@ runtime:
   keep_checkpoint_archives: 10
   metrics_every_updates: 1
   # 与 update 日志独立，即使一轮 rollout 很长也持续记录显存、利用率、温度、
-  # 功耗和磁盘空间。OOM 时从指定 microbatch 开始逐级减半并写入日志/检查点。
+  # 功耗和磁盘空间。单卡 OOM 会从指定 microbatch 逐级减半；多卡为避免 rank
+  # collective 失配会快速退出，应从最后检查点以更小 --microbatch 重启。
   resource_monitor_interval_seconds: 30
   auto_reduce_microbatch_on_oom: true
   minimum_policy_microbatch: 1
@@ -398,8 +411,8 @@ compute_budget:
     bootstrap_min: 32
     main_min: 64
   actor_requirements:
-    use_kv_cache: true
-    share_branch_prefix_copy_on_write: true
+    use_kv_cache: implemented_contiguous_sdpa_incremental
+    share_branch_prefix_copy_on_write: implemented_persistent_history_and_bounded_prefix_lru
     update_every_observer_view: true
   memory_optimizations:
     bfloat16: true
@@ -407,3 +420,7 @@ compute_budget:
     activation_checkpointing: true
     board_history_time_chunking: true
     deduplicate_overlapping_board_snapshots_per_update: true
+    packed_board_rows: true
+    learner_history_length_bucketing: true
+    rollout_anchor_wave_size: 8
+    temporal_prefix_cache_entries_per_rank: 192

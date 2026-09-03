@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 import math
 from typing import Iterable, Sequence
@@ -35,6 +36,7 @@ from .encoding import (
     CASUALTY_SLOTS_PER_PLAYER,
     MAX_CASUALTY_BITS,
     PolicyState,
+    StateTokenRecord,
 )
 from .modes import MODE_SPECS, TrainingMode, mode_spec, normalize_mode
 
@@ -59,6 +61,9 @@ class ModelConfig:
     max_transitions: int = 1000
     dropout: float = 0.0
     board_chunk_size: int = 256
+    inference_board_cache_entries: int = 65536
+    inference_temporal_cache_entries: int = 192
+    incremental_inference: bool = True
     activation_checkpointing: bool = True
     dead_rules_enabled: bool = True
 
@@ -74,6 +79,12 @@ class ModelConfig:
                 raise ValueError(f"{label} dimension must be divisible by heads")
         if self.max_transitions < 1:
             raise ValueError("max_transitions must be positive")
+        if self.inference_board_cache_entries < 0:
+            raise ValueError("inference board cache size cannot be negative")
+        if self.inference_temporal_cache_entries < 0:
+            raise ValueError("inference temporal cache size cannot be negative")
+        if not isinstance(self.incremental_inference, bool):
+            raise ValueError("incremental_inference must be a boolean")
         if not isinstance(self.dead_rules_enabled, bool):
             raise ValueError("dead_rules_enabled must be a boolean")
 
@@ -207,6 +218,78 @@ class PreNormEncoderBlock(nn.Module):
         outputs = inputs + self.dropout(attended)
         outputs = outputs + self.dropout(self.ffn(self.ffn_norm(outputs)))
         return outputs.masked_fill(~valid_mask.unsqueeze(-1), 0.0)
+
+    def projected_keys_values(self, normalized_inputs: Tensor) -> tuple[Tensor, Tensor]:
+        """Project normalized tokens into per-head K/V tensors.
+
+        This uses the exact parameters owned by ``nn.MultiheadAttention`` so
+        the rollout cache remains checkpoint-compatible with the ordinary
+        full-sequence learner path.
+        """
+
+        projection = F.linear(
+            normalized_inputs,
+            self.attention.in_proj_weight,
+            self.attention.in_proj_bias,
+        )
+        _queries, keys, values = projection.chunk(3, dim=-1)
+        batch, tokens, width = keys.shape
+        heads = self.attention.num_heads
+        head_dim = width // heads
+
+        def split_heads(item: Tensor) -> Tensor:
+            return item.view(batch, tokens, heads, head_dim).transpose(1, 2)
+
+        return split_heads(keys), split_heads(values)
+
+    def incremental(
+        self,
+        inputs: Tensor,
+        *,
+        past_keys: Tensor,
+        past_values: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Evaluate one causal token and append it to an existing KV prefix."""
+
+        if inputs.ndim != 3 or inputs.shape[1] != 1:
+            raise ValueError("incremental attention requires [batch, 1, dim]")
+        if past_keys.shape != past_values.shape or past_keys.ndim != 4:
+            raise ValueError("past K/V tensors must share [batch, heads, time, dim]")
+        normalized = self.attention_norm(inputs)
+        projection = F.linear(
+            normalized,
+            self.attention.in_proj_weight,
+            self.attention.in_proj_bias,
+        )
+        queries, new_keys, new_values = projection.chunk(3, dim=-1)
+        batch, _one, width = queries.shape
+        heads = self.attention.num_heads
+        head_dim = width // heads
+
+        def split_heads(item: Tensor) -> Tensor:
+            return item.view(batch, 1, heads, head_dim).transpose(1, 2)
+
+        queries = split_heads(queries)
+        new_keys = split_heads(new_keys)
+        new_values = split_heads(new_values)
+        keys = torch.cat((past_keys, new_keys), dim=2)
+        values = torch.cat((past_values, new_values), dim=2)
+        attended = F.scaled_dot_product_attention(
+            queries,
+            keys,
+            values,
+            dropout_p=0.0,
+            is_causal=False,
+        )
+        attended = attended.transpose(1, 2).reshape(batch, 1, width)
+        attended = F.linear(
+            attended,
+            self.attention.out_proj.weight,
+            self.attention.out_proj.bias,
+        )
+        outputs = inputs + self.dropout(attended)
+        outputs = outputs + self.dropout(self.ffn(self.ffn_norm(outputs)))
+        return outputs, keys, values
 
 
 def _static_board_features() -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
@@ -468,8 +551,11 @@ class PublicActionEncoder(nn.Module):
 @dataclass(slots=True)
 class PolicyTensorBatch:
     states: Sequence[PolicyState]
+    # Board rows are packed by valid history token, rather than materialized
+    # as a mostly repeated/padded [batch, time, points] cube.
     board_codes: Tensor
     casualty_bits: Tensor | None
+    token_owner: Tensor
     point_mask: Tensor
     token_mask: Tensor
     action_fields: Tensor
@@ -495,17 +581,18 @@ def collate_policy_states(
     max_tokens = max(len(state.records) for state in states)
     max_points = max(len(record.board_codes) for state in states for record in state.records)
     batch = len(states)
+    packed_tokens = sum(len(state.records) for state in states)
     requested_device = torch.device(device)
     pin_memory = requested_device.type == "cuda"
     board_codes = torch.full(
-        (batch, max_tokens, max_points),
+        (packed_tokens, max_points),
         BOARD_PAD_CODE,
         dtype=torch.long,
         pin_memory=pin_memory,
     )
     casualty_bits = (
         torch.zeros(
-            (batch, max_tokens, MAX_CASUALTY_BITS),
+            (packed_tokens, MAX_CASUALTY_BITS),
             dtype=torch.float32,
             pin_memory=pin_memory,
         )
@@ -514,6 +601,9 @@ def collate_policy_states(
     )
     point_mask = torch.zeros(
         (batch, max_points), dtype=torch.bool, pin_memory=pin_memory
+    )
+    token_owner = torch.empty(
+        (packed_tokens,), dtype=torch.long, pin_memory=pin_memory
     )
     token_mask = torch.zeros(
         (batch, max_tokens), dtype=torch.bool, pin_memory=pin_memory
@@ -541,6 +631,7 @@ def collate_policy_states(
     )
     mode_ids = torch.empty((batch,), dtype=torch.long, pin_memory=pin_memory)
 
+    packed_index = 0
     for batch_index, state in enumerate(states):
         spec = mode_spec(state.mode)
         mode_ids[batch_index] = spec.mode_index
@@ -549,7 +640,8 @@ def collate_policy_states(
             if len(record.board_codes) != spec.point_count:
                 raise ValueError("history board length does not match its mode")
             token_mask[batch_index, time_index] = True
-            board_codes[batch_index, time_index, : spec.point_count] = torch.as_tensor(
+            token_owner[packed_index] = batch_index
+            board_codes[packed_index, : spec.point_count] = torch.as_tensor(
                 record.board_codes, dtype=torch.long
             )
             if dead_rules_enabled:
@@ -569,22 +661,19 @@ def collate_policy_states(
                 )
                 assert casualty_bits is not None
                 if state.mode is TrainingMode.FOUR_DARK:
-                    casualty_bits[batch_index, time_index] = source_bits
+                    casualty_bits[packed_index] = source_bits
                 elif state.mode is TrainingMode.DOUBLE_OPEN:
                     casualty_bits[
-                        batch_index,
-                        time_index,
+                        packed_index,
                         :CASUALTY_SLOTS_PER_PLAYER,
                     ] = source_bits[:CASUALTY_SLOTS_PER_PLAYER]
                     casualty_bits[
-                        batch_index,
-                        time_index,
+                        packed_index,
                         2 * CASUALTY_SLOTS_PER_PLAYER :,
                     ] = source_bits[CASUALTY_SLOTS_PER_PLAYER:]
                 else:
                     casualty_bits[
-                        batch_index,
-                        time_index,
+                        packed_index,
                         CASUALTY_SLOTS_PER_PLAYER : 2 * CASUALTY_SLOTS_PER_PLAYER,
                     ] = source_bits
             elif record.known_casualty_bits is not None:
@@ -598,6 +687,7 @@ def collate_policy_states(
                 action_fields[batch_index, time_index] = torch.as_tensor(
                     record.action.as_tuple(), dtype=torch.long
                 )
+            packed_index += 1
 
     def transfer(tensor: Tensor) -> Tensor:
         return tensor.to(requested_device, non_blocking=pin_memory)
@@ -606,6 +696,7 @@ def collate_policy_states(
         states=states,
         board_codes=transfer(board_codes),
         casualty_bits=(None if casualty_bits is None else transfer(casualty_bits)),
+        token_owner=transfer(token_owner),
         point_mask=transfer(point_mask),
         token_mask=transfer(token_mask),
         action_fields=transfer(action_fields),
@@ -623,6 +714,21 @@ class PolicyFeatures:
     context: Tensor
     current_points: Tensor
     point_mask: Tensor
+
+
+@dataclass(slots=True)
+class _TemporalStateCache:
+    """Immutable causal prefix used by rollout branches.
+
+    Each branch initially references the same tensors.  Appending a token
+    allocates a new K/V suffix while the parent cache remains untouched, which
+    gives copy-on-write semantics without cloning a model per environment.
+    """
+
+    length: int
+    layer_keys: tuple[Tensor, ...]
+    layer_values: tuple[Tensor, ...]
+    context: Tensor
 
 
 class GamePolicyTransformer(nn.Module):
@@ -662,68 +768,637 @@ class GamePolicyTransformer(nn.Module):
             nn.SiLU(),
             nn.Linear(self.config.board_dim, self.config.board_dim),
         )
+        # The cache is explicitly enabled only for a frozen rollout actor and
+        # cleared before learner mode.  It stores detached board-global tokens,
+        # never tensors used for gradient computation.
+        self._inference_board_cache: dict[object, Tensor] = {}
+        self._inference_board_cache_limit = 0
+        self._inference_temporal_cache: OrderedDict[
+            object, _TemporalStateCache
+        ] = OrderedDict()
+        self._inference_temporal_cache_limit = 0
+        self.reset_board_encoding_stats()
 
     @property
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
+    def start_inference_board_cache(self, max_entries: int | None = None) -> None:
+        """Start a fresh per-collection cache for immutable history boards."""
+
+        limit = (
+            self.config.inference_board_cache_entries
+            if max_entries is None
+            else int(max_entries)
+        )
+        if limit < 0:
+            raise ValueError("inference board cache size cannot be negative")
+        self._inference_board_cache.clear()
+        self._inference_board_cache_limit = limit
+        self._inference_temporal_cache.clear()
+        self._inference_temporal_cache_limit = (
+            self.config.inference_temporal_cache_entries
+            if self.config.incremental_inference
+            else 0
+        )
+        self.reset_board_encoding_stats()
+
+    def clear_inference_board_cache(self) -> None:
+        self._inference_board_cache.clear()
+        self._inference_board_cache_limit = 0
+        self._inference_temporal_cache.clear()
+        self._inference_temporal_cache_limit = 0
+
+    def reset_inference_temporal_cache(self) -> None:
+        """Drop rollout prefixes between bounded anchor waves."""
+
+        self._inference_temporal_cache.clear()
+
+    def reset_board_encoding_stats(self) -> None:
+        self._history_input_states = 0
+        self._history_unique_states = 0
+        self._raw_board_tokens = 0
+        self._board_input_tokens = 0
+        self._board_unique_tokens = 0
+        self._board_encoder_tokens = 0
+        self._board_cache_hits = 0
+        self._temporal_requested_pairs = 0
+        self._temporal_computed_pairs = 0
+        self._temporal_cache_hits = 0
+        self._temporal_cold_states = 0
+        self._temporal_incremental_tokens = 0
+
+    def board_encoding_metrics(self) -> dict[str, float]:
+        raw_tokens = max(self._raw_board_tokens, 1)
+        input_tokens = max(self._board_input_tokens, 1)
+        unique_tokens = max(self._board_unique_tokens, 1)
+        input_states = max(self._history_input_states, 1)
+        return {
+            "encoding/history_input_states": float(self._history_input_states),
+            "encoding/history_unique_states": float(self._history_unique_states),
+            "encoding/raw_board_tokens": float(self._raw_board_tokens),
+            "encoding/board_input_tokens": float(self._board_input_tokens),
+            "encoding/board_unique_tokens": float(self._board_unique_tokens),
+            "encoding/board_encoder_tokens": float(self._board_encoder_tokens),
+            "encoding/within_batch_history_saved_fraction": float(
+                1.0 - self._history_unique_states / input_states
+            ),
+            "encoding/within_batch_dedup_saved_fraction": float(
+                1.0 - self._board_unique_tokens / input_tokens
+            ),
+            "encoding/cross_step_cache_hit_fraction": float(
+                self._board_cache_hits / unique_tokens
+            ),
+            "encoding/board_encoder_saved_fraction": float(
+                1.0 - self._board_encoder_tokens / raw_tokens
+            ),
+            "encoding/board_cache_entries": float(
+                len(self._inference_board_cache)
+            ),
+            "encoding/temporal_cache_entries": float(
+                len(self._inference_temporal_cache)
+            ),
+            "encoding/temporal_cache_hits": float(self._temporal_cache_hits),
+            "encoding/temporal_cold_states": float(self._temporal_cold_states),
+            "encoding/temporal_incremental_tokens": float(
+                self._temporal_incremental_tokens
+            ),
+            "encoding/temporal_attention_saved_fraction": float(
+                0.0
+                if self._temporal_requested_pairs == 0
+                else 1.0
+                - self._temporal_computed_pairs
+                / self._temporal_requested_pairs
+            ),
+        }
+
+    def train(self, mode: bool = True) -> "GamePolicyTransformer":
+        if mode:
+            self.clear_inference_board_cache()
+        return super().train(mode)
+
+    def _put_temporal_cache(
+        self, key: object, value: _TemporalStateCache
+    ) -> None:
+        if self._inference_temporal_cache_limit <= 0:
+            return
+        self._inference_temporal_cache[key] = value
+        self._inference_temporal_cache.move_to_end(key)
+        while (
+            len(self._inference_temporal_cache)
+            > self._inference_temporal_cache_limit
+        ):
+            self._inference_temporal_cache.popitem(last=False)
+
+    def _get_temporal_cache(
+        self, key: object
+    ) -> _TemporalStateCache | None:
+        value = self._inference_temporal_cache.get(key)
+        if value is not None:
+            self._inference_temporal_cache.move_to_end(key)
+        return value
+
+    def _find_temporal_prefix(
+        self, state: PolicyState
+    ) -> tuple[_TemporalStateCache | None, int]:
+        # A player acts every two/four plies.  Eight covers the normal gap and
+        # keeps lookup O(1) instead of hashing every possible prefix.
+        maximum_gap = min(8, len(state.records) - 1)
+        for missing in range(maximum_gap + 1):
+            records = (
+                state.records
+                if missing == 0
+                else state.records[:-missing]
+            )
+            cached = self._get_temporal_cache((state.mode, records))
+            if cached is not None:
+                return cached, missing
+        return None, len(state.records)
+
+    def _record_board_batch(
+        self,
+        records: Sequence[StateTokenRecord],
+        mode: TrainingMode,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Encode only the newly appended records of an incremental batch."""
+
+        if not records:
+            raise ValueError("record batch cannot be empty")
+        spec = mode_spec(mode)
+        if any(len(record.board_codes) != spec.point_count for record in records):
+            raise ValueError("history board length does not match its mode")
+        requested_device = self.device
+        pin_memory = requested_device.type == "cuda"
+        codes = torch.tensor(
+            [record.board_codes for record in records],
+            dtype=torch.long,
+            pin_memory=pin_memory,
+        ).to(requested_device, non_blocking=pin_memory)
+        point_mask = torch.ones(
+            (len(records), spec.point_count),
+            dtype=torch.bool,
+            device=requested_device,
+        )
+        mode_ids = torch.full(
+            (len(records),),
+            spec.mode_index,
+            dtype=torch.long,
+            device=requested_device,
+        )
+        casualties: Tensor | None = None
+        if self.config.dead_rules_enabled:
+            casualty_cpu = torch.zeros(
+                (len(records), MAX_CASUALTY_BITS),
+                dtype=torch.float32,
+                pin_memory=pin_memory,
+            )
+            for index, record in enumerate(records):
+                if record.known_casualty_bits is None:
+                    raise ValueError("dead-rule model requires casualty history")
+                source = torch.tensor(
+                    record.known_casualty_bits, dtype=torch.float32
+                )
+                if mode is TrainingMode.FOUR_DARK:
+                    if source.numel() != MAX_CASUALTY_BITS:
+                        raise ValueError("four-dark casualty history requires 75 bits")
+                    casualty_cpu[index] = source
+                elif mode is TrainingMode.DOUBLE_OPEN:
+                    if source.numel() != 2 * CASUALTY_SLOTS_PER_PLAYER:
+                        raise ValueError("double-open casualty history requires 50 bits")
+                    casualty_cpu[index, :CASUALTY_SLOTS_PER_PLAYER] = source[
+                        :CASUALTY_SLOTS_PER_PLAYER
+                    ]
+                    casualty_cpu[index, 2 * CASUALTY_SLOTS_PER_PLAYER :] = source[
+                        CASUALTY_SLOTS_PER_PLAYER:
+                    ]
+                else:
+                    if source.numel() != CASUALTY_SLOTS_PER_PLAYER:
+                        raise ValueError("two-player casualty history requires 25 bits")
+                    casualty_cpu[
+                        index,
+                        CASUALTY_SLOTS_PER_PLAYER : 2 * CASUALTY_SLOTS_PER_PLAYER,
+                    ] = source
+            casualties = casualty_cpu.to(
+                requested_device, non_blocking=pin_memory
+            )
+        elif any(record.known_casualty_bits is not None for record in records):
+            raise ValueError("non-dead-rule model must not receive casualty history")
+
+        self._board_input_tokens += len(records)
+        self._board_unique_tokens += len(records)
+        self._board_encoder_tokens += len(records)
+        board_globals, point_tokens = self.board_encoder(
+            codes, point_mask, mode_ids, casualties
+        )
+        return board_globals, point_tokens, point_mask
+
+    def _record_temporal_tokens(
+        self,
+        records: Sequence[StateTokenRecord],
+        mode: TrainingMode,
+        board_globals: Tensor,
+        position: int,
+    ) -> Tensor:
+        if position >= self.config.max_sequence_tokens:
+            raise ValueError("incremental history exceeds model position capacity")
+        pin_memory = self.device.type == "cuda"
+        fields = torch.zeros(
+            (len(records), 1, 8), dtype=torch.long, pin_memory=pin_memory
+        )
+        present = torch.zeros(
+            (len(records), 1), dtype=torch.bool, pin_memory=pin_memory
+        )
+        for index, record in enumerate(records):
+            if record.action is not None:
+                fields[index, 0] = torch.tensor(
+                    record.action.as_tuple(), dtype=torch.long
+                )
+                present[index, 0] = True
+        fields = fields.to(self.device, non_blocking=pin_memory)
+        present = present.to(self.device, non_blocking=pin_memory)
+        actions = self.action_encoder(fields, present)
+        mode_id = mode_spec(mode).mode_index
+        scalar = lambda values: torch.tensor(
+            values, dtype=torch.long, device=self.device
+        ).unsqueeze(1)
+        tokens = torch.cat((actions, board_globals.unsqueeze(1)), dim=-1)
+        return (
+            tokens
+            + self.position_embedding(
+                torch.full(
+                    (len(records), 1),
+                    position,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+            )
+            + self.mode_embedding(
+                torch.full(
+                    (len(records), 1),
+                    mode_id,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+            )
+            + self.no_interaction_embedding(
+                scalar([record.no_interaction_plies for record in records])
+            )
+            + self.active_embedding(
+                scalar([record.active_mask for record in records])
+            )
+            + self.revealed_embedding(
+                scalar([record.revealed_mask for record in records])
+            )
+            + self.current_player_embedding(
+                scalar([record.current_player for record in records])
+            )
+        )
+
+    def _advance_temporal_group(
+        self,
+        states: Sequence[PolicyState],
+        prefixes: Sequence[_TemporalStateCache],
+        missing: int,
+    ) -> PolicyFeatures:
+        if not states or len(states) != len(prefixes):
+            raise ValueError("incremental state/cache batch mismatch")
+        mode = states[0].mode
+        if any(state.mode is not mode for state in states):
+            raise ValueError("incremental batch must use one mode")
+        caches = list(prefixes)
+        current_points: Tensor | None = None
+        point_mask: Tensor | None = None
+        if missing == 0:
+            _globals, current_points, point_mask = self._record_board_batch(
+                [state.records[-1] for state in states], mode
+            )
+            return PolicyFeatures(
+                torch.stack([cache.context for cache in caches]),
+                current_points,
+                point_mask,
+            )
+
+        for offset in range(missing):
+            position = caches[0].length
+            if any(cache.length != position for cache in caches):
+                raise ValueError("incremental cache lengths must be bucketed")
+            records = [
+                state.records[len(state.records) - missing + offset]
+                for state in states
+            ]
+            board_globals, current_points, point_mask = self._record_board_batch(
+                records, mode
+            )
+            hidden = self._record_temporal_tokens(
+                records, mode, board_globals, position
+            )
+            next_keys: list[Tensor] = []
+            next_values: list[Tensor] = []
+            for layer_index, layer in enumerate(self.temporal_layers):
+                past_keys = torch.stack(
+                    [cache.layer_keys[layer_index] for cache in caches]
+                )
+                past_values = torch.stack(
+                    [cache.layer_values[layer_index] for cache in caches]
+                )
+                hidden, keys, values = layer.incremental(
+                    hidden, past_keys=past_keys, past_values=past_values
+                )
+                next_keys.append(keys)
+                next_values.append(values)
+            contexts = self.temporal_norm(hidden).squeeze(1)
+            new_caches: list[_TemporalStateCache] = []
+            for index, state in enumerate(states):
+                new_cache = _TemporalStateCache(
+                    length=position + 1,
+                    layer_keys=tuple(
+                        values[index].detach() for values in next_keys
+                    ),
+                    layer_values=tuple(
+                        values[index].detach() for values in next_values
+                    ),
+                    context=contexts[index].detach(),
+                )
+                # Only retain the current tip.  Intermediate append states are
+                # never queried by turn-based self-play; keeping them would
+                # multiply contiguous KV memory without improving hit rate.
+                if offset == missing - 1:
+                    self._put_temporal_cache(
+                        (mode, state.records), new_cache
+                    )
+                new_caches.append(new_cache)
+            caches = new_caches
+            self._temporal_incremental_tokens += len(states)
+            self._temporal_computed_pairs += len(states) * (position + 1)
+        assert current_points is not None and point_mask is not None
+        return PolicyFeatures(contexts, current_points, point_mask)
+
+    def _encode_incremental(
+        self, states: Sequence[PolicyState]
+    ) -> PolicyFeatures:
+        if not states:
+            raise ValueError("cannot encode an empty policy batch")
+        modes = {state.mode for state in states}
+        if len(modes) != 1:
+            raise ValueError("a policy batch must use one information mode")
+
+        unique_states: list[PolicyState] = []
+        inverse: list[int] = []
+        state_to_unique: dict[object, int] = {}
+        for state in states:
+            key = (state.mode, state.records)
+            index = state_to_unique.get(key)
+            if index is None:
+                index = len(unique_states)
+                state_to_unique[key] = index
+                unique_states.append(state)
+            inverse.append(index)
+
+        self._history_input_states += len(states)
+        self._history_unique_states += len(unique_states)
+        self._raw_board_tokens += sum(len(state.records) for state in states)
+        self._temporal_requested_pairs += sum(
+            len(state.records) * (len(state.records) + 1) // 2
+            for state in unique_states
+        )
+
+        prefixes: list[_TemporalStateCache | None] = []
+        missing_counts: list[int] = []
+        for state in unique_states:
+            prefix, missing = self._find_temporal_prefix(state)
+            prefixes.append(prefix)
+            missing_counts.append(missing)
+            if prefix is not None:
+                self._temporal_cache_hits += 1
+
+        contexts: list[Tensor | None] = [None] * len(unique_states)
+        points: list[Tensor | None] = [None] * len(unique_states)
+        masks: list[Tensor | None] = [None] * len(unique_states)
+        cold_indices = [
+            index for index, prefix in enumerate(prefixes) if prefix is None
+        ]
+        if cold_indices:
+            cold_states = [unique_states[index] for index in cold_indices]
+            cold_features = self._encode_full(
+                cold_states, count_history_stats=False
+            )
+            for row, index in enumerate(cold_indices):
+                contexts[index] = cold_features.context[row]
+                points[index] = cold_features.current_points[row]
+                masks[index] = cold_features.point_mask[row]
+
+        buckets: dict[tuple[int, int], list[int]] = {}
+        for index, prefix in enumerate(prefixes):
+            if prefix is None:
+                continue
+            key = (prefix.length, missing_counts[index])
+            buckets.setdefault(key, []).append(index)
+        for (_prefix_length, missing), indices in buckets.items():
+            bucket_states = [unique_states[index] for index in indices]
+            bucket_prefixes = [prefixes[index] for index in indices]
+            features = self._advance_temporal_group(
+                bucket_states,
+                [item for item in bucket_prefixes if item is not None],
+                missing,
+            )
+            for row, index in enumerate(indices):
+                contexts[index] = features.context[row]
+                points[index] = features.current_points[row]
+                masks[index] = features.point_mask[row]
+
+        if any(item is None for item in contexts + points + masks):
+            raise RuntimeError("incremental cache did not produce every feature row")
+        unique_features = PolicyFeatures(
+            torch.stack([item for item in contexts if item is not None]),
+            torch.stack([item for item in points if item is not None]),
+            torch.stack([item for item in masks if item is not None]),
+        )
+        if len(unique_states) == len(states):
+            return unique_features
+        expansion = torch.tensor(inverse, dtype=torch.long, device=self.device)
+        return PolicyFeatures(
+            unique_features.context.index_select(0, expansion),
+            unique_features.current_points.index_select(0, expansion),
+            unique_features.point_mask.index_select(0, expansion),
+        )
+
     def encode(self, states: Sequence[PolicyState]) -> PolicyFeatures:
+        cache_active = (
+            self._inference_temporal_cache_limit > 0
+            and not self.training
+            and not torch.is_grad_enabled()
+        )
+        if cache_active:
+            return self._encode_incremental(states)
+        return self._encode_full(states)
+
+    def _encode_full(
+        self,
+        states: Sequence[PolicyState],
+        *,
+        count_history_stats: bool = True,
+    ) -> PolicyFeatures:
+        if not states:
+            raise ValueError("cannot encode an empty policy batch")
+        deduplicate = not self.training or self.config.dropout == 0.0
+        original_states = states
+        state_inverse: list[int] = []
+        if deduplicate:
+            unique_states: list[PolicyState] = []
+            state_to_unique: dict[object, int] = {}
+            for state in original_states:
+                key = (state.mode, state.records)
+                unique_offset = state_to_unique.get(key)
+                if unique_offset is None:
+                    unique_offset = len(unique_states)
+                    state_to_unique[key] = unique_offset
+                    unique_states.append(state)
+                state_inverse.append(unique_offset)
+            states = unique_states
+        else:
+            state_inverse = list(range(len(states)))
+        if count_history_stats:
+            self._history_input_states += len(original_states)
+            self._history_unique_states += len(states)
+            self._raw_board_tokens += sum(
+                len(state.records) for state in original_states
+            )
         batch = collate_policy_states(
             states,
             device=self.device,
             dead_rules_enabled=self.config.dead_rules_enabled,
         )
-        batch_size, time_steps, points = batch.board_codes.shape
+        batch_size, time_steps = batch.token_mask.shape
+        points = batch.board_codes.shape[1]
         flat_token_mask = batch.token_mask.reshape(-1)
         valid_indices = flat_token_mask.nonzero(as_tuple=False).squeeze(-1)
-        owner_indices = torch.div(valid_indices, time_steps, rounding_mode="floor")
-        flat_codes = batch.board_codes.reshape(-1, points)[valid_indices]
-        flat_casualties = (
-            None
-            if batch.casualty_bits is None
-            else batch.casualty_bits.reshape(-1, MAX_CASUALTY_BITS)[valid_indices]
-        )
+        owner_indices = batch.token_owner
+        flat_codes = batch.board_codes
+        flat_casualties = batch.casualty_bits
         flat_point_mask = batch.point_mask[owner_indices]
         flat_modes = batch.mode_ids[owner_indices]
 
-        globals_by_token = torch.zeros(
-            (batch_size * time_steps, self.config.board_dim),
-            dtype=next(self.parameters()).dtype,
-            device=self.device,
+        # Rollout branches and successive plies share most immutable history
+        # records.  Encode each distinct board/casualty pair once per call, and
+        # reuse detached global board tokens across frozen-policy calls.  With
+        # dropout enabled during training, per-token dropout semantics are kept
+        # by disabling the within-batch merge.
+        cache_active = (
+            self._inference_board_cache_limit > 0
+            and not self.training
+            and not torch.is_grad_enabled()
         )
-        current_points = torch.zeros(
-            (batch_size, points, self.config.board_dim),
-            dtype=globals_by_token.dtype,
-            device=self.device,
-        )
-        last_flat_indices = (
-            torch.arange(batch_size, device=self.device) * time_steps
-            + batch.token_mask.sum(dim=1)
-            - 1
-        )
+        unique_keys: list[object] = []
+        unique_source_offsets: list[int] = []
+        inverse_offsets: list[int] = []
+        last_unique_offsets: list[int] = []
+        key_to_unique: dict[object, int] = {}
+        compact_offset = 0
+        for state in states:
+            for record in state.records:
+                key: object
+                if deduplicate:
+                    key = (
+                        state.mode,
+                        record.board_codes,
+                        record.known_casualty_bits,
+                    )
+                else:
+                    key = compact_offset
+                unique_offset = key_to_unique.get(key)
+                if unique_offset is None:
+                    unique_offset = len(unique_keys)
+                    key_to_unique[key] = unique_offset
+                    unique_keys.append(key)
+                    unique_source_offsets.append(compact_offset)
+                inverse_offsets.append(unique_offset)
+                compact_offset += 1
+            last_unique_offsets.append(inverse_offsets[-1])
 
-        for start in range(0, valid_indices.numel(), self.config.board_chunk_size):
-            stop = min(start + self.config.board_chunk_size, valid_indices.numel())
-            chunk_indices = valid_indices[start:stop]
+        self._board_input_tokens += len(inverse_offsets)
+        self._board_unique_tokens += len(unique_keys)
+        current_unique = set(last_unique_offsets)
+        encode_unique: list[int] = []
+        global_rows: list[Tensor | None] = [None] * len(unique_keys)
+        current_point_rows: list[Tensor | None] = [None] * batch_size
+        if cache_active:
+            for unique_offset, key in enumerate(unique_keys):
+                cached = self._inference_board_cache.get(key)
+                if cached is not None and unique_offset not in current_unique:
+                    global_rows[unique_offset] = cached
+                    self._board_cache_hits += 1
+                else:
+                    encode_unique.append(unique_offset)
+        else:
+            encode_unique = list(range(len(unique_keys)))
+        self._board_encoder_tokens += len(encode_unique)
+
+        last_unique_tensor = torch.tensor(
+            last_unique_offsets, dtype=torch.long, device=self.device
+        )
+        for start in range(0, len(encode_unique), self.config.board_chunk_size):
+            chunk_unique = encode_unique[
+                start : start + self.config.board_chunk_size
+            ]
+            chunk_sources = torch.tensor(
+                [unique_source_offsets[index] for index in chunk_unique],
+                dtype=torch.long,
+                device=self.device,
+            )
             chunk_globals, chunk_points = self.board_encoder(
-                flat_codes[start:stop],
-                flat_point_mask[start:stop],
-                flat_modes[start:stop],
+                flat_codes.index_select(0, chunk_sources),
+                flat_point_mask.index_select(0, chunk_sources),
+                flat_modes.index_select(0, chunk_sources),
                 (
                     None
                     if flat_casualties is None
-                    else flat_casualties[start:stop]
+                    else flat_casualties.index_select(0, chunk_sources)
                 ),
             )
-            globals_by_token = globals_by_token.index_copy(
-                0, chunk_indices, chunk_globals
+            chunk_unique_tensor = torch.tensor(
+                chunk_unique, dtype=torch.long, device=self.device
             )
-            matches = chunk_indices.unsqueeze(1) == last_flat_indices.unsqueeze(0)
+            for local_offset, unique_offset in enumerate(chunk_unique):
+                global_rows[unique_offset] = chunk_globals[local_offset]
+                if (
+                    cache_active
+                    and unique_keys[unique_offset]
+                    not in self._inference_board_cache
+                    and len(self._inference_board_cache)
+                    < self._inference_board_cache_limit
+                ):
+                    self._inference_board_cache[unique_keys[unique_offset]] = (
+                        chunk_globals[local_offset].detach().clone()
+                    )
+            matches = (
+                chunk_unique_tensor.unsqueeze(1)
+                == last_unique_tensor.unsqueeze(0)
+            )
             local_indices, batch_indices = matches.nonzero(as_tuple=True)
-            if local_indices.numel():
-                current_points = current_points.index_copy(
-                    0, batch_indices, chunk_points[local_indices]
-                )
+            for local_index, batch_index in zip(
+                local_indices.tolist(), batch_indices.tolist(), strict=True
+            ):
+                current_point_rows[batch_index] = chunk_points[local_index]
+
+        if any(row is None for row in global_rows):
+            raise RuntimeError("board cache failed to provide a required token")
+        if any(row is None for row in current_point_rows):
+            raise RuntimeError("current board point embeddings were not encoded")
+        unique_globals = torch.stack(
+            [row for row in global_rows if row is not None]
+        )
+        inverse_tensor = torch.tensor(
+            inverse_offsets, dtype=torch.long, device=self.device
+        )
+        valid_globals = unique_globals.index_select(0, inverse_tensor)
+        globals_by_token = torch.zeros(
+            (batch_size * time_steps, self.config.board_dim),
+            dtype=valid_globals.dtype,
+            device=self.device,
+        ).index_copy(0, valid_indices, valid_globals)
+        current_points = torch.stack(
+            [row for row in current_point_rows if row is not None]
+        )
 
         board_globals = globals_by_token.view(batch_size, time_steps, -1)
         action_embeddings = self.action_encoder(
@@ -751,7 +1426,20 @@ class GamePolicyTransformer(nn.Module):
             ),
             float("-inf"),
         )
+        capture_temporal = (
+            self._inference_temporal_cache_limit > 0
+            and not self.training
+            and not torch.is_grad_enabled()
+        )
+        captured_keys: list[Tensor] = []
+        captured_values: list[Tensor] = []
         for layer in self.temporal_layers:
+            if capture_temporal:
+                keys, values = layer.projected_keys_values(
+                    layer.attention_norm(tokens)
+                )
+                captured_keys.append(keys)
+                captured_values.append(values)
             if self.training and self.config.activation_checkpointing:
                 tokens = checkpoint(
                     lambda values, block=layer: block(
@@ -771,7 +1459,52 @@ class GamePolicyTransformer(nn.Module):
         tokens = self.temporal_norm(tokens)
         last_indices = batch.token_mask.sum(dim=1) - 1
         contexts = tokens[torch.arange(batch_size, device=self.device), last_indices]
-        return PolicyFeatures(contexts, current_points, batch.point_mask)
+        features = PolicyFeatures(contexts, current_points, batch.point_mask)
+        if capture_temporal:
+            for index, state in enumerate(states):
+                length = len(state.records)
+                self._put_temporal_cache(
+                    (state.mode, state.records),
+                    _TemporalStateCache(
+                        length=length,
+                        layer_keys=tuple(
+                            values[index, :, :length].detach()
+                            for values in captured_keys
+                        ),
+                        layer_values=tuple(
+                            values[index, :, :length].detach()
+                            for values in captured_values
+                        ),
+                        context=contexts[index].detach(),
+                    ),
+                )
+                pairs = length * (length + 1) // 2
+                if count_history_stats:
+                    self._temporal_requested_pairs += pairs
+                self._temporal_computed_pairs += pairs
+                self._temporal_cold_states += 1
+        if len(states) != len(original_states):
+            expansion = torch.tensor(
+                state_inverse, dtype=torch.long, device=self.device
+            )
+            features = PolicyFeatures(
+                features.context.index_select(0, expansion),
+                features.current_points.index_select(0, expansion),
+                features.point_mask.index_select(0, expansion),
+            )
+        return features
+
+    def forward(
+        self,
+        states: Sequence[PolicyState],
+        actions_by_state: Sequence[Sequence[tuple[int, int]]],
+        temperature: float = 1.0,
+    ) -> list[Tensor]:
+        """DDP-compatible entry point for policy likelihood training."""
+
+        return self.log_probs_for_action_groups(
+            states, actions_by_state, temperature=temperature
+        )
 
     def _source_log_probs(
         self,

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 from .models import GamePolicyTransformer, PieceConditionedLayoutPointerDecoder
 from .rollout import LayoutOutcome, PolicyGroup
@@ -19,7 +19,7 @@ class LossOutput:
 
 
 def policy_grpo_loss(
-    policy: GamePolicyTransformer,
+    policy: nn.Module,
     reference: GamePolicyTransformer,
     groups: Sequence[PolicyGroup],
     *,
@@ -33,7 +33,10 @@ def policy_grpo_loss(
         raise ValueError("policy GRPO requires at least one complete anchor group")
     states = [group.state for group in groups]
     all_actions = [state.legal_actions for state in states]
-    current_logs = policy.log_probs_for_action_groups(states, all_actions)
+    # Calling the module entry point is required for DistributedDataParallel to
+    # install its forward/backward synchronization hooks.
+    current_logs = policy(states, all_actions)
+    device = current_logs[0].device
     with torch.no_grad():
         reference_logs = reference.log_probs_for_action_groups(states, all_actions)
 
@@ -51,14 +54,14 @@ def policy_grpo_loss(
         indices = torch.tensor(
             [action_to_index[action] for action in group.candidate_actions],
             dtype=torch.long,
-            device=policy.device,
+            device=device,
         )
         candidate_current.append(current[indices])
         candidate_old.append(
-            torch.tensor(group.old_log_probs, dtype=torch.float32, device=policy.device)
+            torch.tensor(group.old_log_probs, dtype=torch.float32, device=device)
         )
         advantages.append(
-            torch.tensor(group.advantages, dtype=torch.float32, device=policy.device)
+            torch.tensor(group.advantages, dtype=torch.float32, device=device)
         )
         probabilities = current.exp()
         kls.append((probabilities * (current - ref)).sum())

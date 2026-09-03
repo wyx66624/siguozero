@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from typing import Sequence
 
+from .distributed import DistributedContext
 from .modes import TrainingMode
 from .settings import TrainingSettings
 from .trainer import SelfPlayTrainer
@@ -47,6 +49,13 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
     parser.set_defaults(dead_rules_enabled=None)
     parser.add_argument("--device", default=None, help="auto, cpu, cuda, or cuda:N")
     parser.add_argument(
+        "--local-rank",
+        "--local_rank",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--model-scale",
         choices=("bootstrap", "main", "extended"),
         default="bootstrap",
@@ -61,6 +70,14 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
     parser.add_argument("--anchor-batch", type=int, default=None)
     parser.add_argument("--microbatch", type=int, default=None)
     parser.add_argument("--actor-batch", type=int, default=None)
+    parser.add_argument("--rollout-anchor-wave", type=int, default=None)
+    parser.add_argument("--environment-workers", type=int, default=None)
+    parser.add_argument("--temporal-cache-entries", type=int, default=None)
+    parser.add_argument(
+        "--no-incremental-inference",
+        action="store_true",
+        help="disable rollout KV reuse for an exact A/B benchmark",
+    )
     parser.add_argument("--base-game-pool", type=int, default=None)
     parser.add_argument("--max-game-plies", type=int, default=None)
     parser.add_argument("--checkpoint-every", type=int, default=None)
@@ -109,6 +126,10 @@ def main(
         overrides["policy_microbatch"] = args.microbatch
     if args.actor_batch is not None:
         overrides["actor_inference_batch"] = args.actor_batch
+    if args.rollout_anchor_wave is not None:
+        overrides["rollout_anchor_wave_size"] = args.rollout_anchor_wave
+    if args.environment_workers is not None:
+        overrides["rollout_environment_workers"] = args.environment_workers
     if args.base_game_pool is not None:
         overrides["base_game_pool_size"] = args.base_game_pool
     if args.max_game_plies is not None:
@@ -135,13 +156,37 @@ def main(
         dead_rules_enabled=args.dead_rules_enabled,
         overrides=overrides,
     )
-    run_directory = settings.resolve_run_directory(args.run_directory)
-    trainer = SelfPlayTrainer(
-        settings,
-        run_directory=run_directory,
-        auto_resume=not args.no_resume,
-    )
-    trainer.train()
+    if args.temporal_cache_entries is not None or args.no_incremental_inference:
+        settings = replace(
+            settings,
+            model=replace(
+                settings.model,
+                inference_temporal_cache_entries=(
+                    settings.model.inference_temporal_cache_entries
+                    if args.temporal_cache_entries is None
+                    else args.temporal_cache_entries
+                ),
+                incremental_inference=(
+                    False
+                    if args.no_incremental_inference
+                    else settings.model.incremental_inference
+                ),
+            ),
+        )
+        settings.validate()
+    distributed = DistributedContext.initialize(settings.device)
+    try:
+        settings = replace(settings, device=str(distributed.device))
+        run_directory = settings.resolve_run_directory(args.run_directory)
+        trainer = SelfPlayTrainer(
+            settings,
+            run_directory=run_directory,
+            auto_resume=not args.no_resume,
+            distributed=distributed,
+        )
+        trainer.train()
+    finally:
+        distributed.close()
 
 
 if __name__ == "__main__":

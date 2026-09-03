@@ -34,7 +34,10 @@
 10. [死规则特征开关与消融训练](dead_rule_ablation_zh.md)  
     定义 `--dead-rules/--no-dead-rules` 的规则、输入和模型结构边界，以及两种变体的目录与检查点隔离。
 
-11. [模型架构与训练系统 PDF](../output/pdf/siguozero_model_architecture_zh.pdf)  
+11. [多 GPU 训练与历史编码加速设计](multi_gpu_and_performance_zh.md)  
+    定义 torchrun/DDP 数据分片、每 rank 检查点、全局 batch 语义，以及已实现的增量 causal KV、持久 COW 历史、packed/ragged 输入、规则热路径和 RTX 4090 A/B 实测。
+
+12. [模型架构与训练系统 PDF](../output/pdf/siguozero_model_architecture_zh.pdf)  
     用架构图汇总布局 Pointer、动作与棋盘 token、策略 Transformer、4×2 Game-GRPO、训练闭环、检查点及 CUDA 实测；其中架构图按默认带死规则版本绘制，关闭态差异见第 10 项。
 
 ## 文档关系

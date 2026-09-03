@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,9 @@ class TrainingSettings:
     anchor_batch: int
     policy_microbatch: int
     actor_inference_batch: int
+    rollout_anchor_wave_size: int
+    rollout_environment_workers: int
+    learner_length_bucketing: bool
     policy_epochs: int
     policy_learning_rate: float
     minimum_learning_rate: float
@@ -123,6 +126,18 @@ class TrainingSettings:
             raise ValueError(
                 "model_scale must be bootstrap, main, or extended"
             )
+        model = replace(
+            model,
+            inference_board_cache_entries=int(
+                runtime.get("inference_board_cache_entries", 65536)
+            ),
+            inference_temporal_cache_entries=int(
+                runtime.get("inference_temporal_cache_entries", 192)
+            ),
+            incremental_inference=bool(
+                runtime.get("incremental_inference", True)
+            ),
+        )
         profile_pool = runtime.get("base_game_pool_size", {})
         microbatch_profile = runtime.get("policy_microbatch", 1)
         policy_microbatch = (
@@ -149,6 +164,15 @@ class TrainingSettings:
             "policy_microbatch": policy_microbatch,
             "actor_inference_batch": int(
                 runtime.get("actor_inference_batch", 64)
+            ),
+            "rollout_anchor_wave_size": int(
+                runtime.get("rollout_anchor_wave_size", 8)
+            ),
+            "rollout_environment_workers": int(
+                runtime.get("rollout_environment_workers", 2)
+            ),
+            "learner_length_bucketing": bool(
+                runtime.get("learner_length_bucketing", True)
             ),
             "policy_epochs": int(
                 runtime.get("policy_epochs", learner["max_epochs_per_batch"])
@@ -211,6 +235,8 @@ class TrainingSettings:
                     "anchor_batch": 1,
                     "policy_microbatch": 1,
                     "actor_inference_batch": 16,
+                    "rollout_anchor_wave_size": 1,
+                    "rollout_environment_workers": 1,
                     "policy_epochs": 1,
                     "warmup_updates": 1,
                     "layout_update_interval": 1,
@@ -247,6 +273,8 @@ class TrainingSettings:
             "anchor_batch": self.anchor_batch,
             "policy_microbatch": self.policy_microbatch,
             "actor_inference_batch": self.actor_inference_batch,
+            "rollout_anchor_wave_size": self.rollout_anchor_wave_size,
+            "rollout_environment_workers": self.rollout_environment_workers,
             "policy_epochs": self.policy_epochs,
             "layout_update_interval": self.layout_update_interval,
             "layout_outcomes_per_update": self.layout_outcomes_per_update,
@@ -274,6 +302,8 @@ class TrainingSettings:
             raise ValueError("amp must be bfloat16, float16, or float32")
         if self.keep_checkpoint_archives < 0:
             raise ValueError("keep checkpoint archives cannot be negative")
+        if not isinstance(self.learner_length_bucketing, bool):
+            raise ValueError("learner_length_bucketing must be a boolean")
 
     def serializable(self) -> dict[str, Any]:
         values = asdict(self)

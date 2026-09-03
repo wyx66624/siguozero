@@ -392,7 +392,7 @@ def policy_diagram() -> Drawing:
     add_box(d, 120, 84, 104, 62, "Casualty Projection", ("75 -> 256", "固定 25 槽/玩家", "布局顺序复用"), fill=PALE_ORANGE)
     add_box(d, 250, 151, 100, 72, "棋盘状态融合", ("concat 两个 256", "Linear + SiLU + LN", "输出 g_t: 256"), fill=CYAN)
     add_box(d, 250, 58, 100, 62, "ActionEncoder", ("起终点/行动者", "战斗/揭旗/淘汰", "输出 q_t: 256"), fill=PALE_ORANGE)
-    add_box(d, 380, 151, 92, 72, "时序 Transformer", ("[q_t ; g_t]", "d=512, causal", "最长 1001 token"), fill=PALE_GREEN)
+    add_box(d, 380, 151, 92, 72, "时序 Transformer", ("[q_t ; g_t]", "d=512, causal", "rollout 增量 KV"), fill=PALE_GREEN)
     add_box(d, 380, 58, 92, 62, "两阶段动作头", ("起点概率", "条件终点概率", "动态合法 mask"), fill=PALE_RED)
     add_arrow(d, 96, 207, 120, 207)
     add_arrow(d, 224, 207, 250, 188)
@@ -426,7 +426,7 @@ def training_loop_diagram() -> Drawing:
     d = Drawing(480, 230)
     add_box(d, 8, 145, 86, 58, "共享 current", ("1 Policy + 1 Layout", "全座位唯一实例"), fill=PALE_GREEN)
     add_box(d, 122, 145, 86, 58, "采样阶段冻结", ("同一 current 对象", "保存 old log-prob"), fill=CYAN)
-    add_box(d, 236, 145, 96, 58, "GPU Actor 批处理", ("基础局 + 8 分支", "全程概率采样"), fill=PALE_ORANGE)
+    add_box(d, 236, 145, 96, 58, "GPU Actor 批处理", ("8 锚点有界波", "COW 历史 + 增量 KV"), fill=PALE_ORANGE)
     add_box(d, 360, 145, 112, 58, "终局完整样本", ("Policy 根组", "Layout 轨迹", "+1 / 0 / -1"), fill=PALE_RED)
     add_box(d, 236, 50, 96, 58, "双 Learner", ("GRPO + KL - entropy", "AdamW + grad clip"), fill=PALE_GREEN)
     add_box(d, 8, 50, 86, 58, "单份 reference", ("仅作 KL", "不控制任何座位"), fill=CYAN)
@@ -817,14 +817,14 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
         [
             Paragraph("7. CUDA 容量实测与训练预算", s["h1"]),
             Paragraph(
-                "实测平台：WSL2 Ubuntu 24.04，RTX 4090 24GB，PyTorch 2.11.0+cu130。容量表来自阵亡融合前一同构版本；新增模块仅约 0.1% Policy 参数，不改变起测 microbatch。共享 current Policy/Layout 各一份及 KL reference 各一份常驻；没有四份座位模型。",
+                "实测平台：WSL2 Ubuntu 24.04，RTX 4090 24GB，PyTorch 2.11.0+cu130。共享 current Policy/Layout 各一份及 KL reference 各一份常驻；没有四份座位模型。rev.14 的 rollout cache 只保存冻结前缀，进入 learner 前清空。",
                 s["body"],
             ),
             make_table(
                 [
                     ["模型", "microbatch", "单步时间", "峰值分配", "24GB 默认"],
                     ["bootstrap", "1 / 8 / 16 / 24", "0.59 / 2.57 / 4.98 / 7.06 s", "1.71 / 7.09 / 13.79 / 20.48 GiB", "16"],
-                    ["main", "1 / 4 / 8 / 12", "0.89 / 2.40 / 4.39 / 6.30 s", "3.55 / 7.18 / 12.68 / 18.20 GiB", "8"],
+                    ["main 二人", "8 / 16 / 24", "3.54 / 6.55 / 9.23 s", "7.59 / 13.53 / 19.46 GiB", "24*"],
                     ["extended", "1 / 8", "1.22 / 6.49 s", "5.32 / 17.72 GiB", "6"],
                 ],
                 [85, 105, 125, 125, 40],
@@ -854,7 +854,7 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
             ),
             Spacer(1, 3 * mm),
             Paragraph(
-                "H100/H200 microbatch 与墙钟时间必须在目标集群实测；减少到 4x2 显著降低 Actor 总量，但不会按同倍率降低单条 1001-token 序列的峰值显存。",
+                "* 二人 main 正式任务先请求 microbatch=24；真实长局或分配碎片 OOM 时，单卡 trainer 会在尚未 step 的原子 epoch 内自动降为 12。H100/H200 microbatch 与墙钟时间必须在目标集群实测。",
                 s["body"],
             ),
             PageBreak(),
@@ -865,7 +865,7 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
         [
             Paragraph("8. 二人/双明 RTX 4090 实测与 H100 microbatch", s["h1"]),
             Paragraph(
-                "以下容量探针采自扩展码表与阵亡融合前的同构 main Policy（143,992,584 参数）；当前模型为 144,157,704，共增加 165,120 参数（约 0.115%，BF16 权重约 323 KiB），故保留原测值作为起测档。条件为最长 1001-token、BF16、activation checkpoint、共享 current 与 KL reference 常驻；正式长跑按 revision 11 再做 OOM 上探。时间不含规则 Actor。",
+                "以下 learner 容量探针条件为最长 1001-token、BF16、activation checkpoint、共享 current 与 KL reference 常驻。当前 main Policy 为 144,157,704 参数；正式长跑按 revision 14 请求二人 microbatch=24，并保留自动降到 12 的原子 OOM 回退。时间不含规则 Actor。",
                 s["body"],
             ),
             make_table(
@@ -915,15 +915,15 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
 
     story.extend(
         [
-            Paragraph("9. RTX 4090 训练时间：1 卡、2 卡与 4 卡", s["h1"]),
+            Paragraph("9. rev.14 实测吞吐与 30 亿步时间", s["h1"]),
             Paragraph(
-                "墙钟估算从现有 H100-GPU-day 容量预算换算。对本项目混合的 Transformer、图棋盘编码和规则环境负载，采用 1 张 4090 等效 0.30 张 H100 的规划系数；2 卡按 90% 并行效率，4 卡按 80%。这比直接比较峰值 FLOPS 更适合预算，但仍需以长局 benchmark 校准。",
+                "rev.14 已实现持久 COW 历史、逐 token causal KV、packed 棋盘、长度分桶和规则静态查表。RTX 4090 自然终局 main 探针：64 条 continuation 共 22,327 步，用时 51.76 s，即 431.37 步/s；完整训练栈常驻，CUDA 峰值分配 9.22 GiB。固定 256 步 A/B 从 179.6 提升到 435.4 步/s（2.42x）。",
                 s["body"],
             ),
             latex_box(
                 "wall_clock_projection",
-                r"T_{4090}(n)=\frac{D_{H100}}{0.30\,n\,\eta_n},\qquad "
-                r"\eta_1=1,\;\eta_2=0.90,\;\eta_4=0.80",
+                r"T_{\mathrm{days}}=\frac{3\times10^9-N_{\mathrm{done}}}"
+                r"{v_{\mathrm{plies/s}}\,86400\,a}",
                 font_size=20,
                 max_height=40,
                 fill=PALE_GREEN,
@@ -931,29 +931,29 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
             Spacer(1, 3 * mm),
             make_table(
                 [
-                    ["模式 / 累计阶段", "H100 GPU-days", "1×4090", "2×4090", "4×4090"],
-                    ["二人冷启动", "2-3", "7-10 天", "4-6 天", "2-3 天"],
-                    ["二人主训练", "9-14", "30-47 天", "17-26 天", "9-15 天"],
-                    ["二人顶尖容量", "29-128", "97-427 天", "54-237 天", "30-133 天"],
-                    ["双明冷启动", "9-13", "30-43 天", "17-24 天", "9-14 天"],
-                    ["双明主训练", "58-87", "193-290 天", "107-161 天", "60-91 天"],
-                    ["双明顶尖容量", "185-834", "617-2780 天", "343-1544 天", "193-869 天"],
+                    ["硬件", "聚合吞吐", "纯 rollout", "含 learner/评测规划"],
+                    ["1× RTX 4090", "431 步/s（实测）", "80.5 天", "100-115 天"],
+                    ["2× RTX 4090", "约 759 步/s", "45.7 天", "55-65 天"],
+                    ["4× RTX 4090", "约 1,294 步/s", "26.8 天", "32-40 天"],
+                    ["1× RTX PRO 6000 96GB", "750-1,050 步/s", "33-46 天", "45-60 天"],
+                    ["2× RTX PRO 6000 96GB", "1,300-1,850 步/s", "19-27 天", "26-38 天"],
+                    ["1× H100 / B200 / B300", "850-1,650 步/s", "21-41 天", "27-55 天"],
                 ],
-                [125, 95, 85, 85, 90],
+                [145, 115, 95, 125],
                 s["tiny"],
             ),
             Spacer(1, 4 * mm),
             Paragraph(
-                "阶段数字是累计目标，不能把冷启动、主训练和顶尖容量三行再次相加。若总共只有 2 张 4090 且同时训练二人与双明，现实分配是一种模式 1 张，整体完成时间由双明的 1 卡列决定；总共 4 张且每种模式分 2 张时，由双明的 2 卡列决定。",
+                "4090 多卡按 DDP 效率 88%（2 卡）和 75%（4 卡）外推。PRO/H100/B200/B300 均未在本项目实测；更大显存允许增大 actor/learner batch，但 Python 裁判和小 kernel 使速度不会按峰值 TOPS 线性增长。",
                 s["body"],
             ),
             callout(
-                "重要：当前仓库是单 GPU trainer。2/4 卡的单模式加速列要求先实现 DDP/FSDP、原生并行环境、增量 KV cache 与八分支前缀共享；在此之前，多卡只能并行跑不同模式、随机种子或评测任务。",
+                "当前仓库已支持 torchrun/DDP：每 GPU 一个同步计算 rank，但每个 rank 内所有座位仍共享同一 Policy/Layout。表中跨卡数值仍需目标机器完整 update 复测。",
                 s["callout"],
-                PALE_RED,
+                PALE_ORANGE,
             ),
             Paragraph(
-                "灵敏度：若实测 4090/H100 等效比只有 0.25，表中时间乘 1.20；若达到 0.35，则乘 0.86。消费卡缺少 NVLink，多卡效率对 PCIe 拓扑和 CPU 规则 Actor 尤其敏感。",
+                "30 亿步是累计 continuation_plies，不是 optimizer step，也不是冠军保证。单卡当前先按 3.3-3.8 个月；完成首个 update 后使用至少 10 个 update 的移动中位数重算。",
                 s["small"],
             ),
             PageBreak(),
@@ -991,6 +991,7 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
                 [
                     ["问题", "答案"],
                     ["每次 update", "每个模式 1,024 个终局 rollout"],
+                    ["二人 30 亿步", "取决于平均剩余局长；当前规划 8.6M-16.4M rollouts，约 8.4K-16.1K updates"],
                     ["先完成可用主训练", "每模式累计 64M；二人 + 双明一共 128M"],
                     ["冲击顶尖棋力", "每模式累计 204.8M-614.4M；两模式合计 409.6M-1.2288B"],
                     ["是否保证顶尖", "不保证；每 10K-25K updates 依据历史回归、人类盲测和熵决定继续或停止"],
@@ -1013,10 +1014,10 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
             make_table(
                 [
                     ["验证", "结果"],
-                    ["规则/编码/共享测试", "93 项 pytest 全部通过（另含 129 个参数化子例），覆盖确定身份/阵亡先验、60 步判和、暗子隔离与座位共享"],
+                    ["规则/编码/共享测试", "97 项 pytest 全部通过（另含 129 个参数化子例），覆盖确定身份/阵亡先验、60 步判和、暗子隔离、座位共享与 DDP"],
                     ["4x2 rollout", "严格生成 4 个根候选 x 2 副本，全部运行到规则终局"],
                     ["三模式 CUDA", "四暗 / 双明 / 二人分别完成训练 update、下一 update 自动恢复和检查点推理"],
-                    ["恢复完整性", "格式 v3 保存布局缓冲、中盘、逐玩家身份/阵亡库存、历史、模型/优化器/reference 与 RNG"],
+                    ["恢复完整性", "格式 v4 保存布局缓冲、中盘、逐玩家身份/阵亡库存、历史、模型/优化器/reference 与各 rank RNG"],
                     ["最长上下文", "bootstrap/main/extended 均完成四暗 1001-token CUDA 前向、反向和 AdamW 容量探针"],
                 ],
                 [125, 355],
@@ -1029,7 +1030,8 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
                     "python -m junqi.training.train_double_open --device cuda<br/>"
                     "python -m junqi.training.train_two_player --device cuda<br/><br/>"
                     "python -m junqi.training.infer_four_dark --checkpoint runs/four_dark/checkpoints/latest.pt<br/>"
-                    "python tools/benchmark_cuda.py --mode four_dark --model-scale main --context-tokens 1001 --batch-size 8",
+                    "python tools/benchmark_cuda.py --mode four_dark --model-scale main --context-tokens 1001 --batch-size 8<br/>"
+                    "python tools/benchmark_rollout.py --mode two_player --model-scale main --anchors 8 --max-game-plies 600 --full-stack",
                     s["code"],
                 )]],
                 colWidths=[480],
@@ -1046,12 +1048,12 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
             ),
             Paragraph("达到大规模预算前仍需完成", s["h2"]),
             Paragraph(
-                "1) C++/Rust 或编译向量化规则 Actor，并与 Python 裁判差分；2) 1000 步时序增量/paged KV cache；3) 八分支 copy-on-write 环境与前缀；4) 单模式 DDP/FSDP actor-learner；5) 训练外历史回归、人类盲测和长期断电演练。当前代码是正确、可运行、可恢复的单机 PyTorch 基线，不应把短冒烟吞吐外推成冠军训练完成日期。",
+                "已完成：单机 DDP、增量 causal KV、持久 COW 历史、packed 棋盘、长度分桶与规则静态查表。后续：1) C++/Rust 完整批量裁判并与 Python 裁判差分；2) 自定义 paged-attention/CUDA Graph，消除 K/V stack/cat；3) 一版本 behavior snapshot 的跨 update Actor/Learner 流水；4) 训练外历史回归、人类盲测和长期断电演练。",
                 s["body"],
             ),
             Paragraph("实现与研究依据", s["h2"]),
             Paragraph(
-                "代码：src/junqi/training/；配置：bootstrap.yaml rev.11；资源表：docs/training_resources_zh.md。规则依据：<link href='https://www.gameabc.com/news/201704/3333.html' color='#2B6CB0'>边锋军棋规则</link>、<link href='https://www.junqi.app/zh/rules' color='#2B6CB0'>军棋玩法指南</link>。硬件规格：<link href='https://www.nvidia.com/en-us/data-center/h100/' color='#2B6CB0'>NVIDIA H100</link>、<link href='https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf' color='#2B6CB0'>NVIDIA Ada/RTX 4090 白皮书</link>。4090/H100 的 0.30 等效比是项目规划假设，不是 NVIDIA 官方 benchmark。",
+                "代码：src/junqi/training/；配置：bootstrap.yaml rev.14；资源表：docs/training_resources_zh.md。规则依据：<link href='https://www.gameabc.com/news/201704/3333.html' color='#2B6CB0'>边锋军棋规则</link>、<link href='https://www.junqi.app/zh/rules' color='#2B6CB0'>军棋玩法指南</link>。硬件规格：<link href='https://www.nvidia.com/en-us/data-center/h100/' color='#2B6CB0'>NVIDIA H100</link>、<link href='https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory-h100-h200-b200/latest/components.html' color='#2B6CB0'>NVIDIA HGX B200</link>、<link href='https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-6000-family/' color='#2B6CB0'>RTX PRO 6000</link>。跨卡时间是项目推算，不是 NVIDIA benchmark。",
                 s["small"],
             ),
         ]

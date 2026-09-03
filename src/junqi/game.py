@@ -1168,6 +1168,8 @@ class JunqiGame:
         viewer: int | None = None,
         *,
         history_limit: int | None = 1000,
+        include_legal_masks: bool = True,
+        include_candidate_masks: bool = True,
     ) -> Observation:
         if viewer is None:
             if self._current_player is None:
@@ -1200,8 +1202,10 @@ class JunqiGame:
                 kind=known_kind,
                 identity_visible=visible,
                 has_moved=piece.has_moved,
-                candidate_mask=tuple(
-                    kind in candidates for kind in PIECE_TYPE_ORDER
+                candidate_mask=(
+                    tuple(kind in candidates for kind in PIECE_TYPE_ORDER)
+                    if include_candidate_masks
+                    else ()
                 ),
             )
 
@@ -1212,13 +1216,17 @@ class JunqiGame:
         )
         mask = (
             self.legal_action_mask(viewer)
-            if viewer == self._current_player
+            if include_legal_masks and viewer == self._current_player
             else tuple(False for _ in board.actions)
+            if include_legal_masks
+            else ()
         )
         origin_mask = (
             self.legal_origin_mask(viewer)
-            if viewer == self._current_player
+            if include_legal_masks and viewer == self._current_player
             else tuple(False for _ in board.action_space.origin_codes)
+            if include_legal_masks
+            else ()
         )
         selected_history = (
             self._public_history
@@ -1378,15 +1386,20 @@ class JunqiGame:
             return ()
 
         board = self._boards[player]
-        occupied = frozenset(board.encode(point) for point in self._pieces)
+        encoded_pieces = tuple(
+            (board.encode(point), point, piece)
+            for point, piece in self._pieces.items()
+        )
+        occupants = {code: piece for code, _point, piece in encoded_pieces}
+        occupied = frozenset(occupants)
         actions: list[Action] = []
         owned_starts = sorted(
             (
-                board.encode(point),
+                code,
                 point,
                 piece,
             )
-            for point, piece in self._pieces.items()
+            for code, point, piece in encoded_pieces
             if piece.owner == player and piece.movable
         )
         for start, point, piece in owned_starts:
@@ -1395,7 +1408,18 @@ class JunqiGame:
             for target in sorted(
                 self._geometric_targets(board, start, piece, occupied)
             ):
-                if self._target_is_enterable(player, target, board):
+                occupant = occupants.get(target)
+                if (
+                    occupant is None
+                    or (
+                        occupant.owner != player
+                        and not (
+                            self.config.variant is GameVariant.FOUR_PLAYER
+                            and player % 2 == occupant.owner % 2
+                        )
+                        and board.point(target).kind is not PointKind.CAMP
+                    )
+                ):
                     actions.append((start, target))
 
         result = tuple(actions)

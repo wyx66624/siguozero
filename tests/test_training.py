@@ -285,7 +285,7 @@ class ObservationEncodingTests(unittest.TestCase):
             state = PolicyState(mode, (record,), original.legal_actions)
             batch = collate_policy_states([state], device="cpu")
             actual_indices = tuple(
-                batch.casualty_bits[0, 0].nonzero().flatten().tolist()
+                batch.casualty_bits[0].nonzero().flatten().tolist()
             )
             self.assertEqual(actual_indices, expected_indices)
             contexts = model.encode([original, state]).context
@@ -345,6 +345,54 @@ class NeuralModelTests(unittest.TestCase):
             self.assertEqual(len(action_groups[0]), 4)
             self.assertTrue(all(action in game.legal_actions() for action in action_groups[0]))
             self.assertTrue(torch.isfinite(logs[0]).all())
+
+    def test_frozen_actor_deduplicates_and_caches_history_boards_exactly(self) -> None:
+        from junqi.training.encoding import GameHistory
+        from junqi.training.models import GamePolicyTransformer, ModelConfig
+        from junqi.training.modes import TrainingMode, new_game
+
+        config = ModelConfig.tiny()
+        uncached = GamePolicyTransformer(config).eval()
+        cached = copy.deepcopy(uncached).eval()
+        game = new_game(TrainingMode.TWO_PLAYER, seed=33, max_plies=8)
+        history = GameHistory.initialize(
+            game, TrainingMode.TWO_PLAYER, max_transitions=16
+        )
+        initial = history.state_for(game, 0)
+
+        with torch.inference_mode():
+            expected_initial = uncached.encode([initial, initial])
+            cached.start_inference_board_cache(max_entries=64)
+            actual_initial = cached.encode([initial, initial])
+        torch.testing.assert_close(actual_initial.context, expected_initial.context)
+        torch.testing.assert_close(
+            actual_initial.current_points, expected_initial.current_points
+        )
+
+        game.step(game.legal_actions()[0])
+        history.append_after_step(game)
+        advanced = history.state_for(game, 0)
+        with torch.inference_mode():
+            expected_advanced = uncached.encode([advanced])
+            actual_advanced = cached.encode([advanced])
+        torch.testing.assert_close(actual_advanced.context, expected_advanced.context)
+        torch.testing.assert_close(
+            actual_advanced.current_points, expected_advanced.current_points
+        )
+
+        metrics = cached.board_encoding_metrics()
+        self.assertEqual(metrics["encoding/raw_board_tokens"], 4.0)
+        self.assertEqual(metrics["encoding/board_input_tokens"], 2.0)
+        self.assertEqual(metrics["encoding/board_unique_tokens"], 2.0)
+        self.assertEqual(metrics["encoding/board_encoder_tokens"], 2.0)
+        self.assertGreater(
+            metrics["encoding/within_batch_history_saved_fraction"], 0.0
+        )
+        self.assertGreater(metrics["encoding/temporal_cache_hits"], 0.0)
+        self.assertGreater(
+            metrics["encoding/temporal_attention_saved_fraction"], 0.0
+        )
+        self.assertEqual(metrics["encoding/board_encoder_saved_fraction"], 0.5)
 
     def test_four_seats_reuse_the_exact_same_inference_model(self) -> None:
         from junqi.training.inference import InferenceEngine

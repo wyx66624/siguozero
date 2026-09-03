@@ -181,24 +181,22 @@ main 模型、1,001 token、BF16、activation checkpoint、共享 current 与 KL
 
 ### 7.2 当前二人 30 亿步的实际时间判断
 
-30 亿步作为二人“冷启动后扩大验证”里程碑是合理的：它约为冷启动分叉步预算的 `2.05` 倍，但只有正式主训练预算的 `25.7%`，所以不能被描述为顶尖棋力训练终点。时间取决于端到端 Actor 吞吐，而不是上节 learner 单步速度：
+30 亿步作为二人“冷启动后扩大验证”里程碑是合理的：它约为冷启动分叉步预算的 `2.05` 倍，但只有正式主训练预算的 `25.7%`，所以不能被描述为顶尖棋力训练终点。rev.14 已启用增量 KV、持久 COW 历史、packed 棋盘、长度分桶和规则静态查表；时间取决于端到端 Actor 吞吐，而不是 learner microbatch：
 
 | 二人端到端吞吐 | 30 亿步纯运行时间 | 按 90% 可用率 | 结论 |
 |---:|---:|---:|---|
-| 当前 bootstrap 实测 138.86 步/s | 250.1 天 | 277.8 天 | 约 9.1 个月；这是 main 首轮完成前的乐观下界，不是 main 实测 |
-| main 若为 100 步/s | 347.2 天 | 385.8 天 | 约 12.7 个月 |
-| main 若为 70 步/s | 496.0 天 | 551.1 天 | 约 18.1 个月 |
-| main 若为 50 步/s | 694.4 天 | 771.6 天 | 约 25.3 个月 |
+| rev.14 main 自然终局实测 431.37 步/s | 80.5 天 | 89.4 天 | 加 learner/评测后先按 100～115 天 |
+| 1,000 步/s | 34.7 天 | 38.6 天 | 约 6 周，仍需实测原生 Actor/更快 GPU |
 | 工程启动门槛 2,000 步/s | 17.4 天 | 19.3 天 | 达标后可以启动阶段训练 |
 | 优化目标 3,000 步/s | 11.6 天 | 12.9 天 | 可在约两周内完成纯采样 |
 
-当前 30 亿步任务已按明确指令启动，用来同时训练和取得 main 模型真实长期吞吐；不再把 bootstrap 小样本外推当成最终工期。`9.1` 个月只有在 32 层 main 保持 8 层 bootstrap 的 `138.86` 步/s 时才成立，因而只能视为乐观下界。main 的 1,001-token learner 同 batch 实测已比 bootstrap 慢约 `1.7x`，但这不能直接当作 Actor 比例；在首轮 main 数据出来前，当前未优化实现应先按约 `12～24` 个月做容量规划。首个完整 update 结束后，使用 `metrics.jsonl` 中的真实 `rollout/plies_per_second` 重新估算，之后用至少 10 个 update 的移动中位数更新 ETA：
+实测命令使用 `tools/benchmark_rollout.py`，完整训练栈常驻，`64` 条续局共 `22,327` 步、`51.76 s`，峰值 CUDA 分配 `9.22 GiB`；固定 256 步的同种子 A/B 从 `179.6` 提升到 `435.4` 步/s（`2.42x`）。首个完整 update 结束后，使用 `metrics.jsonl` 中的真实 `rollout/plies_per_second` 重新估算，之后用至少 10 个 update 的移动中位数更新 ETA：
 
 $$
 T_{days}=\frac{3\times10^9-N_{done}}{v_{plies/s}\times86400\times availability}.
 $$
 
-即使达到 2,000 步/s，正式排期也应按约 `3～4` 周墙钟预留。达到该吞吐至少需要原生/向量化规则 Actor、增量 KV cache、分支前缀 copy-on-write、局面编码缓存，以及让环境生成与 learner 重叠。当前代码没有单模式 DDP/FSDP，增加第二张或第四张 4090 不会自动缩短同一个二人训练任务。
+即使达到 2,000 步/s，正式排期也应按约 `3～4` 周墙钟预留。当前代码已经支持单模式 `torchrun/DDP`，并实现增量 KV 与分支前缀 copy-on-write；第二张或第四张 GPU 会取得独立环境分片并同步 learner 梯度。继续达到该吞吐仍需要自定义 paged/CUDA Graph actor 或原生批量规则环境，并评估专用 actor GPU 上的一版本异步流水，不能把 DDP 卡数直接视为线性加速倍数。
 
 ### 7.3 RTX PRO 6000 Blackwell 96GB 时间规划
 
@@ -206,16 +204,45 @@ NVIDIA 官方规格中，[RTX 4090](https://www.nvidia.com/en-us/geforce/graphic
 
 按二人最长上下文的实测显存斜率，96GB 卡建议 Policy `microbatch=64` 起步，稳定后测 `96`；全局 batch 仍为 128，所以从 4090 上每 epoch 约 6 个物理子批降至 2 个。Actor inference batch 可从 `256` 起测，视 GPU 利用率和峰值显存测到 `512`。增大这些批次主要降低调度/learner 开销，完全不改变 30 亿环境步、约 16.44M 条终局续局和约 16,054 个外层 update。
 
-在不改 Python 规则环境和全历史重编码的前提下，不能承诺按理论 AI TOPS 获得 3 倍加速。以当前 workload 的瓶颈结构估算：
+增量 KV 完成后，自然终局实测中约 `86%` 墙钟仍在 Policy inference、约 `12%` 是 Python 环境工作；因此 96GB 可以把 actor batch 从 `64` 向 `128/256` 探测，但不能按容量 `4x` 直接换算。以当前 workload 的瓶颈结构估算：
 
-| RTX PRO 6000 方案 | 相对当前单卡 4090 端到端速度 | 30 亿步墙钟规划（90% 可用率并含常规开销） |
+| RTX PRO 6000 方案 | 目标端到端吞吐（未实测） | 30 亿步墙钟规划（含 learner/评测） |
 |---|---:|---:|
-| 原代码，仅放大 batch | 约 `1.3x～1.8x` | 乐观约 `5～7` 个月；按 main 不确定性保守约 `7～18` 个月 |
-| 再完成向量化 Actor、KV cache、前缀共享与流水并行 | 目标 `2x～3x+`，需实测 | 不再按当前月数外推；若实测达到 2,000 步/s，则约 3～4 周 |
+| 1× RTX PRO 6000 96GB | `750～1,050` 步/s | 约 `45～60` 天 |
+| 2× RTX PRO 6000 96GB，DDP 效率 85%～90% | `1,300～1,850` 步/s | 约 `26～38` 天 |
 
-第一行是当前可执行方案的工程区间，不是厂商峰值换算；其上界保留了 main 模型、长历史和维护停机的不确定性。96GB 最大价值是能把更多环境/KV 与较大批量常驻显存，为后续优化创造条件，而不是自动把 Python 串行环境加速四倍。
+两行都是根据 4090 实测瓶颈作的工程区间，不是目标卡 benchmark。96GB 最大价值是能把更多环境/KV 与较大批量常驻显存，为后续优化创造条件，而不是自动把 Python 串行环境加速四倍。正式 microbatch 建议 main 从 `64` 开始，actor batch 从 `128` 开始，各自逐级测到 `96/256`；全局锚点 batch 仍为 128，不能让每卡都重复 128 个锚点。
 
 ### 7.4 RTX 4090 的 1/2/4 卡优化后时间规划
+
+先按 rev.14 单卡实测 `431.37` 步/s、2 卡端到端效率 `88%`、4 卡效率 `75%` 外推
+30 亿 continuation plies。learner、评测、检查点和 90% 可用率已作为区间余量加入：
+
+| 配置 | 预计聚合吞吐 | 30 亿步纯 rollout | 工程墙钟规划 |
+|---|---:|---:|---:|
+| 1× RTX 4090 | 431 步/s（实测） | 80.5 天 | **100～115 天** |
+| 2× RTX 4090 | 约 759 步/s | 45.7 天 | **55～65 天** |
+| 4× RTX 4090 | 约 1,294 步/s | 26.8 天 | **32～40 天** |
+
+多卡吞吐是推算，必须在目标机器用同一 `benchmark_rollout.py` 和一次完整 update
+复测。四卡时 24 个 CPU 逻辑核也可能成为约束。
+
+同一 rev.14 负载的高端卡单卡规划如下。NVIDIA 官方规格为：H100 SXM `80GB /
+3.35TB/s`，B200 `180GB / up to 8TB/s`，B300 `288GB / up to 8TB/s`；B300 的
+attention layer acceleration 官方称相对 Blackwell 最高 `2x`。这些优势不能完整
+映射到本项目，因为当前约 12% 时间已在 Python 裁判，而且大量 SDPA 是小 batch：
+
+| 每 rank 一张卡 | 建议 main learner microbatch 起点 | actor batch 起点 | 推算吞吐 | 30 亿步工程墙钟 |
+|---|---:|---:|---:|---:|
+| H100 SXM 80GB | 32 | 128 | 850～1,200 步/s | 36～55 天 |
+| B200 SXM 180GB | 64 | 256 | 1,100～1,500 步/s | 29～43 天 |
+| B300 SXM 288GB | 96 | 256 | 1,200～1,650 步/s | 27～39 天 |
+
+来源：[NVIDIA H100](https://www.nvidia.com/en-us/data-center/h100/)、
+[NVIDIA HGX H100/H200/B200 规格](https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory-h100-h200-b200/latest/components.html)、
+[NVIDIA B300 企业参考架构](https://docs.nvidia.com/enterprise-reference-architectures/whitepaper/hgx-servers-and-spectrum-x.pdf)、
+[NVIDIA Blackwell Ultra](https://developer.nvidia.com/blog/nvidia-blackwell-ultra-for-the-era-of-ai-reasoning/)。
+这里的时间全部是项目推算，不是 NVIDIA 发布的 SiguoZero benchmark。
 
 以既有 H100-GPU-day 预算为基准，暂取一张 4090 对本混合负载等效 `0.30` 张 H100，2 卡效率 `90%`、4 卡效率 `80%`：
 
@@ -233,7 +260,7 @@ $$
 | 双明主训练 | 193-290 天 | 107-161 天 | 60-91 天 |
 | 双明顶尖容量 | 617-2,780 天 | 343-1,544 天 | 193-869 天 |
 
-各阶段是累计目标，不能相加。当前仓库尚未实现单模式 DDP/FSDP，因此 2/4 卡加速列是完成原生并行 Actor、增量 KV cache、分支前缀共享和分布式 learner 后的规划值；当前版本的多卡只能分别运行模式、随机种子或评测任务。若 4090/H100 实测等效比为 `0.25/0.35`，表中时间分别乘 `1.20/0.86`。
+各阶段是累计目标，不能相加。当前仓库已实现单模式 DDP learner 和每 rank 独立 Actor 分片，所以 2/4 卡可以共同训练同一个模型；表中仍是完成增量 KV cache、分支前缀共享和原生并行 Actor 后的规划值，不是仅启用 DDP 就能保证的时间。若 4090/H100 实测等效比为 `0.25/0.35`，表中时间分别乘 `1.20/0.86`。
 
 ### 7.5 rollout 总量
 
@@ -248,6 +275,11 @@ $$
 | 冷启动 | 8M | 16M |
 | 主训练 | 64M | 128M |
 | 顶尖容量 | 204.8M-614.4M | 409.6M-1.2288B |
+
+30 亿步目标的 rollout 数取决于平均终局剩余长度，而不是固定常数。历史估算
+`182.5` 步/rollout 对应约 `16.44M` rollouts 和 `16,054` updates；rev.14 自然终局
+探针 `348.9` 步/rollout 对应约 `8.60M` rollouts 和 `8,397` updates。正式先按
+`8.6M～16.4M` rollouts 规划，以完成首批 updates 后的实际均值修正。
 
 基础对局和训练外评测局不计入上述 rollout。顶尖容量已经包含冷启动与主训练，不是三阶段相加；模型共享也意味着 rollout 数不再乘以二人/四人的座位数量。
 
@@ -279,6 +311,8 @@ python -m junqi.training.train_two_player --device cuda --model-scale bootstrap 
 ```
 
 扩展到主模型时使用 `--model-scale main`。当前 24GB 实测默认是 bootstrap/main/extended 分别 `16/8/6`；H100 可从 `64/32/24` 起测，H200 从 `128/64/48` 起测。`--microbatch` 可覆盖自动档位，`--anchor-batch` 改变逻辑 Policy batch，`--actor-batch` 只改变 CUDA 推理子批，不改变 K=4、M=2 的算法。
+
+单模式多 GPU 使用 `torchrun --standalone --nproc-per-node=N`。`anchor_batch` 是全局值且必须被 `N` 整除，`microbatch` 是每张卡的值；每个 rank 仍只有一套供所有座位共享的 current Policy/Layout。完整约定见[多 GPU 训练与历史编码加速设计](multi_gpu_and_performance_zh.md)。
 
 当前二人 30 亿步任务的等价启动命令为：
 
@@ -313,7 +347,7 @@ runs/<mode>/
     ...（同样结构，完全独立）
 ```
 
-新运行在进入第一个昂贵 rollout 前就写入 update 0 检查点。此后 `latest.pt` 使用临时文件加原子替换，保存变体标记、共享的当前 Policy/Layout、两个优化器、阶段参考模型、update、累计锚点/续局/环境步、学习率缩放、待消费布局终局样本、所有尚未结束的基础对局及历史窗口、Python RNG、基础局 RNG、CPU RNG 和所有 CUDA RNG。开启态还保存每位玩家的持久确定身份表和阵亡库存；关闭态没有阵亡历史张量。检查点不会为不同座位重复保存权重。收到 SIGINT/SIGTERM 或 Python 异常时会再保存一次紧急检查点。
+新运行在进入第一个昂贵 rollout 前就写入 update 0 检查点。此后 `latest.pt` 使用临时文件加原子替换，保存变体标记、共享的当前 Policy/Layout、两个优化器、阶段参考模型、update、累计锚点/续局/环境步、学习率缩放、待消费布局终局样本、所有 rank 尚未结束的基础对局及历史窗口，以及各 rank 的 Python/基础局/CPU/CUDA RNG。开启态还保存每位玩家的持久确定身份表和阵亡库存；关闭态没有阵亡历史张量。检查点不会为不同座位重复保存权重。单卡收到 SIGINT/SIGTERM 或 Python 异常时可紧急保存；多卡异常为避免不对称 collective 写出损坏状态，保留最后一个完整原子检查点并由 torchrun 终止各 rank。
 
 训练命令默认自动寻找对应模式、对应变体目录中的 `latest.pt` 并继续；不需要额外 `--resume` 参数。`--run-dir` 是基目录，程序自动追加变体名。`--no-resume` 只允许配合全新或空的运行目录使用；非空目录没有 `latest.pt` 时也会拒绝随机重启，避免把损坏的运行误当成新实验。确需新实验时应指定另一个 `--run-directory`。硬断电/SIGKILL 最多损失默认 10 个 updates；当前二人任务覆盖为每 1 update 保存，因此最多重算正在执行的一个原子 update，不会退回随机初始化。恢复后中盘基础局也会从原状态继续。
 
@@ -338,12 +372,11 @@ Python 集成使用 `InferenceEngine.from_checkpoint()`、`sample_layouts()`、`
 
 ## 11. 当前实现边界
 
-当前版本是可运行、可反向传播、可中断恢复的单机 PyTorch 基线，已把最昂贵的候选动作和并行续局推理按 CUDA 子批执行，并启用 autocast、TF32、fused SDPA 可用路径和 activation checkpoint。要达到本文件的 H100 时间预算，还必须继续完成：
+当前版本是可运行、可反向传播、可中断恢复的 PyTorch 基线，已把候选动作和并行续局推理按 CUDA 子批执行，支持单机多 GPU DDP，并启用 autocast、TF32、fused SDPA 可用路径和 activation checkpoint。rev.14 还实现了增量 causal KV、持久 COW 历史、packed 棋盘、learner 长度分桶及规则静态查表。要达到 2,000+ 步/s 的目标，还必须继续完成：
 
 1. 将 Python 规则 actor 替换为 C++/Rust 或编译向量化环境，并与 Python 裁判持续差分；
-2. 为最多 1,000 步时序实现增量/paged KV cache；当前参考实现会重新编码保留的历史，长局吞吐会明显低于容量估计；
-3. 让同一锚点的 8 个分支使用 copy-on-write 环境和 KV 前缀；
-4. 增加单模式多 GPU DDP/FSDP actor-learner 服务；当前可将三种独立模式分别绑定不同 GPU 并行运行；
+2. 以自定义 paged-attention/CUDA Graph 消除增量路径中剩余的 K/V stack/cat；
+3. 在现有单机 DDP 上增加带一版本 behavior snapshot 的异步 actor-learner 服务及需要时的多节点/FSDP；
 5. 增加训练外历史回归评测调度器、人类评测接口和长期断电演练。
 
-在上述生产优化完成前，不应直接启动数十万 updates 的昂贵训练，也不应根据一次短冒烟吞吐承诺完成日期。
+30 亿步任务可以作为阶段训练启动，但不应把一次探针视为交付日期或把 30 亿步视为顶尖棋力保证；以首个完整 update 及其后 10 个 update 的移动中位数持续校准。

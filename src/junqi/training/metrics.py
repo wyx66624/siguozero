@@ -21,25 +21,30 @@ class MetricLogger:
         run_directory: str | Path,
         *,
         device: torch.device | None = None,
+        rank: int = 0,
+        write_training_metrics: bool = True,
     ) -> None:
         self.run_directory = Path(run_directory).resolve()
         self.device = device
+        self.rank = rank
+        self.write_training_metrics = write_training_metrics
         self.run_directory.mkdir(parents=True, exist_ok=True)
-        self.jsonl_path = self.run_directory / "metrics.jsonl"
-        self.latest_path = self.run_directory / "latest_metrics.json"
+        suffix = "" if rank == 0 else f".rank{rank:03d}"
+        self.jsonl_path = self.run_directory / f"metrics{suffix}.jsonl"
+        self.latest_path = self.run_directory / f"latest_metrics{suffix}.json"
         self.logger = logging.getLogger(
-            f"siguozero.{abs(hash(str(self.run_directory)))}"
+            f"siguozero.{abs(hash(str(self.run_directory)))}.rank{rank}"
         )
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False
         if not self.logger.handlers:
             formatter = logging.Formatter(
-                "%(asctime)s | %(levelname)s | %(message)s"
+                f"%(asctime)s | rank={rank} | %(levelname)s | %(message)s"
             )
             console = logging.StreamHandler()
             console.setFormatter(formatter)
             file_handler = logging.FileHandler(
-                self.run_directory / "train.log", encoding="utf-8"
+                self.run_directory / f"train{suffix}.log", encoding="utf-8"
             )
             file_handler.setFormatter(formatter)
             self.logger.addHandler(console)
@@ -47,7 +52,11 @@ class MetricLogger:
         try:
             from torch.utils.tensorboard import SummaryWriter
 
-            self.writer = SummaryWriter(self.run_directory / "tensorboard")
+            self.writer = (
+                SummaryWriter(self.run_directory / "tensorboard")
+                if write_training_metrics
+                else None
+            )
         except (ImportError, ModuleNotFoundError):
             self.writer = None
         self._resource_monitor: _ResourceMonitor | None = None
@@ -66,10 +75,13 @@ class MetricLogger:
             self.device,
             status_getter,
             interval_seconds=interval_seconds,
+            rank=self.rank,
         )
         self._resource_monitor.start()
 
     def log(self, update: int, values: Mapping[str, float | int | str]) -> None:
+        if not self.write_training_metrics:
+            return
         record: dict[str, float | int | str] = {
             "update": update,
             "timestamp_unix": time.time(),
@@ -103,7 +115,8 @@ class MetricLogger:
             stream.write(line + "\n")
             stream.flush()
             os.fsync(stream.fileno())
-        temporary = self.run_directory / ".latest_metrics.json.tmp"
+        suffix = "" if self.rank == 0 else f".rank{self.rank:03d}"
+        temporary = self.run_directory / f".latest_metrics{suffix}.json.tmp"
         temporary.write_text(
             json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
@@ -160,6 +173,7 @@ class _ResourceMonitor:
         status_getter: Callable[[], Mapping[str, float | int | str]],
         *,
         interval_seconds: float,
+        rank: int,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("resource monitor interval must be positive")
@@ -168,8 +182,10 @@ class _ResourceMonitor:
         self.device = device
         self.status_getter = status_getter
         self.interval_seconds = interval_seconds
-        self.jsonl_path = run_directory / "resource_metrics.jsonl"
-        self.latest_path = run_directory / "resource_latest.json"
+        suffix = "" if rank == 0 else f".rank{rank:03d}"
+        self.jsonl_path = run_directory / f"resource_metrics{suffix}.jsonl"
+        self.latest_path = run_directory / f"resource_latest{suffix}.json"
+        self.temporary_path = run_directory / f".resource_latest{suffix}.json.tmp"
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
@@ -269,12 +285,11 @@ class _ResourceMonitor:
             stream.write(line + "\n")
             stream.flush()
             os.fsync(stream.fileno())
-        temporary = self.run_directory / ".resource_latest.json.tmp"
-        temporary.write_text(
+        self.temporary_path.write_text(
             json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
         )
-        os.replace(temporary, self.latest_path)
+        os.replace(self.temporary_path, self.latest_path)
 
     def _warn_if_needed(
         self, record: Mapping[str, float | int | str]

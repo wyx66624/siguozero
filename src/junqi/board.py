@@ -439,6 +439,14 @@ class _EncodedBoard:
             )
         )
         self.points = tuple(self.point(code) for code in range(self.point_count))
+        # Runtime games call encode/decode hundreds of thousands of times.
+        # The geometry is immutable, so turn those operations into table
+        # lookups after construction instead of repeatedly rotating points and
+        # instantiating Enum values in Python.
+        self._decoded_points = tuple(record.physical for record in self.points)
+        self._encoded_points = {
+            point: code for code, point in enumerate(self._decoded_points)
+        }
 
         adjacency: dict[int, list[tuple[int, PathKind]]] = {
             code: [] for code in range(self.point_count)
@@ -449,6 +457,31 @@ class _EncodedBoard:
         self._adjacency = {
             code: tuple(sorted(neighbors, key=lambda item: item[0]))
             for code, neighbors in adjacency.items()
+        }
+        self._neighbors_all = tuple(
+            tuple(neighbor for neighbor, _kind in self._adjacency[code])
+            for code in range(self.point_count)
+        )
+        self._neighbors_road = tuple(
+            tuple(
+                neighbor
+                for neighbor, edge_kind in self._adjacency[code]
+                if edge_kind is PathKind.ROAD
+            )
+            for code in range(self.point_count)
+        )
+        self._neighbors_railway = tuple(
+            tuple(
+                neighbor
+                for neighbor, edge_kind in self._adjacency[code]
+                if edge_kind is PathKind.RAILWAY
+            )
+            for code in range(self.point_count)
+        )
+        self._path_kind_lookup = {
+            (code, neighbor): edge_kind
+            for code, neighbors in self._adjacency.items()
+            for neighbor, edge_kind in neighbors
         }
         self._railway_directions: dict[
             tuple[int, int], tuple[RailwayDirection, RailwayDirection]
@@ -555,6 +588,10 @@ class _EncodedBoard:
             )
 
     def point(self, code: int) -> PointRecord:
+        cached = getattr(self, "points", None)
+        if cached is not None:
+            self._validate_code(code)
+            return cached[code]
         physical = self.decode(code)
         relative_arm = (
             None if isinstance(physical, CenterPoint) else self._relative_arm(physical)
@@ -567,21 +604,20 @@ class _EncodedBoard:
         """Return adjacent point codes, optionally filtered by path kind."""
 
         self._validate_code(code)
-        return tuple(
-            neighbor
-            for neighbor, neighbor_kind in self._adjacency[code]
-            if kind is None or neighbor_kind == kind
-        )
+        if kind is None:
+            return self._neighbors_all[code]
+        if kind is PathKind.ROAD:
+            return self._neighbors_road[code]
+        if kind is PathKind.RAILWAY:
+            return self._neighbors_railway[code]
+        return ()
 
     def path_kind(self, first: int, second: int) -> PathKind | None:
         """Return the printed segment kind, or None when points are not adjacent."""
 
         self._validate_code(first)
         self._validate_code(second)
-        for neighbor, kind in self._adjacency[first]:
-            if neighbor == second:
-                return kind
-        return None
+        return self._path_kind_lookup.get((first, second))
 
     def railway_directions(
         self, first: int, second: int
@@ -640,6 +676,12 @@ class FourPlayerBoard(_EncodedBoard):
         self._finish(_four_player_edges())
 
     def encode(self, point: PhysicalPoint) -> int:
+        cached = getattr(self, "_encoded_points", None)
+        if cached is not None:
+            try:
+                return cached[point]
+            except (KeyError, TypeError):
+                pass
         if isinstance(point, ArmPoint):
             try:
                 seat = FourPlayerSeat(point.seat)
@@ -662,6 +704,9 @@ class FourPlayerBoard(_EncodedBoard):
 
     def decode(self, code: int) -> PhysicalPoint:
         self._validate_code(code)
+        cached = getattr(self, "_decoded_points", None)
+        if cached is not None:
+            return cached[code]
         if code < 4 * POINTS_PER_ARM:
             relative_arm, offset = divmod(code, POINTS_PER_ARM)
             seat = FourPlayerSeat((int(self.viewer) + relative_arm) % 4)
@@ -714,6 +759,12 @@ class TwoPlayerBoard(_EncodedBoard):
         self._finish(_two_player_edges())
 
     def encode(self, point: PhysicalPoint) -> int:
+        cached = getattr(self, "_encoded_points", None)
+        if cached is not None:
+            try:
+                return cached[point]
+            except (KeyError, TypeError):
+                pass
         if isinstance(point, CenterPoint):
             raise BoardEncodingError("the two-player board has no center points")
         if not isinstance(point, ArmPoint):
@@ -729,6 +780,12 @@ class TwoPlayerBoard(_EncodedBoard):
 
     def decode(self, code: int) -> ArmPoint:
         self._validate_code(code)
+        cached = getattr(self, "_decoded_points", None)
+        if cached is not None:
+            point = cached[code]
+            if not isinstance(point, ArmPoint):
+                raise BoardEncodingError("two-player code decoded outside an arm")
+            return point
         relative_arm, offset = divmod(code, POINTS_PER_ARM)
         seat = self.viewer if relative_arm == 0 else TwoPlayerSeat(1 - int(self.viewer))
         row, column = _row_column(offset)

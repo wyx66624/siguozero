@@ -17,23 +17,40 @@ from torch import nn
 CHECKPOINT_FORMAT_VERSION = 4
 
 
-def capture_rng_state() -> dict[str, Any]:
+def capture_rng_state(
+    cuda_device: torch.device | str | None = None,
+) -> dict[str, Any]:
     state: dict[str, Any] = {
         "python": random.getstate(),
         "torch_cpu": torch.get_rng_state(),
     }
     if torch.cuda.is_available():
-        state["torch_cuda"] = torch.cuda.get_rng_state_all()
+        if cuda_device is None:
+            state["torch_cuda"] = torch.cuda.get_rng_state_all()
+        else:
+            device = torch.device(cuda_device)
+            if device.type == "cuda":
+                state["torch_cuda_local"] = torch.cuda.get_rng_state(device)
     return state
 
 
-def restore_rng_state(state: dict[str, Any]) -> None:
+def restore_rng_state(
+    state: dict[str, Any],
+    cuda_device: torch.device | str | None = None,
+) -> None:
     random.setstate(state["python"])
     torch.set_rng_state(state["torch_cpu"].cpu())
     if torch.cuda.is_available() and "torch_cuda" in state:
         torch.cuda.set_rng_state_all(
             [generator_state.cpu() for generator_state in state["torch_cuda"]]
         )
+    elif torch.cuda.is_available() and "torch_cuda_local" in state:
+        device = (
+            torch.device(cuda_device)
+            if cuda_device is not None
+            else torch.device("cuda", torch.cuda.current_device())
+        )
+        torch.cuda.set_rng_state(state["torch_cuda_local"].cpu(), device)
 
 
 class CheckpointManager:
@@ -65,6 +82,7 @@ class CheckpointManager:
         config: dict[str, Any],
         archive: bool,
         reason: str,
+        rng_state: dict[str, Any] | None = None,
     ) -> Path:
         if not isinstance(dead_rules_enabled, bool):
             raise ValueError("dead_rules_enabled must be a boolean")
@@ -82,7 +100,7 @@ class CheckpointManager:
             "layout_optimizer": layout_optimizer.state_dict(),
             "trainer_state": trainer_state,
             "config": config,
-            "rng_state": capture_rng_state(),
+            "rng_state": capture_rng_state() if rng_state is None else rng_state,
         }
         temporary = self.directory / ".latest.pt.tmp"
         torch.save(payload, temporary)

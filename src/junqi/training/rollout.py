@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 import random
 import time
@@ -65,6 +66,8 @@ class RolloutMetrics:
     draws: int = 0
     losses: int = 0
     wall_seconds: float = 0.0
+    actor_inference_seconds: float = 0.0
+    environment_step_seconds: float = 0.0
 
     def as_dict(self) -> dict[str, float | int]:
         return {
@@ -78,6 +81,8 @@ class RolloutMetrics:
             "rollout/draws": self.draws,
             "rollout/losses": self.losses,
             "rollout/wall_seconds": self.wall_seconds,
+            "rollout/actor_inference_seconds": self.actor_inference_seconds,
+            "rollout/environment_step_work_seconds": self.environment_step_seconds,
             "rollout/continuations_per_second": (
                 self.terminal_continuations / max(self.wall_seconds, 1e-9)
             ),
@@ -117,6 +122,9 @@ class FrozenPolicyActor:
             raise ValueError("actor max batch size must be positive")
         self.max_batch_size = max_batch_size
         self.oom_reductions = 0
+        # A fresh actor is created for each frozen collection phase.  Historic
+        # board globals are safe to reuse until the next optimizer update.
+        self.policy.start_inference_board_cache()
 
     @property
     def device_type(self) -> str:
@@ -157,6 +165,11 @@ class FrozenPolicyActor:
                 all_logs.extend(logs)
                 start += batch_size
         return all_actions, all_logs
+
+    def reset_temporal_prefixes(self) -> None:
+        """Bound KV memory between independent anchor waves."""
+
+        self.policy.reset_inference_temporal_cache()
 
 
 class BaseGamePool:
@@ -404,6 +417,45 @@ class _Branch:
     starting_ply: int
 
 
+def _step_branch_chunk(
+    branches: Sequence[_Branch],
+    sampled: Sequence[Sequence[tuple[int, int]]],
+) -> float:
+    started = time.perf_counter()
+    for branch, actions in zip(branches, sampled, strict=True):
+        branch.game.step(actions[0])
+        branch.history.append_after_step(branch.game)
+    return time.perf_counter() - started
+
+
+def _advance_branches(
+    active: Sequence[_Branch],
+    actor: FrozenPolicyActor,
+    executor: ThreadPoolExecutor | None,
+) -> tuple[float, float]:
+    """Overlap CUDA inference for chunk N+1 with CPU rules for chunk N."""
+
+    inference_seconds = 0.0
+    environment_seconds = 0.0
+    futures: list[Future[float]] = []
+    start = 0
+    while start < len(active):
+        stop = min(start + actor.max_batch_size, len(active))
+        chunk = active[start:stop]
+        states = [branch.history.state_for(branch.game) for branch in chunk]
+        inference_started = time.perf_counter()
+        sampled, _logs = actor.sample(states, count=1, temperature=1.0)
+        inference_seconds += time.perf_counter() - inference_started
+        if executor is None:
+            environment_seconds += _step_branch_chunk(chunk, sampled)
+        else:
+            futures.append(executor.submit(_step_branch_chunk, chunk, sampled))
+        start = stop
+    for future in futures:
+        environment_seconds += future.result()
+    return inference_seconds, environment_seconds
+
+
 def _standardize(values: Sequence[float], epsilon: float) -> tuple[float, ...]:
     tensor = torch.tensor(values, dtype=torch.float32)
     mean = tensor.mean()
@@ -419,53 +471,16 @@ def collect_policy_groups(
     *,
     behavior_version: int,
     advantage_epsilon: float = 1e-4,
+    anchor_wave_size: int = 8,
+    environment_workers: int = 2,
 ) -> tuple[list[PolicyGroup], RolloutMetrics]:
-    """Run exactly four root samples and two terminal replicas per anchor."""
+    """Run K=4/M=2 terminal rollouts in bounded copy-on-write KV waves."""
 
+    if anchor_wave_size <= 0:
+        raise ValueError("anchor_wave_size must be positive")
+    if environment_workers <= 0:
+        raise ValueError("environment_workers must be positive")
     started = time.perf_counter()
-    states = [anchor.state for anchor in anchors]
-    candidate_actions, old_log_probs = actor.sample(
-        states, count=ROOT_CANDIDATE_COUNT, temperature=1.0
-    )
-    branches: list[_Branch] = []
-    for anchor_index, anchor in enumerate(anchors):
-        for candidate_index, action in enumerate(candidate_actions[anchor_index]):
-            for replica_index in range(REPLICAS_PER_CANDIDATE):
-                game = anchor.game.clone()
-                history = anchor.history.clone()
-                starting_ply = game.ply_count
-                game.step(action)
-                history.append_after_step(game)
-                branches.append(
-                    _Branch(
-                        anchor_index=anchor_index,
-                        candidate_index=candidate_index,
-                        replica_index=replica_index,
-                        root_player=anchor.root_player,
-                        game=game,
-                        history=history,
-                        starting_ply=starting_ply,
-                    )
-                )
-
-    while True:
-        active = [branch for branch in branches if not branch.game.is_terminal]
-        if not active:
-            break
-        active_states = [branch.history.state_for(branch.game) for branch in active]
-        sampled, _logs = actor.sample(active_states, count=1, temperature=1.0)
-        for branch, actions in zip(active, sampled, strict=True):
-            branch.game.step(actions[0])
-            branch.history.append_after_step(branch.game)
-
-    reward_cube = [
-        [
-            [0.0 for _ in range(REPLICAS_PER_CANDIDATE)]
-            for _ in range(ROOT_CANDIDATE_COUNT)
-        ]
-        for _ in anchors
-    ]
-    continuation_plies = [0 for _ in anchors]
     metrics = RolloutMetrics(
         anchors=len(anchors),
         root_candidates=len(anchors) * ROOT_CANDIDATE_COUNT,
@@ -475,44 +490,115 @@ def collect_policy_groups(
             * REPLICAS_PER_CANDIDATE
         ),
     )
-    for branch in branches:
-        reward = branch.game.rewards()[branch.root_player]
-        reward_cube[branch.anchor_index][branch.candidate_index][
-            branch.replica_index
-        ] = reward
-        continuation_plies[branch.anchor_index] += (
-            branch.game.ply_count - branch.starting_ply
-        )
-        if reward > 0:
-            metrics.wins += 1
-        elif reward < 0:
-            metrics.losses += 1
-        else:
-            metrics.draws += 1
-
     groups: list[PolicyGroup] = []
-    for anchor_index, anchor in enumerate(anchors):
-        replica_rewards = tuple(
-            tuple(float(item) for item in rewards)
-            for rewards in reward_cube[anchor_index]
+    use_pipeline = actor.device_type == "cuda" and environment_workers > 1
+    for wave_start in range(0, len(anchors), anchor_wave_size):
+        wave = anchors[wave_start : wave_start + anchor_wave_size]
+        # Independent waves bound retained K/V memory.  Inside a wave all
+        # candidate/replica children reuse the immutable anchor prefix.
+        actor.reset_temporal_prefixes()
+        root_started = time.perf_counter()
+        candidate_actions, old_log_probs = actor.sample(
+            [anchor.state for anchor in wave],
+            count=ROOT_CANDIDATE_COUNT,
+            temperature=1.0,
         )
-        candidate_returns = tuple(
-            sum(rewards) / REPLICAS_PER_CANDIDATE
-            for rewards in replica_rewards
-        )
-        advantages = _standardize(candidate_returns, advantage_epsilon)
-        groups.append(
-            PolicyGroup(
-                state=anchor.state,
-                candidate_actions=tuple(candidate_actions[anchor_index]),
-                old_log_probs=tuple(float(value) for value in old_log_probs[anchor_index]),
-                replica_rewards=replica_rewards,
-                candidate_returns=candidate_returns,
-                advantages=advantages,
-                continuation_plies=continuation_plies[anchor_index],
-                behavior_version=behavior_version,
+        metrics.actor_inference_seconds += time.perf_counter() - root_started
+
+        branches: list[_Branch] = []
+        for local_index, anchor in enumerate(wave):
+            for candidate_index, action in enumerate(
+                candidate_actions[local_index]
+            ):
+                for replica_index in range(REPLICAS_PER_CANDIDATE):
+                    game = anchor.game.clone()
+                    history = anchor.history.clone()
+                    starting_ply = game.ply_count
+                    game.step(action)
+                    history.append_after_step(game)
+                    branches.append(
+                        _Branch(
+                            anchor_index=local_index,
+                            candidate_index=candidate_index,
+                            replica_index=replica_index,
+                            root_player=anchor.root_player,
+                            game=game,
+                            history=history,
+                            starting_ply=starting_ply,
+                        )
+                    )
+
+        executor = (
+            ThreadPoolExecutor(
+                max_workers=environment_workers,
+                thread_name_prefix="junqi-env",
             )
+            if use_pipeline
+            else None
         )
-    metrics.continuation_plies = sum(continuation_plies)
+        try:
+            while True:
+                active = [
+                    branch for branch in branches if not branch.game.is_terminal
+                ]
+                if not active:
+                    break
+                inference_seconds, environment_seconds = _advance_branches(
+                    active, actor, executor
+                )
+                metrics.actor_inference_seconds += inference_seconds
+                metrics.environment_step_seconds += environment_seconds
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
+
+        reward_cube = [
+            [
+                [0.0 for _ in range(REPLICAS_PER_CANDIDATE)]
+                for _ in range(ROOT_CANDIDATE_COUNT)
+            ]
+            for _ in wave
+        ]
+        continuation_plies = [0 for _ in wave]
+        for branch in branches:
+            reward = branch.game.rewards()[branch.root_player]
+            reward_cube[branch.anchor_index][branch.candidate_index][
+                branch.replica_index
+            ] = reward
+            continuation_plies[branch.anchor_index] += (
+                branch.game.ply_count - branch.starting_ply
+            )
+            if reward > 0:
+                metrics.wins += 1
+            elif reward < 0:
+                metrics.losses += 1
+            else:
+                metrics.draws += 1
+
+        for local_index, anchor in enumerate(wave):
+            replica_rewards = tuple(
+                tuple(float(item) for item in rewards)
+                for rewards in reward_cube[local_index]
+            )
+            candidate_returns = tuple(
+                sum(rewards) / REPLICAS_PER_CANDIDATE
+                for rewards in replica_rewards
+            )
+            advantages = _standardize(candidate_returns, advantage_epsilon)
+            groups.append(
+                PolicyGroup(
+                    state=anchor.state,
+                    candidate_actions=tuple(candidate_actions[local_index]),
+                    old_log_probs=tuple(
+                        float(value) for value in old_log_probs[local_index]
+                    ),
+                    replica_rewards=replica_rewards,
+                    candidate_returns=candidate_returns,
+                    advantages=advantages,
+                    continuation_plies=continuation_plies[local_index],
+                    behavior_version=behavior_version,
+                )
+            )
+        metrics.continuation_plies += sum(continuation_plies)
     metrics.wall_seconds = time.perf_counter() - started
     return groups, metrics
