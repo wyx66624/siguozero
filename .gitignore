@@ -90,6 +90,7 @@ tmp/
 
 # Self-play outputs and checkpoints
 runs/
+runs_*/
 *.pt.tmp
 events.out.tfevents.*
 
