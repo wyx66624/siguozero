@@ -817,7 +817,7 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
         [
             Paragraph("7. CUDA 容量实测与训练预算", s["h1"]),
             Paragraph(
-                "实测平台：WSL2 Ubuntu 24.04，RTX 4090 24GB，PyTorch 2.11.0+cu130。共享 current Policy/Layout 各一份及 KL reference 各一份常驻；没有四份座位模型。rev.14 的 rollout cache 只保存冻结前缀，进入 learner 前清空。",
+                "实测平台：WSL2 Ubuntu 24.04，RTX 4090 24GB，PyTorch 2.11.0+cu130。共享 current Policy/Layout 各一份及 KL reference 各一份常驻；没有四份座位模型。rev.15 的页式 rollout cache 只保存冻结前缀，进入 learner 前清空。",
                 s["body"],
             ),
             make_table(
@@ -865,7 +865,7 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
         [
             Paragraph("8. 二人/双明 RTX 4090 实测与 H100 microbatch", s["h1"]),
             Paragraph(
-                "以下 learner 容量探针条件为最长 1001-token、BF16、activation checkpoint、共享 current 与 KL reference 常驻。当前 main Policy 为 144,157,704 参数；正式长跑按 revision 14 请求二人 microbatch=24，并保留自动降到 12 的原子 OOM 回退。时间不含规则 Actor。",
+                "以下 learner 容量探针条件为最长 1001-token、BF16、activation checkpoint、共享 current 与 KL reference 常驻。当前 main Policy 为 144,157,704 参数；正式长跑按 revision 15 请求二人 microbatch=24，并保留自动降到 12 的原子 OOM 回退。时间不含规则 Actor。",
                 s["body"],
             ),
             make_table(
@@ -915,13 +915,13 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
 
     story.extend(
         [
-            Paragraph("9. rev.14 实测吞吐与 30 亿步时间", s["h1"]),
+            Paragraph("9. rev.15 实测吞吐与 30 亿步时间", s["h1"]),
             Paragraph(
-                "rev.14 正式第 1 个 RTX 4090 update：1,024 条 continuation 共 327,764 步；rollout 708.10 s（462.88 步/s），完整 update 723.85 s，原子检查点约 7.6 s。microbatch=24 完成 3 个 epoch、未回退，CUDA 峰值分配 7.68 GiB、缓存池 19.62 GiB。固定 256 步 A/B 从 179.6 提升到 435.4 步/s（2.42x）。",
+                "rev.15 从 update 10 checkpoint 完整实测 main：1,024 条 continuation 共 313,935 步；rollout 481.52 s（651.97 步/s），完整 update 488.86 s，普通原子 latest 保存约 6-8 s。microbatch=24、actor batch=192 均未回退，CUDA 峰值分配 16.66 GiB。相对旧配置 update 3-9 加权 481.37 步/s，吞吐提高 35.4%。",
                 s["body"],
             ),
             Paragraph(
-                "同口径 bootstrap（35.50M 参数）采用 actor=128 / wave=16 / KV=384：356,068 步，rollout 551.63 s（645.48 步/s），完整 update 560.39 s。4090 的 30 亿步工程排期约 60-70 天；RTX PRO 6000 估算 900-1,250 步/s、约 33-48 天，目标卡仍需实测。",
+                "当前正式训练只运行 144.16M 参数 main，不运行 bootstrap。计入每轮保存后的单卡有效吞吐约 633 步/s，剩余目标工程排期约 61-70 天；RTX PRO 6000 估算 900-1,200 步/s、约 34-48 天，目标卡仍需实测。",
                 s["small"],
             ),
             latex_box(
@@ -936,11 +936,12 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
             make_table(
                 [
                     ["硬件", "聚合吞吐", "纯 rollout", "含 learner/评测规划"],
-                    ["1× RTX 4090", "463 步/s（实测）", "75.0 天", "85-100 天"],
-                    ["2× RTX 4090", "约 815 步/s", "42.6 天", "48-58 天"],
-                    ["4× RTX 4090", "约 1,389 步/s", "25.0 天", "29-36 天"],
-                    ["1× RTX PRO 6000 96GB", "750-1,050 步/s", "33-46 天", "45-60 天"],
-                    ["2× RTX PRO 6000 96GB", "1,300-1,850 步/s", "19-27 天", "26-38 天"],
+                    ["1× RTX 4090", "633 步/s（实测外推）", "54.8 天", "61-70 天"],
+                    ["2× RTX 4090", "1,076-1,139 步/s", "30.4-32.2 天", "34-41 天"],
+                    ["3× RTX 4090", "1,519-1,633 步/s", "21.2-22.8 天", "24-30 天"],
+                    ["4× RTX 4090", "1,823-2,026 步/s", "17.1-19.0 天", "20-26 天"],
+                    ["1× RTX PRO 6000 96GB", "900-1,200 步/s", "28.9-38.5 天", "34-48 天"],
+                    ["2× RTX PRO 6000 96GB", "1,530-2,160 步/s", "16.1-22.7 天", "19-29 天"],
                     ["1× H100 / B200 / B300", "850-1,650 步/s", "21-41 天", "27-55 天"],
                 ],
                 [145, 115, 95, 125],
@@ -948,7 +949,7 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
             ),
             Spacer(1, 4 * mm),
             Paragraph(
-                "4090 多卡按 DDP 效率 88%（2 卡）和 75%（4 卡）外推。PRO/H100/B200/B300 均未在本项目实测；更大显存允许增大 actor/learner batch，但 Python 裁判和小 kernel 使速度不会按峰值 TOPS 线性增长。",
+                "4090 多卡按 DDP 效率 85%-90%（2 卡）、80%-86%（3 卡）和 72%-80%（4 卡）外推。PRO/H100/B200/B300 均未在本项目实测；更大显存允许增大 actor/learner batch，但 Python 裁判和小 kernel 使速度不会按峰值 TOPS 线性增长。",
                 s["body"],
             ),
             callout(
@@ -957,7 +958,7 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
                 PALE_ORANGE,
             ),
             Paragraph(
-                "30 亿步是累计 continuation_plies，不是 optimizer step，也不是冠军保证。首轮平均 320.08 步/rollout，对应约 9,153 updates；当前循环连续运行约 77.5 天，含可用率、分布变化和训练外评测按 2.8-3.3 个月。仍须使用至少 10 个 update 的移动中位数重算。",
+                "30 亿步是累计 continuation_plies，不是 optimizer step，也不是冠军保证。update 11 平均 306.58 步/rollout，对应约 9,555 updates；按剩余步数当前循环连续运行约 54.8 天，含可用率、分布变化和训练外评测按 61-70 天。仍须使用至少 10 个 update 的移动中位数重算。",
                 s["small"],
             ),
             PageBreak(),
@@ -1052,12 +1053,12 @@ def build_story(s: dict[str, ParagraphStyle]) -> list:
             ),
             Paragraph("达到大规模预算前仍需完成", s["h2"]),
             Paragraph(
-                "已完成：单机 DDP、增量 causal KV、持久 COW 历史、packed 棋盘、长度分桶与规则静态查表。后续：1) C++/Rust 完整批量裁判并与 Python 裁判差分；2) 自定义 paged-attention/CUDA Graph，消除 K/V stack/cat；3) 一版本 behavior snapshot 的跨 update Actor/Learner 流水；4) 训练外历史回归、人类盲测和长期断电演练。",
+                "已完成：单机 DDP、物理页式 causal KV、页级 COW、单次动作 GPU→CPU 同步、packed 棋盘、长度分桶与规则静态查表。后续：1) C++/Rust 完整批量裁判并与 Python 裁判差分；2) 融合 paged-attention/CUDA Graph，消除 page gather 和小 kernel；3) 一版本 behavior snapshot 的跨 update Actor/Learner 流水；4) 训练外历史回归、人类盲测和长期断电演练。",
                 s["body"],
             ),
             Paragraph("实现与研究依据", s["h2"]),
             Paragraph(
-                "代码：src/junqi/training/；配置：bootstrap.yaml rev.14；资源表：docs/training_resources_zh.md。规则依据：<link href='https://www.gameabc.com/news/201704/3333.html' color='#2B6CB0'>边锋军棋规则</link>、<link href='https://www.junqi.app/zh/rules' color='#2B6CB0'>军棋玩法指南</link>。硬件规格：<link href='https://www.nvidia.com/en-us/data-center/h100/' color='#2B6CB0'>NVIDIA H100</link>、<link href='https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory-h100-h200-b200/latest/components.html' color='#2B6CB0'>NVIDIA HGX B200</link>、<link href='https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-6000-family/' color='#2B6CB0'>RTX PRO 6000</link>。跨卡时间是项目推算，不是 NVIDIA benchmark。",
+                "代码：src/junqi/training/；配置：bootstrap.yaml rev.15；资源表：docs/training_resources_zh.md。规则依据：<link href='https://www.gameabc.com/news/201704/3333.html' color='#2B6CB0'>边锋军棋规则</link>、<link href='https://www.junqi.app/zh/rules' color='#2B6CB0'>军棋玩法指南</link>。硬件规格：<link href='https://www.nvidia.com/en-us/data-center/h100/' color='#2B6CB0'>NVIDIA H100</link>、<link href='https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory-h100-h200-b200/latest/components.html' color='#2B6CB0'>NVIDIA HGX B200</link>、<link href='https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-6000-family/' color='#2B6CB0'>RTX PRO 6000</link>。跨卡时间是项目推算，不是 NVIDIA benchmark。",
                 s["small"],
             ),
         ]

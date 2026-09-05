@@ -10,6 +10,7 @@ from typing import Any, Sequence
 import torch
 
 from ..game import JunqiGame, StepResult
+from .accelerator import is_accelerator, is_bf16_supported, resolve_device
 from .checkpoint import CHECKPOINT_FORMAT_VERSION
 from .encoding import GameHistory
 from .models import (
@@ -20,7 +21,6 @@ from .models import (
 )
 from .modes import TrainingMode, mode_spec, new_game, normalize_mode
 from .rollout import FrozenPolicyActor
-from .trainer import resolve_device
 
 
 class InferenceEngine:
@@ -79,10 +79,10 @@ class InferenceEngine:
         policy.load_state_dict(payload["policy"], strict=True)
         layout.load_state_dict(payload["layout"], strict=True)
         amp_dtype = None
-        if resolved_device.type == "cuda":
+        if is_accelerator(resolved_device):
             amp_dtype = (
                 torch.bfloat16
-                if torch.cuda.is_bf16_supported()
+                if is_bf16_supported(resolved_device)
                 else torch.float16
             )
         return cls(requested_mode, policy, layout, amp_dtype=amp_dtype)

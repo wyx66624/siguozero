@@ -1,0 +1,15 @@
+name: siguozero-npu
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy=1.26.4
+  - pip
+  - setuptools>=68
+  - pyyaml>=6.0
+  - tensorboard>=2.18
+
+# Install PyTorch and torch_npu after creating the environment.  The correct
+# PyTorch wheel depends on the host architecture, while the torch_npu post
+# release must match CANN.  README.md pins the default CANN 9.1.0 profile to
+# torch 2.7.1 + torch-npu 2.7.1.post8.

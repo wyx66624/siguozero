@@ -346,6 +346,13 @@ class NeuralModelTests(unittest.TestCase):
             self.assertTrue(all(action in game.legal_actions() for action in action_groups[0]))
             self.assertTrue(torch.isfinite(logs[0]).all())
 
+            action_groups, logs = model.sample_action_groups(
+                [state], count=4, return_log_probs=False
+            )
+            self.assertEqual(len(action_groups[0]), 4)
+            self.assertTrue(all(action in game.legal_actions() for action in action_groups[0]))
+            self.assertEqual(logs, [])
+
     def test_frozen_actor_deduplicates_and_caches_history_boards_exactly(self) -> None:
         from junqi.training.encoding import GameHistory
         from junqi.training.models import GamePolicyTransformer, ModelConfig
@@ -541,6 +548,12 @@ class CheckpointTests(unittest.TestCase):
                 self.assertEqual(copy_module.deepcopy.call_count, 2)
                 trainer.train()
                 self.assertEqual(copy_module.deepcopy.call_count, 2)
+                self.assertTrue(
+                    all(
+                        parameter.grad is None
+                        for parameter in trainer.policy.parameters()
+                    )
+                )
 
     def test_atomic_checkpoint_restores_models_optimizers_and_rng(self) -> None:
         from junqi.training.checkpoint import (
@@ -663,13 +676,21 @@ class CheckpointTests(unittest.TestCase):
             first.save_checkpoint(reason="buffer-test", archive=False)
             first.logger.close()
 
-            resumed = SelfPlayTrainer(
+            widened_settings = replace(
                 settings,
+                actor_inference_batch=settings.actor_inference_batch * 2,
+            )
+            resumed = SelfPlayTrainer(
+                widened_settings,
                 run_directory=directory,
                 auto_resume=True,
             )
             try:
                 self.assertEqual(resumed.update, 3)
+                self.assertEqual(
+                    resumed.effective_actor_inference_batch,
+                    widened_settings.actor_inference_batch,
+                )
                 self.assertEqual(len(resumed.layout_buffer), 1)
                 restored = resumed.layout_buffer[0]
                 self.assertEqual(restored.sample.position_indices, sample.position_indices)

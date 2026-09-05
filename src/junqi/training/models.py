@@ -38,7 +38,9 @@ from .encoding import (
     PolicyState,
     StateTokenRecord,
 )
+from .accelerator import is_accelerator, supports_pinned_memory
 from .modes import MODE_SPECS, TrainingMode, mode_spec, normalize_mode
+from .paged_kv import PagedKVCache, PagedKVState
 
 
 DEPLOYMENT_POINT_ORDER: tuple[tuple[int, int], ...] = tuple(
@@ -64,6 +66,7 @@ class ModelConfig:
     inference_board_cache_entries: int = 65536
     inference_temporal_cache_entries: int = 192
     incremental_inference: bool = True
+    paged_kv_cache: bool = True
     activation_checkpointing: bool = True
     dead_rules_enabled: bool = True
 
@@ -85,6 +88,8 @@ class ModelConfig:
             raise ValueError("inference temporal cache size cannot be negative")
         if not isinstance(self.incremental_inference, bool):
             raise ValueError("incremental_inference must be a boolean")
+        if not isinstance(self.paged_kv_cache, bool):
+            raise ValueError("paged_kv_cache must be a boolean")
         if not isinstance(self.dead_rules_enabled, bool):
             raise ValueError("dead_rules_enabled must be a boolean")
 
@@ -94,7 +99,7 @@ class ModelConfig:
 
     @classmethod
     def tiny(cls, *, dead_rules_enabled: bool = True) -> ModelConfig:
-        """Small architecture used only by unit and CUDA smoke tests."""
+        """Small architecture used only by unit and accelerator smoke tests."""
 
         return cls(
             board_dim=32,
@@ -255,23 +260,9 @@ class PreNormEncoderBlock(nn.Module):
             raise ValueError("incremental attention requires [batch, 1, dim]")
         if past_keys.shape != past_values.shape or past_keys.ndim != 4:
             raise ValueError("past K/V tensors must share [batch, heads, time, dim]")
-        normalized = self.attention_norm(inputs)
-        projection = F.linear(
-            normalized,
-            self.attention.in_proj_weight,
-            self.attention.in_proj_bias,
-        )
-        queries, new_keys, new_values = projection.chunk(3, dim=-1)
-        batch, _one, width = queries.shape
-        heads = self.attention.num_heads
-        head_dim = width // heads
-
-        def split_heads(item: Tensor) -> Tensor:
-            return item.view(batch, 1, heads, head_dim).transpose(1, 2)
-
-        queries = split_heads(queries)
-        new_keys = split_heads(new_keys)
-        new_values = split_heads(new_values)
+        queries, new_keys, new_values = self.incremental_projection(inputs)
+        batch, heads, _one, head_dim = queries.shape
+        width = heads * head_dim
         keys = torch.cat((past_keys, new_keys), dim=2)
         values = torch.cat((past_values, new_values), dim=2)
         attended = F.scaled_dot_product_attention(
@@ -282,6 +273,32 @@ class PreNormEncoderBlock(nn.Module):
             is_causal=False,
         )
         attended = attended.transpose(1, 2).reshape(batch, 1, width)
+        return self.incremental_output(inputs, attended), keys, values
+
+    def incremental_projection(
+        self, inputs: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Project one token to per-head Q/K/V for either cache backend."""
+
+        normalized = self.attention_norm(inputs)
+        projection = F.linear(
+            normalized,
+            self.attention.in_proj_weight,
+            self.attention.in_proj_bias,
+        )
+        queries, keys, values = projection.chunk(3, dim=-1)
+        batch, tokens, width = queries.shape
+        heads = self.attention.num_heads
+        head_dim = width // heads
+
+        def split_heads(item: Tensor) -> Tensor:
+            return item.view(batch, tokens, heads, head_dim).transpose(1, 2)
+
+        return split_heads(queries), split_heads(keys), split_heads(values)
+
+    def incremental_output(self, inputs: Tensor, attended: Tensor) -> Tensor:
+        """Apply the attention output projection, residual, and FFN."""
+
         attended = F.linear(
             attended,
             self.attention.out_proj.weight,
@@ -289,7 +306,7 @@ class PreNormEncoderBlock(nn.Module):
         )
         outputs = inputs + self.dropout(attended)
         outputs = outputs + self.dropout(self.ffn(self.ffn_norm(outputs)))
-        return outputs, keys, values
+        return outputs
 
 
 def _static_board_features() -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
@@ -583,7 +600,7 @@ def collate_policy_states(
     batch = len(states)
     packed_tokens = sum(len(state.records) for state in states)
     requested_device = torch.device(device)
-    pin_memory = requested_device.type == "cuda"
+    pin_memory = supports_pinned_memory(requested_device)
     board_codes = torch.full(
         (packed_tokens, max_points),
         BOARD_PAD_CODE,
@@ -774,9 +791,11 @@ class GamePolicyTransformer(nn.Module):
         self._inference_board_cache: dict[object, Tensor] = {}
         self._inference_board_cache_limit = 0
         self._inference_temporal_cache: OrderedDict[
-            object, _TemporalStateCache
+            object, _TemporalStateCache | PagedKVState
         ] = OrderedDict()
         self._inference_temporal_cache_limit = 0
+        self._paged_kv_requested = False
+        self._paged_kv_store: PagedKVCache | None = None
         self.reset_board_encoding_stats()
 
     @property
@@ -801,6 +820,12 @@ class GamePolicyTransformer(nn.Module):
             if self.config.incremental_inference
             else 0
         )
+        self._paged_kv_requested = bool(
+            self.config.paged_kv_cache
+            and is_accelerator(self.device)
+            and self._inference_temporal_cache_limit > 0
+        )
+        self._paged_kv_store = None
         self.reset_board_encoding_stats()
 
     def clear_inference_board_cache(self) -> None:
@@ -808,11 +833,15 @@ class GamePolicyTransformer(nn.Module):
         self._inference_board_cache_limit = 0
         self._inference_temporal_cache.clear()
         self._inference_temporal_cache_limit = 0
+        self._paged_kv_requested = False
+        self._paged_kv_store = None
 
     def reset_inference_temporal_cache(self) -> None:
         """Drop rollout prefixes between bounded anchor waves."""
 
         self._inference_temporal_cache.clear()
+        if self._paged_kv_store is not None:
+            self._paged_kv_store.reset()
 
     def reset_board_encoding_stats(self) -> None:
         self._history_input_states = 0
@@ -858,6 +887,29 @@ class GamePolicyTransformer(nn.Module):
             "encoding/temporal_cache_entries": float(
                 len(self._inference_temporal_cache)
             ),
+            "encoding/paged_kv_enabled": float(
+                self._paged_kv_store is not None
+            ),
+            "encoding/paged_kv_pages": float(
+                0
+                if self._paged_kv_store is None
+                else self._paged_kv_store.used_pages
+            ),
+            "encoding/paged_kv_peak_pages": float(
+                0
+                if self._paged_kv_store is None
+                else self._paged_kv_store.peak_pages
+            ),
+            "encoding/paged_kv_capacity_pages": float(
+                0
+                if self._paged_kv_store is None
+                else self._paged_kv_store.max_pages
+            ),
+            "encoding/paged_kv_allocated_gib": float(
+                0.0
+                if self._paged_kv_store is None
+                else self._paged_kv_store.allocated_bytes / 2**30
+            ),
             "encoding/temporal_cache_hits": float(self._temporal_cache_hits),
             "encoding/temporal_cold_states": float(self._temporal_cold_states),
             "encoding/temporal_incremental_tokens": float(
@@ -878,21 +930,33 @@ class GamePolicyTransformer(nn.Module):
         return super().train(mode)
 
     def _put_temporal_cache(
-        self, key: object, value: _TemporalStateCache
+        self, key: object, value: _TemporalStateCache | PagedKVState
     ) -> None:
         if self._inference_temporal_cache_limit <= 0:
             return
+        previous = self._inference_temporal_cache.get(key)
+        if (
+            previous is not None
+            and previous is not value
+            and isinstance(previous, PagedKVState)
+            and self._paged_kv_store is not None
+        ):
+            self._paged_kv_store.release(previous)
         self._inference_temporal_cache[key] = value
         self._inference_temporal_cache.move_to_end(key)
         while (
             len(self._inference_temporal_cache)
             > self._inference_temporal_cache_limit
         ):
-            self._inference_temporal_cache.popitem(last=False)
+            _stale_key, stale = self._inference_temporal_cache.popitem(last=False)
+            if isinstance(stale, PagedKVState):
+                if self._paged_kv_store is None:
+                    raise RuntimeError("paged KV state has no backing store")
+                self._paged_kv_store.release(stale)
 
     def _get_temporal_cache(
         self, key: object
-    ) -> _TemporalStateCache | None:
+    ) -> _TemporalStateCache | PagedKVState | None:
         value = self._inference_temporal_cache.get(key)
         if value is not None:
             self._inference_temporal_cache.move_to_end(key)
@@ -900,7 +964,7 @@ class GamePolicyTransformer(nn.Module):
 
     def _find_temporal_prefix(
         self, state: PolicyState
-    ) -> tuple[_TemporalStateCache | None, int]:
+    ) -> tuple[_TemporalStateCache | PagedKVState | None, int]:
         # A player acts every two/four plies.  Eight covers the normal gap and
         # keeps lookup O(1) instead of hashing every possible prefix.
         maximum_gap = min(8, len(state.records) - 1)
@@ -915,6 +979,25 @@ class GamePolicyTransformer(nn.Module):
                 return cached, missing
         return None, len(state.records)
 
+    def _ensure_paged_kv_store(self, dtype: torch.dtype) -> PagedKVCache | None:
+        if not self._paged_kv_requested:
+            return None
+        if self._paged_kv_store is None:
+            self._paged_kv_store = PagedKVCache(
+                device=self.device,
+                dtype=dtype,
+                num_layers=len(self.temporal_layers),
+                num_heads=self.config.temporal_heads,
+                head_dim=(
+                    self.config.temporal_dim // self.config.temporal_heads
+                ),
+                max_tokens=self.config.max_sequence_tokens,
+                max_entries=self._inference_temporal_cache_limit,
+            )
+        elif self._paged_kv_store.dtype != dtype:
+            raise RuntimeError("actor autocast dtype changed inside a paged KV phase")
+        return self._paged_kv_store
+
     def _record_board_batch(
         self,
         records: Sequence[StateTokenRecord],
@@ -928,7 +1011,7 @@ class GamePolicyTransformer(nn.Module):
         if any(len(record.board_codes) != spec.point_count for record in records):
             raise ValueError("history board length does not match its mode")
         requested_device = self.device
-        pin_memory = requested_device.type == "cuda"
+        pin_memory = supports_pinned_memory(requested_device)
         codes = torch.tensor(
             [record.board_codes for record in records],
             dtype=torch.long,
@@ -1001,7 +1084,7 @@ class GamePolicyTransformer(nn.Module):
     ) -> Tensor:
         if position >= self.config.max_sequence_tokens:
             raise ValueError("incremental history exceeds model position capacity")
-        pin_memory = self.device.type == "cuda"
+        pin_memory = supports_pinned_memory(self.device)
         fields = torch.zeros(
             (len(records), 1, 8), dtype=torch.long, pin_memory=pin_memory
         )
@@ -1057,7 +1140,7 @@ class GamePolicyTransformer(nn.Module):
     def _advance_temporal_group(
         self,
         states: Sequence[PolicyState],
-        prefixes: Sequence[_TemporalStateCache],
+        prefixes: Sequence[_TemporalStateCache | PagedKVState],
         missing: int,
     ) -> PolicyFeatures:
         if not states or len(states) != len(prefixes):
@@ -1065,6 +1148,14 @@ class GamePolicyTransformer(nn.Module):
         mode = states[0].mode
         if any(state.mode is not mode for state in states):
             raise ValueError("incremental batch must use one mode")
+        if all(isinstance(prefix, PagedKVState) for prefix in prefixes):
+            return self._advance_paged_temporal_group(
+                states,
+                [prefix for prefix in prefixes if isinstance(prefix, PagedKVState)],
+                missing,
+            )
+        if any(isinstance(prefix, PagedKVState) for prefix in prefixes):
+            raise RuntimeError("cannot mix contiguous and paged temporal caches")
         caches = list(prefixes)
         current_points: Tensor | None = None
         point_mask: Tensor | None = None
@@ -1133,6 +1224,86 @@ class GamePolicyTransformer(nn.Module):
         assert current_points is not None and point_mask is not None
         return PolicyFeatures(contexts, current_points, point_mask)
 
+    def _advance_paged_temporal_group(
+        self,
+        states: Sequence[PolicyState],
+        prefixes: Sequence[PagedKVState],
+        missing: int,
+    ) -> PolicyFeatures:
+        """Append rollout tokens with page-level COW and batched SDPA."""
+
+        store = self._paged_kv_store
+        if store is None:
+            raise RuntimeError("paged temporal cache has no backing store")
+        mode = states[0].mode
+        caches = list(prefixes)
+        current_points: Tensor | None = None
+        point_mask: Tensor | None = None
+        contexts = torch.stack([cache.context for cache in caches])
+        if missing == 0:
+            _globals, current_points, point_mask = self._record_board_batch(
+                [state.records[-1] for state in states], mode
+            )
+            return PolicyFeatures(contexts, current_points, point_mask)
+
+        for offset in range(missing):
+            position = caches[0].length
+            if any(cache.length != position for cache in caches):
+                raise ValueError("paged incremental cache lengths must be bucketed")
+            records = [
+                state.records[len(state.records) - missing + offset]
+                for state in states
+            ]
+            board_globals, current_points, point_mask = self._record_board_batch(
+                records, mode
+            )
+            hidden = self._record_temporal_tokens(
+                records, mode, board_globals, position
+            )
+            children, append_pages, append_offsets = store.fork_for_append(caches)
+            try:
+                page_table, max_tokens = store.make_page_table(children)
+                for layer_index, layer in enumerate(self.temporal_layers):
+                    queries, keys, values = layer.incremental_projection(hidden)
+                    store.append(
+                        layer_index,
+                        append_pages,
+                        append_offsets,
+                        keys.squeeze(2),
+                        values.squeeze(2),
+                    )
+                    attended = store.decode(
+                        layer_index,
+                        queries.squeeze(2),
+                        page_table,
+                        max_tokens,
+                    )
+                    attended = attended.reshape(
+                        len(states), 1, self.config.temporal_dim
+                    )
+                    hidden = layer.incremental_output(hidden, attended)
+                contexts = self.temporal_norm(hidden).squeeze(1)
+                for index, child in enumerate(children):
+                    child.context = contexts[index].detach()
+            except BaseException:
+                for child in children:
+                    store.release(child)
+                raise
+
+            # Prefixes created only for a multi-token gap are not LRU-owned and
+            # can be released as soon as their child generation is complete.
+            if offset > 0:
+                for cache in caches:
+                    store.release(cache)
+            caches = children
+            self._temporal_incremental_tokens += len(states)
+            self._temporal_computed_pairs += len(states) * (position + 1)
+
+        for state, cache in zip(states, caches, strict=True):
+            self._put_temporal_cache((mode, state.records), cache)
+        assert current_points is not None and point_mask is not None
+        return PolicyFeatures(contexts, current_points, point_mask)
+
     def _encode_incremental(
         self, states: Sequence[PolicyState]
     ) -> PolicyFeatures:
@@ -1162,7 +1333,7 @@ class GamePolicyTransformer(nn.Module):
             for state in unique_states
         )
 
-        prefixes: list[_TemporalStateCache | None] = []
+        prefixes: list[_TemporalStateCache | PagedKVState | None] = []
         missing_counts: list[int] = []
         for state in unique_states:
             prefix, missing = self._find_temporal_prefix(state)
@@ -1179,6 +1350,20 @@ class GamePolicyTransformer(nn.Module):
         ]
         if cold_indices:
             cold_states = [unique_states[index] for index in cold_indices]
+            if (
+                self._paged_kv_store is not None
+                and len(cold_indices) == len(unique_states)
+            ):
+                required_pages = sum(
+                    math.ceil(
+                        len(state.records) / self._paged_kv_store.page_size
+                    )
+                    for state in cold_states
+                )
+                if self._paged_kv_store.free_pages < required_pages:
+                    # After the pinned-initial-token sliding window advances,
+                    # none of the old absolute-position prefixes are reusable.
+                    self.reset_inference_temporal_cache()
             cold_features = self._encode_full(
                 cold_states, count_history_stats=False
             )
@@ -1461,11 +1646,19 @@ class GamePolicyTransformer(nn.Module):
         contexts = tokens[torch.arange(batch_size, device=self.device), last_indices]
         features = PolicyFeatures(contexts, current_points, batch.point_mask)
         if capture_temporal:
+            paged_store = self._ensure_paged_kv_store(captured_keys[0].dtype)
             for index, state in enumerate(states):
                 length = len(state.records)
-                self._put_temporal_cache(
-                    (state.mode, state.records),
-                    _TemporalStateCache(
+                temporal_cache: _TemporalStateCache | PagedKVState
+                if paged_store is not None:
+                    temporal_cache = paged_store.from_contiguous(
+                        [values[index, :, :length] for values in captured_keys],
+                        [values[index, :, :length] for values in captured_values],
+                        length=length,
+                        context=contexts[index].detach(),
+                    )
+                else:
+                    temporal_cache = _TemporalStateCache(
                         length=length,
                         layer_keys=tuple(
                             values[index, :, :length].detach()
@@ -1476,7 +1669,10 @@ class GamePolicyTransformer(nn.Module):
                             for values in captured_values
                         ),
                         context=contexts[index].detach(),
-                    ),
+                    )
+                self._put_temporal_cache(
+                    (state.mode, state.records),
+                    temporal_cache,
                 )
                 pairs = length * (length + 1) // 2
                 if count_history_stats:
@@ -1511,21 +1707,60 @@ class GamePolicyTransformer(nn.Module):
         features: PolicyFeatures,
         states: Sequence[PolicyState],
         temperature: float,
+        *,
+        legal_masks: Tensor | None = None,
     ) -> Tensor:
         if temperature <= 0:
             raise ValueError("temperature must be positive")
         query = self.source_query(features.context)
         logits = torch.einsum("bd,bnd->bn", query, features.current_points)
         logits = logits / math.sqrt(self.config.board_dim) / temperature
-        legal_masks = torch.zeros(
-            logits.shape, dtype=torch.bool, device="cpu"
-        )
-        for index, state in enumerate(states):
-            legal_sources = {source for source, _target in state.legal_actions}
-            legal_masks[index, list(legal_sources)] = True
-        legal_masks = legal_masks.to(self.device, non_blocking=True)
+        if legal_masks is None:
+            legal_masks = torch.zeros(
+                logits.shape, dtype=torch.bool, device="cpu"
+            )
+            for index, state in enumerate(states):
+                legal_sources = {source for source, _target in state.legal_actions}
+                legal_masks[index, list(legal_sources)] = True
+            legal_masks = legal_masks.to(self.device, non_blocking=True)
         logits = logits.masked_fill(~legal_masks, float("-inf"))
         return F.log_softmax(logits, dim=-1)
+
+    def _sampling_legal_masks(
+        self,
+        states: Sequence[PolicyState],
+        point_count: int,
+    ) -> tuple[Tensor, Tensor]:
+        """Build both factorized legal masks before accelerator sampling.
+
+        The old sampling path copied sampled source indices back to Python in
+        order to discover their legal destinations, then copied a second mask
+        to the device.  That introduced a synchronization in the middle of every
+        actor step.  A dense board-sized mask is small (at most 129² booleans per
+        state) and lets the complete two-stage sample stay on the accelerator
+        until the final action pair is returned to the CPU referee.
+        """
+
+        pin_memory = supports_pinned_memory(self.device)
+        destination_masks = torch.zeros(
+            (len(states), point_count, point_count),
+            dtype=torch.bool,
+            pin_memory=pin_memory,
+        )
+        for batch_index, state in enumerate(states):
+            if not state.legal_actions:
+                raise ValueError("a non-terminal policy state needs a legal action")
+            sources, targets = zip(*state.legal_actions, strict=True)
+            destination_masks[
+                batch_index,
+                torch.tensor(sources, dtype=torch.long),
+                torch.tensor(targets, dtype=torch.long),
+            ] = True
+        source_masks = destination_masks.any(dim=-1)
+        return (
+            source_masks.to(self.device, non_blocking=pin_memory),
+            destination_masks.to(self.device, non_blocking=pin_memory),
+        )
 
     def _destination_log_probs(
         self,
@@ -1600,13 +1835,22 @@ class GamePolicyTransformer(nn.Module):
         *,
         count: int = 1,
         temperature: float = 1.0,
+        return_log_probs: bool = True,
     ) -> tuple[list[list[tuple[int, int]]], list[Tensor]]:
         """IID joint-policy samples with replacement and their behavior log-probs."""
 
         if count <= 0:
             raise ValueError("sample count must be positive")
         features = self.encode(states)
-        source_log_probs = self._source_log_probs(features, states, temperature)
+        source_masks, destination_masks = self._sampling_legal_masks(
+            states, features.current_points.shape[1]
+        )
+        source_log_probs = self._source_log_probs(
+            features,
+            states,
+            temperature,
+            legal_masks=source_masks,
+        )
         source_probabilities = source_log_probs.exp()
         sampled_sources = torch.multinomial(
             source_probabilities, count, replacement=True
@@ -1615,30 +1859,46 @@ class GamePolicyTransformer(nn.Module):
             count
         )
         flat_sources = sampled_sources.reshape(-1)
-        destination_log_probs = self._destination_log_probs(
-            features, states, batch_indices, flat_sources, temperature
+        contexts = features.context[batch_indices]
+        source_points = features.current_points[batch_indices, flat_sources]
+        query = self.destination_query(torch.cat((contexts, source_points), dim=-1))
+        all_points = features.current_points[batch_indices]
+        destination_logits = torch.einsum("md,mnd->mn", query, all_points)
+        destination_logits = (
+            destination_logits / math.sqrt(self.config.board_dim) / temperature
+        )
+        selected_destination_masks = destination_masks[
+            batch_indices, flat_sources
+        ]
+        destination_log_probs = F.log_softmax(
+            destination_logits.masked_fill(
+                ~selected_destination_masks, float("-inf")
+            ),
+            dim=-1,
         )
         sampled_targets = torch.multinomial(
             destination_log_probs.exp(), 1, replacement=True
         ).squeeze(-1)
-        joint = source_log_probs[batch_indices, flat_sources] + destination_log_probs[
-            torch.arange(len(flat_sources), device=self.device), sampled_targets
-        ]
+        joint = None
+        if return_log_probs:
+            joint = source_log_probs[batch_indices, flat_sources] + destination_log_probs[
+                torch.arange(len(flat_sources), device=self.device), sampled_targets
+            ]
+        # This is the only mandatory device-to-host synchronization in a
+        # sampling step: the Python rules engine needs the chosen action.
+        sampled_pairs = torch.stack((flat_sources, sampled_targets), dim=-1).cpu()
+        joint_cpu = None if joint is None else joint.detach().cpu()
         actions: list[list[tuple[int, int]]] = []
         log_probs: list[Tensor] = []
+        pair_rows = sampled_pairs.tolist()
         for index in range(len(states)):
             start = index * count
             stop = start + count
             actions.append(
-                list(
-                    zip(
-                        flat_sources[start:stop].tolist(),
-                        sampled_targets[start:stop].tolist(),
-                        strict=True,
-                    )
-                )
+                [tuple(pair) for pair in pair_rows[start:stop]]
             )
-            log_probs.append(joint[start:stop].detach().cpu())
+            if joint_cpu is not None:
+                log_probs.append(joint_cpu[start:stop])
         return actions, log_probs
 
     def distributions(

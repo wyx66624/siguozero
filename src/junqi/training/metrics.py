@@ -14,6 +14,16 @@ from typing import Callable, Mapping
 
 import torch
 
+from .accelerator import (
+    accelerator_available,
+    accelerator_module,
+    get_device_name,
+    is_accelerator,
+    max_memory_allocated,
+    memory_allocated,
+    memory_reserved,
+)
+
 
 class MetricLogger:
     def __init__(
@@ -89,25 +99,28 @@ class MetricLogger:
         }
         if (
             self.device is not None
-            and self.device.type == "cuda"
-            and torch.cuda.is_available()
+            and is_accelerator(self.device)
+            and accelerator_available(self.device.type)
         ):
-            device = (
-                torch.cuda.current_device()
+            device_index = (
+                accelerator_module(self.device.type).current_device()
                 if self.device.index is None
                 else self.device.index
             )
+            device = torch.device(self.device.type, device_index)
             record.update(
                 {
-                    "gpu/name": torch.cuda.get_device_name(device),
-                    "gpu/memory_allocated_gb": torch.cuda.memory_allocated(device)
-                    / 2**30,
-                    "gpu/memory_reserved_gb": torch.cuda.memory_reserved(device)
-                    / 2**30,
-                    "gpu/max_memory_allocated_gb": torch.cuda.max_memory_allocated(
-                        device
-                    )
-                    / 2**30,
+                    "accelerator/type": self.device.type,
+                    "accelerator/name": get_device_name(device),
+                    "accelerator/memory_allocated_gib": (
+                        memory_allocated(device) / 2**30
+                    ),
+                    "accelerator/memory_reserved_gib": (
+                        memory_reserved(device) / 2**30
+                    ),
+                    "accelerator/max_memory_allocated_gib": (
+                        max_memory_allocated(device) / 2**30
+                    ),
                 }
             )
         line = json.dumps(record, ensure_ascii=False, sort_keys=True)
@@ -200,18 +213,19 @@ class _ResourceMonitor:
         self._stop.set()
         self._thread.join(timeout=min(self.interval_seconds + 1.0, 5.0))
 
-    def _gpu_index(self) -> int | None:
+    def _accelerator_device(self) -> torch.device | None:
         if (
             self.device is None
-            or self.device.type != "cuda"
-            or not torch.cuda.is_available()
+            or not is_accelerator(self.device)
+            or not accelerator_available(self.device.type)
         ):
             return None
-        return (
-            torch.cuda.current_device()
+        index = (
+            accelerator_module(self.device.type).current_device()
             if self.device.index is None
             else self.device.index
         )
+        return torch.device(self.device.type, index)
 
     def _nvidia_smi(self, gpu_index: int) -> dict[str, float]:
         command = [
@@ -241,12 +255,12 @@ class _ResourceMonitor:
         except ValueError:
             return {}
         return {
-            "gpu/utilization_percent": values[0],
-            "gpu/device_memory_used_mib": values[1],
-            "gpu/device_memory_total_mib": values[2],
-            "gpu/temperature_c": values[3],
-            "gpu/power_w": values[4],
-            "gpu/power_limit_w": values[5],
+            "accelerator/utilization_percent": values[0],
+            "accelerator/device_memory_used_mib": values[1],
+            "accelerator/device_memory_total_mib": values[2],
+            "accelerator/temperature_c": values[3],
+            "accelerator/power_w": values[4],
+            "accelerator/power_limit_w": values[5],
         }
 
     def _sample(self) -> dict[str, float | int | str]:
@@ -258,22 +272,24 @@ class _ResourceMonitor:
             "disk/used_gib": disk.used / 2**30,
             **self.status_getter(),
         }
-        gpu_index = self._gpu_index()
-        if gpu_index is not None:
-            record["gpu/index"] = gpu_index
-            record.update(self._nvidia_smi(gpu_index))
+        accelerator_device = self._accelerator_device()
+        if accelerator_device is not None:
+            device_index = int(accelerator_device.index or 0)
+            record["accelerator/type"] = accelerator_device.type
+            record["accelerator/index"] = device_index
+            record["accelerator/name"] = get_device_name(accelerator_device)
+            if accelerator_device.type == "cuda":
+                record.update(self._nvidia_smi(device_index))
             record.update(
                 {
-                    "gpu/process_allocated_gib": torch.cuda.memory_allocated(
-                        gpu_index
-                    )
-                    / 2**30,
-                    "gpu/process_reserved_gib": torch.cuda.memory_reserved(
-                        gpu_index
-                    )
-                    / 2**30,
-                    "gpu/process_peak_allocated_gib": (
-                        torch.cuda.max_memory_allocated(gpu_index) / 2**30
+                    "accelerator/process_allocated_gib": (
+                        memory_allocated(accelerator_device) / 2**30
+                    ),
+                    "accelerator/process_reserved_gib": (
+                        memory_reserved(accelerator_device) / 2**30
+                    ),
+                    "accelerator/process_peak_allocated_gib": (
+                        max_memory_allocated(accelerator_device) / 2**30
                     ),
                 }
             )
@@ -294,18 +310,18 @@ class _ResourceMonitor:
     def _warn_if_needed(
         self, record: Mapping[str, float | int | str]
     ) -> None:
-        used = float(record.get("gpu/device_memory_used_mib", 0.0))
-        total = float(record.get("gpu/device_memory_total_mib", 0.0))
+        used = float(record.get("accelerator/device_memory_used_mib", 0.0))
+        total = float(record.get("accelerator/device_memory_total_mib", 0.0))
         if total and used / total >= 0.95:
             self.logger.warning(
-                "GPU memory pressure %.1f/%.1f MiB (%.1f%%)",
+                "accelerator memory pressure %.1f/%.1f MiB (%.1f%%)",
                 used,
                 total,
                 100.0 * used / total,
             )
-        temperature = float(record.get("gpu/temperature_c", 0.0))
+        temperature = float(record.get("accelerator/temperature_c", 0.0))
         if temperature >= 85.0:
-            self.logger.warning("GPU temperature is %.1f C", temperature)
+            self.logger.warning("accelerator temperature is %.1f C", temperature)
         disk_free = float(record["disk/free_gib"])
         if disk_free < 10.0:
             self.logger.warning("checkpoint disk has only %.2f GiB free", disk_free)

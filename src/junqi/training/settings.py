@@ -137,6 +137,7 @@ class TrainingSettings:
             incremental_inference=bool(
                 runtime.get("incremental_inference", True)
             ),
+            paged_kv_cache=bool(runtime.get("paged_kv_cache", True)),
         )
         profile_pool = runtime.get("base_game_pool_size", {})
         microbatch_profile = runtime.get("policy_microbatch", 1)

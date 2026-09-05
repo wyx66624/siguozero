@@ -1,9 +1,10 @@
-# 多 GPU 训练与历史编码加速设计
+# 多 GPU/NPU 训练与历史编码加速设计
 
-## 1. 已实现的多 GPU 语义
+## 1. 已实现的多加速器语义
 
-训练采用 PyTorch `torchrun + DistributedDataParallel`（DDP），单机每张 GPU
-启动一个进程。它表示一套逻辑 Policy 的同步计算副本，并不表示多个玩家模型：
+训练采用 PyTorch `torchrun + DistributedDataParallel`（DDP），每张 CUDA GPU
+或 Ascend NPU 启动一个进程。CUDA 使用 NCCL；910B 使用 HCCL，且支持 torchrun
+多节点启动。它表示一套逻辑 Policy 的同步计算副本，并不表示多个玩家模型：
 
 - 每个 rank 内仍只有一个 current Policy 和一个 current Layout；该 rank 上所有
   二人或四人座位都复用它们。
@@ -13,10 +14,10 @@
 - KL reference 每个 rank 各有一份只读计算副本；它不是玩家模型。
 
 `anchor_batch` 是全局 batch，必须能被 `WORLD_SIZE` 整除；
-`policy_microbatch` 是每张 GPU 的物理 microbatch。例如全局 `anchor_batch=128`、
+`policy_microbatch` 是每张卡的物理 microbatch。例如全局 `anchor_batch=128`、
 `microbatch=24` 时：
 
-| GPU 数 | 每 rank 锚点 | 每 epoch、每 rank 的子批 |
+| 卡数 | 每 rank 锚点 | 每 epoch、每 rank 的子批 |
 |---:|---:|---:|
 | 1 | 128 | `24+24+24+24+24+8` |
 | 2 | 64 | `24+24+16` |
@@ -39,12 +40,15 @@ torchrun --standalone --nproc-per-node=2 \
   --config configs/bootstrap.yaml \
   --model-scale main --dead-rules \
   --run-dir runs/two_player \
-  --anchor-batch 128 --microbatch 24 --actor-batch 64 \
+  --anchor-batch 128 --microbatch 24 --actor-batch 192 \
+  --rollout-anchor-wave 24 --temporal-cache-entries 576 \
   --target-continuation-plies 3000000000
 ```
 
 四张 GPU 只需把 `--nproc-per-node` 改为 `4`。程序依据 `LOCAL_RANK` 绑定
-`cuda:0...cuda:N-1`；不要为每个进程手工指定不同 `--device`。
+`cuda:0...cuda:N-1`；NPU 则使用 `scripts/train_npu_cluster.sh` 绑定
+`npu:0...npu:N-1`，完整单机/多机示例见根目录 README。不要为每个进程手工指定
+不同 `--device`。
 
 CPU 双进程冒烟测试：
 
@@ -55,7 +59,7 @@ torchrun --standalone --nproc-per-node=2 \
   --microbatch 1 --run-dir /tmp/siguozero-ddp-smoke --no-resume
 ```
 
-多卡时不能安全地让单个 rank 在 CUDA OOM 后独自改变 microbatch，否则其他 rank
+多卡时不能安全地让单个 rank 在 CUDA/NPU OOM 后独自改变 microbatch，否则其他 rank
 可能已经进入梯度 collective。实现选择 fail-fast：从最后一个完整原子检查点重启，
 并显式调低 `--microbatch`。单卡仍保留自动减半重试。
 
@@ -64,7 +68,7 @@ torchrun --standalone --nproc-per-node=2 \
 只有 rank 0 写 `latest.pt` 和归档，避免并发覆盖。保存前所有 rank 汇总各自的：
 
 - 未结束基础局及各玩家历史窗口；
-- 基础局 RNG、Python RNG、CPU RNG 和 CUDA RNG；
+- 基础局 RNG、Python RNG、CPU RNG 和当前 CUDA/NPU RNG；
 - 当前 rank 的环境分片。
 
 共享模型、reference、优化器、累计全局步数和 Layout buffer 只保存一次。恢复时每个
@@ -98,7 +102,7 @@ TensorBoard 和聚合训练指标只由 rank 0 写。
 逐步规则调度 + 全历史重复计算导致 GPU 间歇等待”的判断一致。该进程启动后不会
 热加载本次源码优化；需要在完整检查点边界重启，才会使用新缓存或 DDP。
 
-## 5. rev.14 已实现的等价加速
+## 5. rev.15 已实现的等价加速
 
 在不改变合法动作、采样语义、终局奖励或 learner 梯度定义的前提下，Policy/环境
 增加以下复用：
@@ -110,9 +114,10 @@ TensorBoard 和聚合训练指标只由 rank 0 写。
 3. **冻结阶段跨步缓存**：一个 update 的 old-policy rollout 期间，把历史棋盘的
    256 维 global embedding 缓存在 GPU。后续步骤只重新编码新当前棋盘；进入
    learner/train 模式时自动清空，杜绝跨参数版本的陈旧 embedding。
-4. **增量 causal KV**：冷启动前缀只完整前向一次；同一玩家下次行动时只为新增的
-   2/4 个 transition token 生成 K/V，新 query 读取旧前缀。普通 learner 仍从原始
-   token 完整前向并建立 autograd，不拿 rollout cache 反传。
+4. **页式增量 causal KV**：冷启动前缀只完整前向一次；同一玩家下次行动时只为
+   新增的 2/4 个 transition token 生成 K/V。32 层共用页表，完整页按引用计数共享，
+   append 最多复制最后一个未满页。普通 learner 仍从原始 token 完整前向并建立
+   autograd，不拿 rollout cache 反传。
 5. **分支写时共享**：`PlayerHistory` 使用不可变持久链表。一个锚点的 8 个分支
    共享同一历史尾节点，追加动作仅创建一个新节点，不再复制最多 1,000 条记录。
    KV 状态也只在冻结 actor 中按前缀共享；所有座位始终调用同一 Policy 实例。
@@ -121,9 +126,12 @@ TensorBoard 和聚合训练指标只由 rank 0 写。
 7. **规则热路径**：棋盘坐标变换、邻接边、道路/铁路邻居和路径类型改成静态查表；
    历史快照不再生成无用的合法动作 mask 和候选身份 mask。20 局、3,991 步的
    单核 profile 从 `5.70 s` 降到 `3.79 s`（约 `1.50x`）。
-8. **有界波调度**：每 8 个锚点（64 条终局分支）为一波，波间释放时序 cache；
-   192 个 LRU 前缀是当前 4090 的实测甜点。128 个会抖动，384 个无额外命中却
-   占用更多显存。
+8. **单次 GPU→CPU 动作同步**：合法 source/destination mask 先批量建成 GPU
+   tensor，source 与 destination 都在 GPU 采样，Python 裁判只接收最后一次
+   `(source, destination)` 传输；续局不再回传未使用的 behavior log-prob。
+9. **有界波调度**：4090 main 的实测甜点为每 24 个锚点（192 条终局分支）一波，
+   actor batch `192`、LRU 前缀 `576`；波间释放页式 cache。峰值 CUDA 分配
+   `16.66 GiB`，仍给 24GB 卡留出余量。
 
 缓存上限由 `runtime.inference_board_cache_entries` 控制，默认每 rank `65,536`；
 设为 `0` 可关闭。当前棋盘的 point embeddings 仍实时计算，只缓存历史所需的
@@ -141,15 +149,20 @@ global embedding，以免为每个棋盘常驻全部 60/129 个点向量而耗�
 - `encoding/temporal_cold_states`
 - `encoding/temporal_incremental_tokens`
 - `encoding/temporal_attention_saved_fraction`
+- `encoding/paged_kv_enabled`
+- `encoding/paged_kv_pages`
+- `encoding/paged_kv_peak_pages`
+- `encoding/paged_kv_capacity_pages`
+- `encoding/paged_kv_allocated_gib`
 - `optimizer/temporal_padding_fraction`
 
 双进程 CPU tiny 冒烟中，`board_encoder_saved_fraction` 为约 `54%`。这只证明
 复用路径生效，不是 main 长局的性能承诺；正式收益必须用相同 checkpoint、种子、
 局长分布和累计分叉步做 A/B profile。
 
-## 6. 增量 KV 的实现边界
+## 6. 页式增量 KV 的实现边界
 
-rev.14 已把一条增长历史的累计时序注意力从近似 `O(T³)` 降为 `O(T²)`。实现直接
+rev.15 已把一条增长历史的累计时序注意力从近似 `O(T³)` 降为 `O(T²)`。实现直接
 复用现有 `nn.MultiheadAttention` 的 Q/K/V 权重，增量 query 交给 PyTorch SDPA，
 因此模型参数和旧 update-0 检查点兼容。结构如下：
 
@@ -163,17 +176,18 @@ rev.14 已把一条增长历史的累计时序注意力从近似 `O(T³)` 降为
 
 当前约束：
 
-- 每层新 token 的注意力是 `O(T)`；当前使用连续 K/V 张量，因为原生 SDPA 对连续
-  张量明显快于在 Python 拼接许多小 page。波/LRU 提供有界内存和逻辑 COW，但这
-  不是 vLLM 风格的自定义 paged-attention CUDA kernel。
+- 物理存储已经是 16-token page 和引用计数 COW，不再逐 token `torch.cat` 整段
+  历史；但每层 decode 仍先按页表 gather，再调用原生 SDPA。这还不是融合的
+  FlashInfer/vLLM paged-attention kernel，因此仍有进一步消除 gather/kernel launch
+  的空间。
 - 绝大多数二人局在 1,000 token 前结束。达到滑窗边界后，固定初始 token 与滚动
   transition 的位置会在每次滑窗时变化；当前实现会在每次窗口滑动后保守地完整
   重建 cache，以保持与 learner 的绝对位置 embedding 语义一致。
 - 增量 cache 只服务 frozen actor。Learner 必须从原始 token 重新前向，以保留
   完整 autograd，不能拿 detached rollout cache 反传。
-- FP32 context 逐 token A/B 最大绝对误差约 `4.8e-7`；RTX 4090 BF16 四步累积
-  最大绝对误差约 `0.003`，来自 fused attention 舍入次序。合法 mask 与概率采样
-  公式不变。
+- 随机页表 decode 与同一连续 K/V 的原生 SDPA 对照最大误差为 `0`；集成 tiny
+  BF16 页式/旧连续增量路径 context 最大差约 `1.5e-3`，两者对完整 BF16 前向的
+  舍入量级相同。合法 mask 与概率采样公式不变。
 
 ## 7. RTX 4090 实测（2026-09-03）
 
@@ -181,31 +195,30 @@ rev.14 已把一条增长历史的累计时序注意力从近似 `O(T³)` 降为
 固定相同种子做开关 A/B；自然终局探针还保留 current/reference Policy、
 current/reference Layout 与两个 AdamW 状态：
 
-| 场景 | 增量 KV | continuation plies/s | 墙钟 | CUDA 峰值分配 |
+| 场景 | 实现/批量 | continuation plies/s | 墙钟 | CUDA 峰值分配 |
 |---|---:|---:|---:|---:|
-| 4 锚点，最多 128 步 | 否 | 306.2 | 13.38 s | 0.70 GiB |
-| 4 锚点，最多 128 步 | 是 | 475.0 | 8.62 s | 3.97 GiB |
-| 4 锚点，最多 256 步 | 否 | 179.6 | 45.02 s | 0.80 GiB |
-| 4 锚点，最多 256 步 | 是 | 435.4 | 18.57 s | 7.65 GiB |
-| 8 锚点，自然终局/600 硬上限，完整训练栈 | 是 | **431.4** | 51.76 s | **9.22 GiB** |
-| 正式 update 1：128 锚点、完整训练栈 | 是 | **462.9** | rollout 708.10 s | **7.68 GiB** |
+| 8 锚点自然终局，旧连续 KV，batch 64/wave 8 | 434.29 | 51.41 s | 9.22 GiB |
+| 同口径，仅去掉中途同步/无用 log-prob | 450.26 | 49.59 s | 约 9.2 GiB |
+| 同口径，页式 KV，batch 64/wave 8 | 463.01 | 48.22 s | 10.78 GiB |
+| 24 锚点自然终局，页式 KV，batch 192/wave 24 | **644.05** | 107.04 s | **16.73 GiB** |
+| update 11：128 锚点、main 完整训练栈 | **651.97** | rollout 481.52 s | **16.66 GiB** |
 
-自然终局样本共 `64` 条 continuation、`22,327` 步，平均 `348.9` 步；理论时序
-attention pair 减少 `98.51%`。它仍是随机初始化模型的一次容量探针，不是长期
-稳定吞吐保证。正式第 1 个 update 产生 `1,024` 条 continuation、`327,764` 步，
-平均 `320.08` 步；rollout 为 `708.10 s`，完整 update 为 `723.85 s`，随后原子
-检查点约 `7.6 s`。`microbatch=24` 完成 3 个 learner epoch，未触发回退；但首批
-锚点历史很短，随着基础局历史增长仍可能自动降到 `12`。
+update 11 从 update 10 的同一 checkpoint 独立恢复，产生 `1,024` 条 continuation、
+`313,935` 步；完整 update 为 `488.86 s`，普通原子 latest 保存约 `6～8 s`。
+旧配置 update 3～9 的加权 rollout 是 `481.37` 步/s、平均完整 update
+`667.33 s`；因此新实现吞吐提高 `35.4%`，update 计算时间缩短 `26.7%`。
+`microbatch=24` 与 actor batch `192` 均未回退，页式 arena 峰值使用
+`5,876 / 14,400` pages。
 
-按正式首轮速度，30 亿 continuation plies 的纯 rollout 是 `75.0` 个连续运行日；
-把基础局、learner 和每轮检查点计入为约 `77.5` 日，按 90% 可用率为 `86.1` 日。
-再考虑后续局长/上下文分布变化和训练外评测，单张 4090 暂按 **85～100 天
-（2.8～3.3 个月）**规划，并用至少 10 个 update 的移动中位数继续修正。
+以每 update 平均计入一次 latest 保存后的有效吞吐约 `633` 步/s，剩余
+`2,996,804,192` 步约需 `54.8` 个连续运行日；按 90% 可用率是 `60.9` 日。
+考虑后续分布变化和训练外评测，单张 4090 规划为 **61～70 天**，继续用至少
+10 个新实现 update 的移动中位数修正。
 
 ## 8. 后续按收益排序的工程路线
 
-1. **真正的 paged-attention/CUDA Graph actor**：消除当前 K/V `stack/cat` 和
-   小 kernel 启动开销；只有实测快于连续 SDPA 才启用；
+1. **融合 paged-attention/CUDA Graph actor**：物理页式 COW 已完成；下一步消除
+   page gather 和小 kernel 启动开销，只有实测快于当前原生 SDPA 才启用；
 2. **原生批量规则环境**：把棋盘、子力、合法动作和战斗规则改为结构化数组，减少
    Python 对象 clone；优先 Rust/C++ 扩展或批量张量内核，而不是逐局 Python 循环；
 3. **跨 update actor/learner 流水线**：当前只实现同一 rollout 内 CUDA 推理与

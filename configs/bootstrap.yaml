@@ -1,8 +1,8 @@
-# 经审核采纳的冷启动配置。该配置用于打通规则、采样和 Game-GRPO 管线，
-# 不是最终冠军模型的容量上限；扩展门槛见 docs/reinforcement_learning_plan_zh.md。
+# 共享训练配置：同时定义 bootstrap/main/extended 三档；实际档位必须由
+# --model-scale 明确选择。正式二人入口固定使用 main，不会训练 bootstrap 权重。
 schema_version: 1
-config_revision: 14
-experiment_name: siguozero_bootstrap_v14_incremental_kv
+config_revision: 15
+experiment_name: siguozero_v15_paged_kv
 
 rules:
   game_modes:
@@ -288,6 +288,12 @@ learner:
         bootstrap: 128
         main: 64
         extended: 48
+      # 910B 64GB 的保守起测值；以 tools/benchmark_cuda.py --device npu
+      # 实测后再提高，脚本中的 MICROBATCH 环境变量可直接覆盖。
+      ascend_910b_64gb:
+        bootstrap: 16
+        main: 8
+        extended: 4
     gradient_accumulation: auto_to_global_target
   # 25-token Pointer 布局序列可以使用原图中的 1024 全局 batch。
   layout_global_batch_size: 1024
@@ -340,6 +346,10 @@ runtime:
   # 8 个锚点一波对应最多 64 条分支，384 条 LRU 可覆盖两位玩家的
   # 活跃前缀并留出写时追加空间；128 会发生抖动，实测 192 已无冷重算。
   incremental_inference: true
+  # CUDA/NPU rollout 默认使用项目内页式 COW KV + PyTorch 2.7 SDPA，
+  # 避免每 token/层 cat 整段历史。
+  # learner 仍走普通全序列 attention；CLI --no-paged-kv 可做严格 A/B。
+  paged_kv_cache: true
   inference_temporal_cache_entries: 192
   base_game_pool_size:
     four_dark: 32
@@ -353,7 +363,7 @@ runtime:
     extended: 6
   actor_inference_batch: 64
   rollout_anchor_wave_size: 8
-  # CUDA 推理下一块时，由线程推进上一块独立规则环境；CPU-only 测试退化为串行。
+  # 加速器推理下一块时，由线程推进上一块独立规则环境；CPU-only 测试退化为串行。
   rollout_environment_workers: 2
   learner_length_bucketing: true
   policy_epochs: 3
