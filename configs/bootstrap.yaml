@@ -1,0 +1,426 @@
+# 经审核采纳的冷启动配置。该配置用于打通规则、采样和 Game-GRPO 管线，
+# 不是最终冠军模型的容量上限；扩展门槛见 docs/reinforcement_learning_plan_zh.md。
+schema_version: 1
+config_revision: 14
+experiment_name: siguozero_bootstrap_v14_incremental_kv
+
+rules:
+  game_modes:
+    - two_player
+    - four_player
+  information_modes:
+    two_player:
+      - dark
+    four_player:
+      - four_dark
+      - double_open
+  # full_open/open 规则引擎可使用下方精确身份码，但不属于当前训练入口。
+  intermediate_reward: 0
+  terminal_reward:
+    win: 1
+    draw: 0
+    loss: -1
+  gamma: 1.0
+  no_interaction_draw_plies: 60
+
+board_piece_codes:
+  # 下列数值都是类别 ID，必须先查 embedding，不能当作连续军阶标量。
+  empty: 0
+  unknown_previous_player: 1
+  unknown_opposite_player: 2
+  unknown_next_player: 3
+  own:
+    flag: 30
+    bomb: 31
+    engineer: 32
+    platoon_commander: 33
+    company_commander: 34
+    battalion_commander: 35
+    regiment_commander: 36
+    brigade_commander: 37
+    division_commander: 38
+    army_commander: 39
+    commander: 40
+    mine: 41
+  # 已确定身份采用无碰撞座位分块：exact = own_code + 32 * block。
+  # 四国 block=0/1/2/3 分别为我方/上家/对家/下家；二人敌方用对家 block=2。
+  exact_identity_stride: 32
+  known_previous_player:
+    flag: 62
+    bomb: 63
+    engineer: 64
+    platoon_commander: 65
+    company_commander: 66
+    battalion_commander: 67
+    regiment_commander: 68
+    brigade_commander: 69
+    division_commander: 70
+    army_commander: 71
+    commander: 72
+    mine: 73
+  known_opposite_player:
+    flag: 94
+    bomb: 95
+    engineer: 96
+    platoon_commander: 97
+    company_commander: 98
+    battalion_commander: 99
+    regiment_commander: 100
+    brigade_commander: 101
+    division_commander: 102
+    army_commander: 103
+    commander: 104
+    mine: 105
+  known_next_player:
+    flag: 126
+    bomb: 127
+    engineer: 128
+    platoon_commander: 129
+    company_commander: 130
+    battalion_commander: 131
+    regiment_commander: 132
+    brigade_commander: 133
+    division_commander: 134
+    army_commander: 135
+    commander: 136
+    mine: 137
+  padding: 138
+  vocabulary_size: 139
+  persistent_exact_inference:
+    # 总开关也可由 CLI --dead-rules / --no-dead-rules 覆盖。
+    # 关闭时不做下列持久确定性标注。
+    method: enumerate_viewer_legal_combat_pairs_and_commit_only_unanimous_types
+    commander_death_reveals_flag: true
+    surviving_attacker_over_known_army_commander_is_commander: true
+    surviving_attacker_over_known_division_after_own_flag_reveal_is_army_commander: true
+    railway_turn_proves_engineer: true
+    surviving_defender_over_known_commander_is_mine: true
+    engineer_survives_attack_means_defender_was_mine: true
+    single_flag_reveal_in_mutual_removal_means_commander_vs_bomb: true
+    two_flag_reveals_in_mutual_removal_mean_commander_vs_commander: true
+    unmoved_first_row_excludes_bomb_for_equal_rank_exchange: true
+    exhausted_exact_inventory_prunes_future_candidates: true
+    use_referee_hidden_identity_to_infer: false
+  exact_casualty_prior:
+    # 仅在 runtime.dead_rules_enabled=true 时存在；关闭后模型结构中也没有
+    # 75->256 投影和融合层，而不是简单地输入全零向量。
+    slots_per_player: 25
+    slot_order: same_as_models.layout.piece_sequence
+    values: binary_exactly_known_dead
+    four_dark_relative_players: [1, 2, 3]
+    double_open_relative_players: [1, 3]
+    two_player_relative_players: [1]
+    double_open_share_between_self_and_opposite_ally: true
+    flag_capture_or_elimination_sets_all_25: true
+    include_probabilistic_or_nonunique_inference: false
+
+models:
+  common:
+    # 一个训练模式只启动一套玩家网络；四个座位共享同一 Policy/Layout 权重。
+    player_parameter_sharing: single_policy_and_layout_instance_all_seats
+    action_embedding_dim: 256
+    board_embedding_dim: 256
+    transition_token_dim: 512
+    dropout: 0.0
+
+  layout:
+    architecture: piece_conditioned_autoregressive_pointer_decoder
+    d_model: 256
+    attention_heads: 8
+    ffn_dim: 1024
+    transformer_layers: 8
+    deployment_steps: 25
+    pointer_position_count: 25
+    point_order: row_major_non_camp
+    partial_layout_attention: bidirectional
+    pooling: layout_token
+    piece_sequence:
+      - flag
+      - mine
+      - mine
+      - mine
+      - bomb
+      - bomb
+      - commander
+      - army_commander
+      - division_commander
+      - division_commander
+      - brigade_commander
+      - brigade_commander
+      - regiment_commander
+      - regiment_commander
+      - battalion_commander
+      - battalion_commander
+      - company_commander
+      - company_commander
+      - company_commander
+      - platoon_commander
+      - platoon_commander
+      - platoon_commander
+      - engineer
+      - engineer
+      - engineer
+    pointer_query_fields:
+      - current_piece
+      - deployment_step
+      - game_mode
+      - pooled_partial_layout
+    pointer_key_value_source: partial_layout_point_states
+    output: position_logits
+    exact_inventory_by_fixed_piece_sequence: true
+    hard_mask:
+      empty_position: true
+      piece_rule: true
+      future_feasibility: false
+    temperature: 0.7
+    action_selection: categorical
+    sample_from_distribution: true
+    greedy_argmax: false
+    final_player_setup_validation: true
+
+  policy:
+    architecture: board_encoder_plus_causal_transition_transformer
+    action_encoder:
+      output_dim: 256
+      fields:
+        - source
+        - destination
+        - actor
+        - move_or_attack
+        - public_result
+        - public_reveal
+    board_encoder:
+      input: player_visible_integer_chain_plus_optional_exact_casualty_prior
+      code_embedding_is_categorical: true
+      canonical_casualty_input_dim_when_dead_rules_enabled: 75
+      casualty_projection_dim_when_dead_rules_enabled: 256
+      disabled_behavior: no_casualty_tensor_projection_or_fusion_parameters
+      fusion_when_enabled: linear_silu_layernorm_of_concat_board_pool_and_casualty_embedding
+      point_d_model: 256
+      output_dim: 256
+      transformer_layers: 4
+      attention_heads: 8
+      ffn_dim: 1024
+      pooling: board_token
+      preserve_point_representations_for_action_heads: true
+    temporal_transformer:
+      token_construction: concat_action_then_post_action_board
+      initial_action_padding: zeros_256
+      d_model: 512
+      transformer_layers: 8
+      attention_heads: 8
+      ffn_dim: 1024
+      causal: true
+    action_factorization:
+      - source
+      - destination_given_source
+    value_head: false
+    belief_head: false
+    sample_from_distribution: true
+
+history:
+  # T0 永久保留，另保留最近最多 1000 个“动作 + 动作后棋盘”转移 token。
+  training_mode: sliding_window
+  pin_initial_state_token: true
+  max_previous_decisions: 1000
+  max_sequence_tokens: 1001
+  position_capacity: 1024
+  board_snapshot_after_every_action: true
+  store_raw_board_integer_chain: true
+  recompute_board_embedding_in_learner: true
+  debug_recent_decisions: 256
+
+rollout:
+  parallel_environments_min: 256
+  rollout_to_terminal: true
+  simulate_every_base_trajectory_decision: true
+  # 从 masked 冻结旧策略独立有放回采样 4 个候选槽；不穷举、也不强制去重。
+  enumerate_all_legal_root_actions: false
+  root_candidate_selection: iid_categorical_old_policy_with_replacement
+  root_candidate_count: 4
+  allow_duplicate_root_candidates: true
+  environment_replicas_per_root_candidate: 2
+  terminal_simulations_per_anchor: 8
+  suffix_action_selection: sample_old_policy_categorical
+  suffix_temperature: 1.0
+  greedy_suffix: false
+  recursive_full_tree_expansion: false
+  # 目标批 128 个锚点；96～256 个锚点对应 768～2,048 条终局续局。
+  completed_terminal_simulations_per_update_target: 1024
+  completed_terminal_simulations_per_update_min: 768
+  completed_terminal_simulations_per_update_max: 2048
+  keep_anchor_groups_atomic: true
+  keep_root_candidate_replica_groups_atomic: true
+  environment_steps_per_update: variable_until_all_branches_terminal
+
+grpo:
+  strategy_grouping: sampled_root_candidate_slots
+  root_candidate_count: 4
+  terminal_replicas_per_candidate: 2
+  average_replicas_before_group_normalization: true
+  group_normalization_candidate_slots: 4
+  candidates_already_sampled_from_old_policy: true
+  policy_weighted_action_baseline: false
+  layout_group_size_initial: 8
+  advantage_epsilon: 1.0e-4
+  skip_policy_term_when_group_std_below: 1.0e-4
+
+learner:
+  optimizer: adamw
+  # Policy 的 batch 单位是含 4 个候选槽、每槽 2 条续局的完整锚点组。
+  policy_batch:
+    unit: anchor_state_group
+    global_target: 128
+    global_minimum: 96
+    global_maximum: 256
+    sampled_root_candidate_returns_at_target: 512
+    terminal_continuations_at_target: 1024
+    per_device_microbatch_start:
+      rtx_4090_24gb:
+        bootstrap: 16
+        main: 8
+        extended: 6
+      h100_80gb:
+        bootstrap: 64
+        main: 32
+        extended: 24
+      h200_141gb:
+        bootstrap: 128
+        main: 64
+        extended: 48
+    gradient_accumulation: auto_to_global_target
+  # 25-token Pointer 布局序列可以使用原图中的 1024 全局 batch。
+  layout_global_batch_size: 1024
+  max_epochs_per_batch: 3
+  clip_epsilon: 0.2
+  learning_rate:
+    initial: 1.0e-4
+    adaptive: true
+    minimum: 1.0e-6
+  gradient_norm_clip: 1.0
+  entropy_coefficient:
+    initial: 0.01
+    minimum: 0.005
+    maximum: 0.02
+    adaptive_to_target_entropy: true
+  kl:
+    initial_coefficient: 0.02
+    target_per_action: 0.015
+  early_stop:
+    observed_kl_multiple: 1.5
+    clipped_sample_fraction: 0.30
+  precision:
+    model: bfloat16
+    loss_and_reductions: float32
+
+staleness:
+  maximum_behavior_policy_versions: 1
+  store_source_and_destination_log_probs: true
+  store_layout_position_log_probs: true
+
+runtime:
+  # CLI 可用 --dead-rules/--no-dead-rules 覆盖。两种模型架构互不兼容。
+  dead_rules_enabled: true
+  # 最终路径为 <output_root>/<mode>/with_dead_rules 或
+  # <output_root>/<mode>/without_dead_rules；自定义 --run-dir 也会追加该层。
+  output_root: runs
+  total_updates: 200000
+  # null 表示只受 total_updates 限制；二人 30 亿步正式运行由 CLI 设为
+  # 3000000000，并按 cumulative/continuation_plies 精确停止。
+  target_continuation_plies: null
+  seed: 20260902
+  device: auto
+  amp: bfloat16
+  enable_tf32: true
+  enable_torch_compile: false
+  # 冻结 rollout 阶段在每个 rank/GPU 上缓存历史棋盘的 256 维全局向量。
+  # 只缓存 detached 推理结果，进入 learner 前清空；0 表示关闭。
+  inference_board_cache_entries: 65536
+  # rollout 使用逐 token causal KV；缓存条目是状态前缀而不是玩家模型副本。
+  # 8 个锚点一波对应最多 64 条分支，384 条 LRU 可覆盖两位玩家的
+  # 活跃前缀并留出写时追加空间；128 会发生抖动，实测 192 已无冷重算。
+  incremental_inference: true
+  inference_temporal_cache_entries: 192
+  base_game_pool_size:
+    four_dark: 32
+    double_open: 32
+    two_player: 64
+  max_game_plies: 2000
+  # 1001-token BF16 实测安全起点；CLI --microbatch 可按本机复测覆盖。
+  policy_microbatch:
+    bootstrap: 16
+    main: 8
+    extended: 6
+  actor_inference_batch: 64
+  rollout_anchor_wave_size: 8
+  # CUDA 推理下一块时，由线程推进上一块独立规则环境；CPU-only 测试退化为串行。
+  rollout_environment_workers: 2
+  learner_length_bucketing: true
+  policy_epochs: 3
+  layout_update_interval: 8
+  layout_outcomes_per_update: 64
+  layout_learning_rate: 5.0e-5
+  warmup_updates: 2000
+  reference_refresh_updates: 50000
+  checkpoint_every_updates: 10
+  archive_every_updates: 500
+  keep_checkpoint_archives: 10
+  metrics_every_updates: 1
+  # 与 update 日志独立，即使一轮 rollout 很长也持续记录显存、利用率、温度、
+  # 功耗和磁盘空间。单卡 OOM 会从指定 microbatch 逐级减半；多卡为避免 rank
+  # collective 失配会快速退出，应从最后检查点以更小 --microbatch 重启。
+  resource_monitor_interval_seconds: 30
+  auto_reduce_microbatch_on_oom: true
+  minimum_policy_microbatch: 1
+
+scale_gate:
+  # 通过规则、信息隔离、吞吐和首轮棋力验收后，扩展到文档中的主训练版。
+  bootstrap_anchor_states: 1000000
+  bootstrap_completed_terminal_simulations: 8000000
+  bootstrap_learner_updates_approx: 7813
+  bootstrap_branch_environment_plies_approx: 2068000000
+  next_layout_layers: 16
+  next_policy_board_encoder_layers: 8
+  next_policy_temporal_layers: 32
+  next_policy_temporal_d_model: 512
+  next_policy_temporal_ffn_dim: 2048
+
+compute_budget:
+  # 由当前 Python 规则引擎的随机策略样本估算；生产中使用滚动实测值替换。
+  random_baseline:
+    two_player_games: 100
+    two_player_mean_plies: 327.3
+    two_player_mean_legal_actions: 30.3
+    four_player_games: 60
+    four_player_mean_plies: 610.6
+    four_player_mean_legal_actions: 42.5
+  training_targets:
+    competitive_anchor_states: 8000000
+    competitive_completed_terminal_simulations: 64000000
+    competitive_branch_environment_plies_approx: 16544000000
+    competitive_learner_updates_approx: 62500
+    champion_anchor_states_min: 25600000
+    champion_anchor_states_max: 76800000
+    champion_completed_terminal_simulations_min: 204800000
+    champion_completed_terminal_simulations_max: 614400000
+    champion_branch_environment_plies_min_approx: 52940000000
+    champion_branch_environment_plies_max_approx: 158800000000
+    champion_learner_updates_min: 200000
+    champion_learner_updates_max: 600000
+  base_game_diversity_per_update:
+    bootstrap_min: 32
+    main_min: 64
+  actor_requirements:
+    use_kv_cache: implemented_contiguous_sdpa_incremental
+    share_branch_prefix_copy_on_write: implemented_persistent_history_and_bounded_prefix_lru
+    update_every_observer_view: true
+  memory_optimizations:
+    bfloat16: true
+    fused_scaled_dot_product_attention: true
+    activation_checkpointing: true
+    board_history_time_chunking: true
+    deduplicate_overlapping_board_snapshots_per_update: true
+    packed_board_rows: true
+    learner_history_length_bucketing: true
+    rollout_anchor_wave_size: 8
+    temporal_prefix_cache_entries_per_rank: 192
