@@ -17,6 +17,17 @@ import torch
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 
+from .accelerator import (
+    empty_cache,
+    is_accelerator,
+    is_bf16_supported,
+    is_out_of_memory,
+    make_grad_scaler,
+    manual_seed_all,
+    reset_peak_memory_stats,
+    resolve_device,
+    set_device,
+)
 from .checkpoint import (
     CheckpointManager,
     capture_rng_state,
@@ -50,15 +61,6 @@ def _chunks(values: Sequence[T], size: int) -> list[Sequence[T]]:
     return [values[start : start + size] for start in range(0, len(values), size)]
 
 
-def resolve_device(requested: str) -> torch.device:
-    if requested == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device(requested)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
-    return device
-
-
 class SelfPlayTrainer:
     def __init__(
         self,
@@ -80,12 +82,8 @@ class SelfPlayTrainer:
             local_rank=0,
             device=self.device,
         )
-        if self.device.type == "cuda":
-            torch.cuda.set_device(
-                torch.cuda.current_device()
-                if self.device.index is None
-                else self.device.index
-            )
+        if is_accelerator(self.device):
+            self.device = set_device(self.device)
         if settings.anchor_batch % self.distributed.world_size:
             raise ValueError(
                 "global anchor_batch must be divisible by distributed world_size"
@@ -159,9 +157,9 @@ class SelfPlayTrainer:
 
         random.seed(settings.seed)
         torch.manual_seed(settings.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(settings.seed)
-        if settings.enable_tf32 and torch.cuda.is_available():
+        if is_accelerator(self.device):
+            manual_seed_all(self.device.type, settings.seed)
+        if settings.enable_tf32 and self.device.type == "cuda":
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
         torch.set_float32_matmul_precision("high")
@@ -180,12 +178,12 @@ class SelfPlayTrainer:
                 self.policy,
                 device_ids=(
                     [self.distributed.local_rank]
-                    if self.device.type == "cuda"
+                    if is_accelerator(self.device)
                     else None
                 ),
                 output_device=(
                     self.distributed.local_rank
-                    if self.device.type == "cuda"
+                    if is_accelerator(self.device)
                     else None
                 ),
                 broadcast_buffers=False,
@@ -208,11 +206,11 @@ class SelfPlayTrainer:
             weight_decay=0.05,
         )
         self.amp_dtype = self._amp_dtype()
-        self.grad_scaler = torch.amp.GradScaler(
-            "cuda", enabled=self.amp_dtype is torch.float16
+        self.grad_scaler = make_grad_scaler(
+            self.device.type, enabled=self.amp_dtype is torch.float16
         )
-        self.layout_grad_scaler = torch.amp.GradScaler(
-            "cuda", enabled=self.amp_dtype is torch.float16
+        self.layout_grad_scaler = make_grad_scaler(
+            self.device.type, enabled=self.amp_dtype is torch.float16
         )
         self._seed_runtime()
         self.pool = BaseGamePool(
@@ -277,14 +275,14 @@ class SelfPlayTrainer:
         runtime_seed = self.settings.seed + 1_000_003 * self.distributed.rank
         random.seed(runtime_seed)
         torch.manual_seed(runtime_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(runtime_seed)
+        if is_accelerator(self.device):
+            manual_seed_all(self.device.type, runtime_seed)
 
     def _amp_dtype(self) -> torch.dtype | None:
-        if self.device.type != "cuda" or self.settings.amp == "float32":
+        if not is_accelerator(self.device) or self.settings.amp == "float32":
             return None
         if self.settings.amp == "bfloat16":
-            if not torch.cuda.is_bf16_supported():
+            if not is_bf16_supported(self.device):
                 self.logger.event("BF16 unsupported; falling back to float16")
                 return torch.float16
             return torch.bfloat16
@@ -337,6 +335,7 @@ class SelfPlayTrainer:
             reference_layout=self.reference_layout,
             policy_optimizer=self.policy_optimizer,
             layout_optimizer=self.layout_optimizer,
+            accelerator_device=self.device,
         )
         self.policy_lr_scale = float(trainer_state.get("policy_lr_scale", 1.0))
         restored_microbatch = int(
@@ -360,10 +359,25 @@ class SelfPlayTrainer:
         )
         if restored_actor_batch <= 0:
             raise RuntimeError("checkpoint effective actor batch must be positive")
-        self.effective_actor_inference_batch = min(
-            restored_actor_batch,
-            self.settings.actor_inference_batch,
+        saved_actor_batch = int(
+            payload.get("config", {}).get(
+                "actor_inference_batch", restored_actor_batch
+            )
         )
+        if (
+            restored_actor_batch == saved_actor_batch
+            and self.settings.actor_inference_batch > saved_actor_batch
+        ):
+            # A larger explicit setting is an intentional retune, rather than
+            # an OOM recovery cap inherited from the old configuration.
+            self.effective_actor_inference_batch = (
+                self.settings.actor_inference_batch
+            )
+        else:
+            self.effective_actor_inference_batch = min(
+                restored_actor_batch,
+                self.settings.actor_inference_batch,
+            )
         if "grad_scaler" in trainer_state:
             self.grad_scaler.load_state_dict(trainer_state["grad_scaler"])
         if "layout_grad_scaler" in trainer_state:
@@ -581,10 +595,11 @@ class SelfPlayTrainer:
                 try:
                     epoch_metrics = self._backward_policy_epoch(groups)
                     break
-                except torch.OutOfMemoryError:
+                except RuntimeError as error:
+                    if not is_out_of_memory(error, self.device.type):
+                        raise
                     self.policy_optimizer.zero_grad(set_to_none=True)
-                    if self.device.type == "cuda":
-                        torch.cuda.empty_cache()
+                    empty_cache(self.device)
                     current = self.effective_policy_microbatch
                     minimum = self.settings.minimum_policy_microbatch
                     if self.distributed.enabled:
@@ -599,16 +614,17 @@ class SelfPlayTrainer:
                         or current <= minimum
                     ):
                         self.logger.event(
-                            "CUDA OOM with policy microbatch=%d; automatic "
-                            "fallback unavailable" % current
+                            "%s OOM with policy microbatch=%d; automatic "
+                            "fallback unavailable"
+                            % (self.device.type.upper(), current)
                         )
                         raise
                     reduced = max(minimum, current // 2)
                     self.effective_policy_microbatch = reduced
                     self.logger.event(
-                        "CUDA OOM with policy microbatch=%d; retrying the "
+                        "%s OOM with policy microbatch=%d; retrying the "
                         "unapplied epoch with microbatch=%d"
-                        % (current, reduced)
+                        % (self.device.type.upper(), current, reduced)
                     )
             epoch_metrics = self.distributed.mean_metrics(epoch_metrics)
             self.grad_scaler.unscale_(self.policy_optimizer)
@@ -620,6 +636,11 @@ class SelfPlayTrainer:
             )
             self.grad_scaler.step(self.policy_optimizer)
             self.grad_scaler.update()
+            # Gradients are not part of optimizer/checkpoint state.  Keeping
+            # them alive through the next rollout pins allocator segments and
+            # prevents the retired paged-KV arena from being returned at the
+            # following update boundary.
+            self.policy_optimizer.zero_grad(set_to_none=True)
             epochs_completed += 1
             aggregate = epoch_metrics
             if (
@@ -661,6 +682,7 @@ class SelfPlayTrainer:
         self.layout_grad_scaler.step(self.layout_optimizer)
         self.layout_grad_scaler.update()
         output.metrics["optimizer/layout_grad_norm"] = float(grad_norm)
+        self.layout_optimizer.zero_grad(set_to_none=True)
         output.metrics["layout/buffer_remaining"] = float(len(self.layout_buffer))
         return output.metrics
 
@@ -729,11 +751,7 @@ class SelfPlayTrainer:
                 config=self.settings.serializable(),
                 archive=archive,
                 reason=reason,
-                rng_state=(
-                    capture_rng_state(self.device)
-                    if self.distributed.enabled
-                    else None
-                ),
+                rng_state=capture_rng_state(self.device),
             )
             self.logger.event(f"checkpoint saved: {path} reason={reason}")
         self.distributed.barrier()
@@ -787,8 +805,15 @@ class SelfPlayTrainer:
                 if self.distributed.any(self.stop_requested):
                     break
                 started = time.perf_counter()
-                if self.device.type == "cuda":
-                    torch.cuda.reset_peak_memory_stats(self.device)
+                if is_accelerator(self.device):
+                    # policy.train() drops the rollout-only paged-KV arena, but
+                    # the device caching allocator may keep its large block and
+                    # fragment it during learner backward.  Return those free
+                    # blocks at the update boundary before constructing the
+                    # next arena; otherwise reserved VRAM can ratchet upward by
+                    # one arena per update under WDDM.
+                    empty_cache(self.device)
+                    reset_peak_memory_stats(self.device)
                 next_update = self.update + 1
                 policy_lr = self._set_policy_lr(next_update)
                 # Actor and learner are sequential.  During collection, every
@@ -838,9 +863,10 @@ class SelfPlayTrainer:
                 )
                 if self.effective_actor_inference_batch < previous_actor_batch:
                     self.logger.event(
-                        "CUDA OOM reduced actor inference batch from %d to %d "
+                        "%s OOM reduced actor inference batch from %d to %d "
                         "during rollout"
                         % (
+                            self.device.type.upper(),
                             previous_actor_batch,
                             self.effective_actor_inference_batch,
                         )

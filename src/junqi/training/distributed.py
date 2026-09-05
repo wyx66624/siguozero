@@ -1,6 +1,6 @@
 """Small torch.distributed facade used by the self-play trainer.
 
-The training process uses one process per GPU.  Each process owns an
+The training process uses one process per accelerator.  Each process owns an
 independent environment shard while DDP keeps the single logical policy in
 sync.  This module intentionally keeps distributed concerns out of the rules
 engine and model definitions.
@@ -15,6 +15,13 @@ from typing import Any, Mapping
 import torch
 import torch.distributed as dist
 from torch import nn
+
+from .accelerator import (
+    device_count,
+    is_accelerator,
+    resolve_device,
+    set_device,
+)
 
 
 @dataclass(slots=True)
@@ -34,53 +41,41 @@ class DistributedContext:
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
         rank = int(os.environ.get("RANK", "0"))
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-        requested = torch.device(
-            "cuda" if requested_device == "auto" and torch.cuda.is_available()
-            else "cpu" if requested_device == "auto"
-            else requested_device
-        )
+        requested = resolve_device(requested_device)
 
         if world_size <= 1:
-            if requested.type == "cuda" and not torch.cuda.is_available():
-                raise RuntimeError(
-                    "CUDA was requested but torch.cuda.is_available() is false"
-                )
-            device = requested
-            if device.type == "cuda":
-                device = torch.device(
-                    "cuda",
-                    torch.cuda.current_device()
-                    if device.index is None
-                    else device.index,
-                )
-                torch.cuda.set_device(device)
+            device = set_device(requested) if is_accelerator(requested) else requested
             return cls(0, 1, 0, device)
 
-        if requested.type == "cuda":
-            if not torch.cuda.is_available():
-                raise RuntimeError("torchrun requested CUDA but CUDA is unavailable")
-            if local_rank >= torch.cuda.device_count():
+        if is_accelerator(requested):
+            visible_devices = device_count(requested.type)
+            if local_rank >= visible_devices:
                 raise RuntimeError(
-                    f"LOCAL_RANK={local_rank} exceeds visible CUDA device count "
-                    f"{torch.cuda.device_count()}"
+                    f"LOCAL_RANK={local_rank} exceeds visible "
+                    f"{requested.type.upper()} device count {visible_devices}"
                 )
-            device = torch.device("cuda", local_rank)
-            torch.cuda.set_device(device)
-            backend = "nccl"
+            device = set_device(torch.device(requested.type, local_rank))
+            backend = "hccl" if requested.type == "npu" else "nccl"
         elif requested.type == "cpu":
             device = torch.device("cpu")
             backend = "gloo"
         else:
-            raise ValueError("distributed training supports only CUDA or CPU devices")
+            raise ValueError(
+                "distributed training supports only NPU, CUDA, or CPU devices"
+            )
 
         owns_group = False
         if not dist.is_initialized():
             dist.init_process_group(backend=backend, init_method="env://")
             owns_group = True
         # Python environment/checkpoint objects can become large.  A secondary
-        # Gloo group keeps their serialization on CPU instead of allocating
-        # byte tensors in scarce GPU memory under NCCL.
-        object_group = dist.new_group(backend="gloo") if backend == "nccl" else None
+        # Gloo keeps serialization on CPU instead of allocating byte tensors in
+        # accelerator memory.  It also avoids HCCL's lack of object gather.
+        object_group = (
+            dist.new_group(backend="gloo")
+            if backend in ("nccl", "hccl")
+            else None
+        )
         return cls(
             rank=dist.get_rank(),
             world_size=dist.get_world_size(),
@@ -104,7 +99,11 @@ class DistributedContext:
             dist.barrier()
 
     def _collective_device(self) -> torch.device:
-        return self.device if self.backend == "nccl" else torch.device("cpu")
+        return (
+            self.device
+            if self.backend in ("nccl", "hccl")
+            else torch.device("cpu")
+        )
 
     def reduce_int(self, value: int, *, operation: str = "sum") -> int:
         if not self.enabled:
@@ -123,8 +122,15 @@ class DistributedContext:
     def reduce_float(self, value: float, *, operation: str = "mean") -> float:
         if not self.enabled:
             return float(value)
+        # Ascend 910/HCCL does not support FP64 collectives.  Metrics do not
+        # need double precision, so accelerator reductions use FP32.
+        dtype = (
+            torch.float32
+            if self.backend in ("nccl", "hccl")
+            else torch.float64
+        )
         tensor = torch.tensor(
-            float(value), dtype=torch.float64, device=self._collective_device()
+            float(value), dtype=dtype, device=self._collective_device()
         )
         if operation == "mean":
             dist.all_reduce(tensor, op=dist.ReduceOp.SUM)

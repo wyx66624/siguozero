@@ -1,4 +1,4 @@
-"""Measure real policy-step time and peak CUDA memory for a chosen context.
+"""Measure policy-step time and peak CUDA/NPU memory for a chosen context.
 
 This is a capacity probe, not a gameplay-quality benchmark.  It constructs a
 valid player-view state, expands it to the requested context length, evaluates
@@ -15,6 +15,19 @@ import time
 
 import torch
 
+from junqi.training.accelerator import (
+    empty_cache,
+    get_device_name,
+    is_accelerator,
+    is_bf16_supported,
+    manual_seed_all,
+    max_memory_allocated,
+    memory_allocated,
+    memory_reserved,
+    reset_peak_memory_stats,
+    resolve_device,
+    synchronize,
+)
 from junqi.training.encoding import (
     ACTION_PLAYER_PAD,
     ActionFeatures,
@@ -134,16 +147,17 @@ def initialize_optimizer_state(
 def main() -> None:
     args = parse_args()
     mode = normalize_mode(args.mode)
-    device = torch.device(args.device)
-    if device.type != "cuda" or not torch.cuda.is_available():
-        raise RuntimeError("this benchmark requires an available CUDA device")
+    device = resolve_device(args.device)
+    if not is_accelerator(device):
+        raise RuntimeError("this benchmark requires an available CUDA or NPU device")
     if args.batch_size <= 0:
         raise ValueError("batch size must be positive")
 
     torch.manual_seed(20260902)
-    torch.cuda.manual_seed_all(20260902)
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    manual_seed_all(device.type, 20260902)
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     torch.set_float32_matmul_precision("high")
 
     config = model_config(
@@ -175,11 +189,12 @@ def main() -> None:
             + parameter_count(reference_layout)
         )
 
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats(device)
-    torch.cuda.synchronize(device)
+    empty_cache(device)
+    reset_peak_memory_stats(device)
+    synchronize(device)
     started = time.perf_counter()
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+    amp_dtype = torch.bfloat16 if is_bf16_supported(device) else torch.float16
+    with torch.autocast(device_type=device.type, dtype=amp_dtype):
         if reference_policy is not None:
             with torch.no_grad():
                 reference_policy.log_probs_for_action_groups(states, action_groups)
@@ -189,11 +204,12 @@ def main() -> None:
     torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
     policy_optimizer.step()
     policy_optimizer.zero_grad(set_to_none=True)
-    torch.cuda.synchronize(device)
+    synchronize(device)
     elapsed = time.perf_counter() - started
 
     result = {
-        "gpu": torch.cuda.get_device_name(device),
+        "accelerator": get_device_name(device),
+        "device_type": device.type,
         "torch": torch.__version__,
         "mode": mode.value,
         "model_scale": args.model_scale,
@@ -205,9 +221,9 @@ def main() -> None:
         "resident_model_parameters": resident_parameters,
         "legal_actions_per_state": len(state.legal_actions),
         "step_seconds": elapsed,
-        "memory_allocated_gib": torch.cuda.memory_allocated(device) / 2**30,
-        "memory_reserved_gib": torch.cuda.memory_reserved(device) / 2**30,
-        "peak_memory_allocated_gib": torch.cuda.max_memory_allocated(device) / 2**30,
+        "memory_allocated_gib": memory_allocated(device) / 2**30,
+        "memory_reserved_gib": memory_reserved(device) / 2**30,
+        "peak_memory_allocated_gib": max_memory_allocated(device) / 2**30,
         "loss": float(loss.detach()),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))

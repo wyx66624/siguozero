@@ -10,7 +10,7 @@
 1. **布局模型**：棋子条件自回归 Pointer Decoder，按固定棋子序列逐枚从 25 个位置中采样部署点。
 2. **策略模型**：Transformer，对当前玩家的信息状态建模，并依次采样起点和终点。
 
-> **实现状态（2026-09-03，rev.14）**：当前仓库已实现规则引擎、可开关的按观察者确定身份/确定阵亡特征、候选战斗组合唯一性推断、棋子条件 Pointer 布局 Decoder、棋子/位置 Hard Mask、图关系棋盘编码器、512 维时序策略 Transformer、`K=4,M=2` 终局 Game-GRPO learner、单实例全座位共享、原子检查点和三种模式的训练/推理入口。`--no-dead-rules` 会同时关闭推断并从网络中删除阵亡输入分支，两种实验自动保存到不同目录。布局结果仍由 `PlayerSetup` 作最终权威校验。单机多 GPU `torchrun/DDP`、持久化 copy-on-write 历史、rollout 增量 causal KV、packed 棋盘输入、长度分桶及规则静态查表已经实现；自定义 paged-attention CUDA kernel、完整 C++/Rust 批量裁判、跨 update Actor/Learner 服务、FSDP 和历史回归评测调度器仍属于后续生产优化。详细契约见[棋子条件自回归 Pointer 布阵模型与终局训练说明](layout_decoder_training_zh.md)、[死规则特征开关与消融训练](dead_rule_ablation_zh.md)和[多 GPU 训练与历史编码加速设计](multi_gpu_and_performance_zh.md)。
+> **实现状态（2026-09-03，rev.15）**：当前仓库已实现规则引擎、可开关的按观察者确定身份/确定阵亡特征、候选战斗组合唯一性推断、棋子条件 Pointer 布局 Decoder、棋子/位置 Hard Mask、图关系棋盘编码器、512 维时序策略 Transformer、`K=4,M=2` 终局 Game-GRPO learner、单实例全座位共享、原子检查点和三种模式的训练/推理入口。`--no-dead-rules` 会同时关闭推断并从网络中删除阵亡输入分支，两种实验自动保存到不同目录。布局结果仍由 `PlayerSetup` 作最终权威校验。单机多 GPU `torchrun/DDP`、持久化 copy-on-write 历史、rollout 物理页式 causal KV、单次动作 GPU→CPU 同步、packed 棋盘输入、长度分桶及规则静态查表已经实现；融合 paged-attention CUDA kernel、完整 C++/Rust 批量裁判、跨 update Actor/Learner 服务、FSDP 和历史回归评测调度器仍属于后续生产优化。详细契约见[棋子条件自回归 Pointer 布阵模型与终局训练说明](layout_decoder_training_zh.md)、[死规则特征开关与消融训练](dead_rule_ablation_zh.md)和[多 GPU 训练与历史编码加速设计](multi_gpu_and_performance_zh.md)。
 
 两个模型从随机参数开始，四国军棋和二人军棋共享参数，通过模式 token、主视角编码和合法动作掩码区分玩法。训练数据只来自规则引擎中的自对弈，不使用人类棋谱、开局库、专家动作、搜索标签、人工局面价值或中间奖励。
 
@@ -678,11 +678,11 @@ $$
 N_{outer\ update}=\frac{3.0\times10^9}{1024\bar H}.
 $$
 
-历史规划值 $\bar H=182.5$ 对应约 `16,054` updates / `16.44M` rollouts；rev.14 的随机初始局探针 $\bar H=348.9$ 对应约 `8,397` updates / `8.60M` rollouts。正式第 1 个 update 的 $\bar H=320.08$，对应约 `9,153` updates / `9.37M` rollouts。真实锚点来自进行中的基础局，局长分布会随策略改变，所以仍先按 **8.4K～16.1K updates、8.6M～16.4M rollouts** 规划。每个外层 update 的 Policy 数据最多复用 3 个 epoch。实际停止条件应在完成某个原子 update 后检查累计 `continuation_plies >= 3,000,000,000`，不能根据预估 update 数假装精确命中。
+历史规划值 $\bar H=182.5$ 对应约 `16,054` updates / `16.44M` rollouts；rev.15 main update 11 的 $\bar H=306.58$，对应约 `9,555` updates / `9.79M` rollouts。真实锚点来自进行中的基础局，局长分布会随策略改变，所以仍先按 **9.5K～16.1K updates、9.8M～16.4M rollouts** 规划。每个外层 update 的 Policy 数据最多复用 3 个 epoch。实际停止条件应在完成某个原子 update 后检查累计 `continuation_plies >= 3,000,000,000`，不能根据预估 update 数假装精确命中。
 
 30 亿步约为二人冷启动预算 `1.46B` 分叉步的 2.05 倍、正式主训练预算 `11.68B` 的 25.7%。因此它适合作为“冷启动后扩大验证”的首个里程碑，但不能作为战胜顶尖人类的最终样本保证。分别在 `0.5B / 1.0B / 1.5B / 2.0B / 3.0B` 步冻结候选并做训练外评测；若连续三个评测点没有统计显著进步，或出现非法动作、信息泄漏、熵坍缩和异常拖和，应提前停止或回滚。
 
-rev.14 在同一 RTX 4090、WSL2、PyTorch 2.11.0+cu130 上启用增量 KV、持久 COW 历史、packed 棋盘和规则查表后，正式第 1 个 update 完成 `1,024` 条续局、`327,764` 步；rollout `708.10 s`、`462.88` continuation plies/s，完整 update `723.85 s`，原子检查点另用约 `7.6 s`。`microbatch=24` 完成 3 个 epoch 且没有回退，峰值 CUDA 分配 `7.68 GiB`、缓存池 `19.62 GiB`。据此 30 亿步纯 rollout 约 `75.0` 个连续运行日，计入当前基础局/learner/每轮检查点为 `77.5` 日；按 90% 可用率及训练外评测暂按 **85～100 天（2.8～3.3 个月）**规划。该吞吐比旧 bootstrap 探针的 `138.86` 步/s 快约 `3.33x`，但仍未达到 `2,000` 步/s 工程目标；必须继续用至少 10 个 update 的移动中位数更新 ETA。首批 learner 历史较短，`microbatch=24` 后续仍可能因长上下文自动回退到 `12`。
+rev.15 在同一 RTX 4090、WSL2、PyTorch 2.11.0+cu130 上启用页式 KV COW、单次动作同步、packed 棋盘和规则查表后，从 update 10 checkpoint 完整测得 `1,024` 条续局、`313,935` 步；rollout `481.52 s`、`651.97` continuation plies/s，完整 update `488.86 s`，普通原子 latest 保存约 `6～8 s`。`microbatch=24` 与 actor batch `192` 均未回退，峰值 CUDA 分配 `16.66 GiB`。相对旧配置 update 3～9 加权 `481.37` 步/s，吞吐提高 `35.4%`；按计入每轮保存后的约 `633` 步/s，剩余 30 亿目标需要 `54.8` 个连续运行日，按 90% 可用率和分布/评测余量暂按 **61～70 天**规划。仍必须用至少 10 个新实现 update 的移动中位数更新 ETA。
 
 ### 阶段 A：规则与随机策略验收
 

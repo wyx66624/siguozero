@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 import torch
 
 from ..game import JunqiGame
+from .accelerator import empty_cache, is_out_of_memory
 from .encoding import GameHistory, PolicyState
 from .models import (
     GamePolicyTransformer,
@@ -136,8 +137,9 @@ class FrozenPolicyActor:
         *,
         count: int = 1,
         temperature: float = 1.0,
+        return_log_probs: bool = True,
     ) -> tuple[list[list[tuple[int, int]]], list[torch.Tensor]]:
-        enabled = self.amp_dtype is not None and self.device_type == "cuda"
+        enabled = self.amp_dtype is not None and self.device_type in ("cuda", "npu")
         all_actions: list[list[tuple[int, int]]] = []
         all_logs: list[torch.Tensor] = []
         with torch.inference_mode(), torch.autocast(
@@ -153,13 +155,18 @@ class FrozenPolicyActor:
                         states[start : start + batch_size],
                         count=count,
                         temperature=temperature,
+                        return_log_probs=return_log_probs,
                     )
-                except torch.OutOfMemoryError:
-                    if self.device_type != "cuda" or batch_size <= 1:
+                except RuntimeError as error:
+                    if (
+                        not is_out_of_memory(error, self.device_type)
+                        or self.device_type not in ("cuda", "npu")
+                        or batch_size <= 1
+                    ):
                         raise
                     self.max_batch_size = max(1, batch_size // 2)
                     self.oom_reductions += 1
-                    torch.cuda.empty_cache()
+                    empty_cache(self.policy.device)
                     continue
                 all_actions.extend(actions)
                 all_logs.extend(logs)
@@ -379,7 +386,12 @@ class BaseGamePool:
                 )
                 states.append(state)
 
-            sampled, _logs = actor.sample(states, count=1, temperature=1.0)
+            sampled, _logs = actor.sample(
+                states,
+                count=1,
+                temperature=1.0,
+                return_log_probs=False,
+            )
             replacements: list[tuple[int, BaseGameSlot]] = []
             for index, action_group in zip(active_indices, sampled, strict=True):
                 slot = self.slots[index]
@@ -433,7 +445,7 @@ def _advance_branches(
     actor: FrozenPolicyActor,
     executor: ThreadPoolExecutor | None,
 ) -> tuple[float, float]:
-    """Overlap CUDA inference for chunk N+1 with CPU rules for chunk N."""
+    """Overlap accelerator inference for chunk N+1 with CPU rules for chunk N."""
 
     inference_seconds = 0.0
     environment_seconds = 0.0
@@ -444,7 +456,12 @@ def _advance_branches(
         chunk = active[start:stop]
         states = [branch.history.state_for(branch.game) for branch in chunk]
         inference_started = time.perf_counter()
-        sampled, _logs = actor.sample(states, count=1, temperature=1.0)
+        sampled, _logs = actor.sample(
+            states,
+            count=1,
+            temperature=1.0,
+            return_log_probs=False,
+        )
         inference_seconds += time.perf_counter() - inference_started
         if executor is None:
             environment_seconds += _step_branch_chunk(chunk, sampled)
@@ -491,7 +508,9 @@ def collect_policy_groups(
         ),
     )
     groups: list[PolicyGroup] = []
-    use_pipeline = actor.device_type == "cuda" and environment_workers > 1
+    use_pipeline = (
+        actor.device_type in ("cuda", "npu") and environment_workers > 1
+    )
     for wave_start in range(0, len(anchors), anchor_wave_size):
         wave = anchors[wave_start : wave_start + anchor_wave_size]
         # Independent waves bound retained K/V memory.  Inside a wave all

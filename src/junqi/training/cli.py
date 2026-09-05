@@ -47,7 +47,11 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
         help="disable deterministic identities and remove the casualty branch",
     )
     parser.set_defaults(dead_rules_enabled=None)
-    parser.add_argument("--device", default=None, help="auto, cpu, cuda, or cuda:N")
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="auto, cpu, cuda[:N], or npu[:N] (auto prefers an available NPU)",
+    )
     parser.add_argument(
         "--local-rank",
         "--local_rank",
@@ -78,6 +82,11 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
         action="store_true",
         help="disable rollout KV reuse for an exact A/B benchmark",
     )
+    parser.add_argument(
+        "--no-paged-kv",
+        action="store_true",
+        help="use the legacy contiguous rollout KV cache for an A/B benchmark",
+    )
     parser.add_argument("--base-game-pool", type=int, default=None)
     parser.add_argument("--max-game-plies", type=int, default=None)
     parser.add_argument("--checkpoint-every", type=int, default=None)
@@ -87,7 +96,7 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
     parser.add_argument(
         "--no-auto-microbatch-fallback",
         action="store_true",
-        help="fail instead of halving the learner microbatch after CUDA OOM",
+        help="fail instead of halving the learner microbatch after accelerator OOM",
     )
     parser.add_argument(
         "--amp",
@@ -156,7 +165,11 @@ def main(
         dead_rules_enabled=args.dead_rules_enabled,
         overrides=overrides,
     )
-    if args.temporal_cache_entries is not None or args.no_incremental_inference:
+    if (
+        args.temporal_cache_entries is not None
+        or args.no_incremental_inference
+        or args.no_paged_kv
+    ):
         settings = replace(
             settings,
             model=replace(
@@ -170,6 +183,9 @@ def main(
                     False
                     if args.no_incremental_inference
                     else settings.model.incremental_inference
+                ),
+                paged_kv_cache=(
+                    False if args.no_paged_kv else settings.model.paged_kv_cache
                 ),
             ),
         )

@@ -17,7 +17,7 @@
 [docs/layout_decoder_training_zh.md](docs/layout_decoder_training_zh.md)，显存、batch、训练步数和总对局预算见
 [docs/compute_budget_zh.md](docs/compute_budget_zh.md)，三种模式的完整训练设置、硬件需求和耗时估算见
 [docs/training_resources_zh.md](docs/training_resources_zh.md)，经审核的冷启动
-参数见 [configs/bootstrap.yaml](configs/bootstrap.yaml)。多 GPU 启动、全局 batch
+参数见 [configs/bootstrap.yaml](configs/bootstrap.yaml)。多 GPU/NPU 启动、全局 batch
 语义和历史编码加速见 [docs/multi_gpu_and_performance_zh.md](docs/multi_gpu_and_performance_zh.md)。
 
 ## 快速使用
@@ -81,7 +81,187 @@ python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
-## CUDA 自对弈训练与推理
+## 华为 Ascend 910B NPU 集群
+
+`npu` 分支在保留 CUDA/CPU 路径的同时增加了 Ascend 910B 训练路径。每个
+`torchrun` 进程绑定一张 NPU，模型梯度通过 HCCL 同步；未结束对局、随机状态和
+布局样本等大型 Python 对象通过辅助 Gloo group 汇总到 rank 0 写检查点，避免调用
+HCCL 不支持的 object gather。`anchor_batch` 始终是全局 batch，`microbatch` 是每张
+NPU 的 learner batch。
+
+### 固定环境与安装
+
+该分支的 NPU 入口会在启动时校验下表，版本不匹配会直接退出，避免长任务在运行后
+才暴露 ABI 或算子问题。
+
+| 组件 | 支持版本 |
+| --- | --- |
+| Python | `3.12.x` |
+| PyTorch | 固定 `2.7.1` |
+| NumPy | `1.26.4`，且必须 `<2` |
+| torch_npu | 默认 `2.7.1.post8`；安装包必须与 CANN 对应 |
+| CANN | 默认 `9.1.0` |
+| 训练精度 | 910B 默认 BF16；不可用时退到 FP16 + GradScaler |
+| 分布式后端 | NPU tensor/梯度使用 HCCL，checkpoint object 使用 Gloo |
+
+官方版本配套表给出的 PyTorch 2.7.1 对应关系如下。仓库默认采用当前支持
+Python 3.12 二进制 wheel 的 `CANN 9.1.0 + torch-npu 2.7.1.post8` 组合。
+
+| CANN | torch_npu 安装包版本 | 源码分支 |
+| --- | --- | --- |
+| 8.3.RC1 | `2.7.1`（PyPI 无 Python 3.12 wheel，需自行构建） | `v2.7.1-7.2.0` |
+| 8.5.0 | `2.7.1.post2` | `v2.7.1-7.3.0` |
+| 9.0.0 | `2.7.1.post4` | `v2.7.1-26.0.0` |
+| 9.1.0 | `2.7.1.post8` | `v2.7.1-26.1.0` |
+
+版本依据见 Ascend 官方维护的
+[兼容性表](https://github.com/Ascend/pytorch/blob/master/COMPATIBILITY.md)和
+[安装说明](https://github.com/Ascend/pytorch)。CANN、驱动和固件也必须按集群
+型号配套，不能只替换 Python wheel。
+
+兼容层只调用 PyTorch 2.7 已有接口：用 `torch.npu`/`torch.cuda` 完成设备、显存和
+随机数管理，用 `torch.autocast` 与 `torch.amp.GradScaler` 完成混合精度；没有依赖
+较新版本才提供的 `torch.accelerator` 门面。
+
+```bash
+conda env create -f environment-npu.yml
+conda activate siguozero-npu
+# CANN 9.1.0 默认路径；其他安装位置设置 CANN_ENV_FILE 给启动脚本
+source /usr/local/Ascend/cann/set_env.sh
+
+# x86_64 节点使用官方 CPU libtorch；aarch64 节点按 Ascend 文档安装 2.7.1
+if [[ "$(uname -m)" == "x86_64" ]]; then
+  python -m pip install 'torch==2.7.1+cpu' \
+    --index-url https://download.pytorch.org/whl/cpu
+else
+  python -m pip install 'torch==2.7.1'
+fi
+python -m pip install 'torch-npu==2.7.1.post8'
+
+python -m pip install --no-deps --no-build-isolation -e .
+python -c "import sys, numpy, torch, torch_npu; print(sys.version); print(numpy.__version__); print(torch.__version__); print(torch_npu.__version__); print(torch.npu.device_count())"
+```
+
+若集群使用 CANN 8.5.0 或 9.0.0，把最后一条安装命令分别改为
+`torch-npu==2.7.1.post2` 或 `torch-npu==2.7.1.post4`。CANN 8.3.RC1 的
+`torch-npu==2.7.1` 未发布 Python 3.12 wheel；在本分支的固定 Python 版本约束下，
+必须从 `v2.7.1-7.2.0` 分支自行构建 cp312 wheel。最终须同时满足 PyTorch 2.7.1、
+Python 3.12、NumPy `<2` 和 CANN/torch_npu 配套关系。
+
+### 训练模型
+
+所有座位共享一套当前 `Policy + Layout`，不是二人复制两套、四人复制四套。训练时
+另常驻一套冻结 reference pair 计算 KL；推理只加载当前 pair。
+
+| 版本 | `MODE` | 训练入口 | 棋盘/信息模式 |
+| --- | --- | --- | --- |
+| 二人版 | `two_player` | `junqi.training.train_two_player` | 60 点、二人暗棋 |
+| 四人版（四暗） | `four_dark` | `junqi.training.train_four_dark` | 129 点、四家身份均隐藏 |
+| 四人版（双明） | `double_open` | `junqi.training.train_double_open` | 129 点、对家同盟信息公开 |
+
+正式训练使用 `--model-scale main`：带死规则的 Policy 为 `144,157,704` 参数，
+Layout 为 `17,292,288` 参数，当前模型对合计 `161,449,992` 参数。二人版与四人版
+使用同一 Transformer 结构，但棋盘拓扑、合法动作空间和玩家主视角编码不同，因此
+检查点不能跨模式加载。`bootstrap` 用于流水线验证，`extended` 用于后续放大实验。
+
+### 单机与多机训练脚本
+
+单机 8 卡 910B（首次上机建议先把 `MICROBATCH` 保持为默认 `8`）：
+
+```bash
+NPROC_PER_NODE=8 RUN_DIR=/mnt/shared/siguozero-runs \
+  bash scripts/train_npu_cluster.sh two_player
+
+NPROC_PER_NODE=8 RUN_DIR=/mnt/shared/siguozero-runs \
+  bash scripts/train_npu_cluster.sh four_dark
+
+NPROC_PER_NODE=8 RUN_DIR=/mnt/shared/siguozero-runs \
+  bash scripts/train_npu_cluster.sh double_open
+```
+
+两节点、每节点 8 卡时，两台机器使用相同的 `MASTER_ADDR`、`MASTER_PORT`、
+`NNODES` 和共享存储 `RUN_DIR`，只改变 `NODE_RANK`：
+
+```bash
+# 节点 0
+MASTER_ADDR=10.0.0.10 MASTER_PORT=29500 NNODES=2 NODE_RANK=0 \
+NPROC_PER_NODE=8 ANCHOR_BATCH=128 BASE_GAME_POOL=64 \
+RUN_DIR=/mnt/shared/siguozero-runs \
+  bash scripts/train_npu_cluster.sh two_player
+
+# 节点 1
+MASTER_ADDR=10.0.0.10 MASTER_PORT=29500 NNODES=2 NODE_RANK=1 \
+NPROC_PER_NODE=8 ANCHOR_BATCH=128 BASE_GAME_POOL=64 \
+RUN_DIR=/mnt/shared/siguozero-runs \
+  bash scripts/train_npu_cluster.sh two_player
+```
+
+`ANCHOR_BATCH` 必须能被 `NNODES * NPROC_PER_NODE` 整除；脚本默认每 rank 分配 8
+个 anchor、4 个基础局。常用覆盖项还有 `MODEL_SCALE`、`MICROBATCH`、
+`ACTOR_BATCH`、`ROLLOUT_ANCHOR_WAVE`、`TEMPORAL_CACHE_ENTRIES`、`UPDATES`、
+`TARGET_CONTINUATION_PLIES` 和 `DEAD_RULES=0/1`。跨节点运行前应按集群网络设置
+HCCL/Gloo 网卡并放通 rendezvous 与 HCCL 端口；不要让各节点使用彼此独立的同名
+本地目录。
+
+先做两卡最小闭环验收：
+
+```bash
+NPROC_PER_NODE=2 ANCHOR_BATCH=2 BASE_GAME_POOL=2 MICROBATCH=1 \
+RUN_DIR=/mnt/shared/siguozero-smoke \
+  bash scripts/train_npu_cluster.sh two_player \
+  --smoke-test --updates 1 --max-game-plies 16 --checkpoint-every 1
+```
+
+容量和真实 rollout 探针也接受 NPU：
+
+```bash
+python tools/benchmark_cuda.py --device npu --mode two_player \
+  --model-scale main --context-tokens 1001 --batch-size 8
+python tools/benchmark_rollout.py --device npu --mode two_player \
+  --model-scale main --anchors 8 --full-stack
+```
+
+### 评测脚本与指标
+
+单 NPU 或集群评测会按全局 game index 分片，最终由 rank 0 汇总。它是同一检查点
+控制所有座位的固定种子自对弈回归，适合检查训练退化、终局分布与吞吐；由于双方/各
+方使用同一模型，`seat0/win_rate` 不能当作跨版本的绝对棋力分数。
+
+```bash
+# 单 NPU，输出汇总，并可选保存逐局记录
+NPROC_PER_NODE=1 GAMES=100 EVAL_SUMMARY=eval/two_player.json \
+EVAL_GAMES_JSONL=eval/two_player_games.jsonl \
+  bash scripts/evaluate_npu_cluster.sh \
+  runs_npu_910b/two_player/with_dead_rules/checkpoints/latest.pt
+
+# 两节点 16 NPU；两端 NODE_RANK 写法与训练相同
+MASTER_ADDR=10.0.0.10 MASTER_PORT=29501 NNODES=2 NODE_RANK=0 \
+NPROC_PER_NODE=8 GAMES=1000 EVAL_SUMMARY=eval/four_dark.json \
+  bash scripts/evaluate_npu_cluster.sh \
+  runs_npu_910b/four_dark/with_dead_rules/checkpoints/latest.pt
+```
+
+主要指标及解释：
+
+| 文件/指标 | 含义 |
+| --- | --- |
+| `metrics.jsonl` / `loss/policy_total`、`loss/layout_total` | Policy 与布阵模型总损失；关注趋势与 NaN/Inf，不直接比较两种模式的绝对值 |
+| `policy/kl_reference` | 当前策略相对 reference 的精确 KL；配置目标 `0.015`，超过 `0.0225` 会提前停止本 epoch |
+| `policy/clip_fraction` | PPO/GRPO ratio 被裁剪比例；达到 `0.30` 会提前停止本 epoch |
+| `policy/entropy`、`layout/entropy` | 着法与布阵分布熵，用于发现过早塌缩 |
+| `rollout/plies_per_second`、`rollout/continuations_per_second` | 全局 rollout 吞吐；应以目标 910B 集群实测建立基线 |
+| `rollout/wins/draws/losses` | 当前 update 的终局续局结果分布 |
+| `accelerator/*memory*_gib` | 每 rank 的 NPU/CUDA allocator 当前、保留和峰值显存 |
+| 评测 `seat0/win_rate`、`draw_rate`、`loss_rate` | 0 号座位/队伍结果比例，三者之和为 1 |
+| 评测 `plies/mean|min|max`、`terminal_reasons` | 平均/边界局长及终局原因分布 |
+| 评测 `throughput/games_per_second`、`plies_per_second` | 整个评测集群按最慢 rank 墙钟计算的吞吐 |
+
+训练会原子更新 `checkpoints/latest.pt`，并在 `metrics.jsonl`、`train.log`、可选
+TensorBoard 和每 rank 的 `resource_metrics.rankNNN.jsonl` 中记录状态。恢复时可以
+改变节点数/卡数，未结束基础局会重新分片；同一 launch 内所有 rank 必须使用一致的
+模型、死规则开关和 batch 参数。
+
+## CUDA/NPU 自对弈训练与推理实现
 
 每个训练模式只创建一套当前玩家网络：一个 `Policy` 实例和一个 `Layout`
 实例。二人模式的两个座位、四国模式的四个座位都把各自旋转后的主视角状态送入
@@ -91,11 +271,12 @@ python -m unittest discover -s tests -v
 
 默认算法从冻结旧策略独立采样 `K=4` 个根路径，每个路径复制 `M=2` 次，后续每一步同样按旧策略概率分布采样直到终局。`--dead-rules` 开启持久确定性身份标注与阵亡先验；`--no-dead-rules` 同时关闭这些标注，并从 Policy 结构中彻底删除 75 维阵亡输入、投影层和融合层。默认值由 `runtime.dead_rules_enabled` 控制（当前为开启）。详细边界见 [docs/dead_rule_ablation_zh.md](docs/dead_rule_ablation_zh.md)。
 
-rev.14 的 frozen actor 使用逐 token causal KV、持久化 copy-on-write 历史、8 锚点有界波和 packed 棋盘输入；learner 仍对原始 token 完整前向并正常反传。可用 `--no-incremental-inference` 做精确 A/B，或用 `--temporal-cache-entries`、`--rollout-anchor-wave` 调整缓存。真实终局吞吐探针：
+rev.15 的 frozen actor 使用物理页式 causal KV、持久化 copy-on-write 历史、单次动作 GPU→CPU 同步和 packed 棋盘输入；4090 main 默认按 24 锚点/192 分支有界波运行。learner 仍对原始 token 完整前向并正常反传。可用 `--no-paged-kv` 或 `--no-incremental-inference` 做 A/B，也可用 `--temporal-cache-entries`、`--rollout-anchor-wave` 调整缓存。真实终局吞吐探针：
 
 ```bash
 python tools/benchmark_rollout.py --mode two_player --model-scale main \
-  --anchors 8 --max-game-plies 600 --actor-batch 64 --full-stack
+  --anchors 24 --max-game-plies 600 --actor-batch 192 \
+  --anchor-wave 24 --temporal-cache-entries 576 --full-stack
 ```
 
 三种模式和两种死规则变体都使用独立目录。即使传入同一个 `--run-dir` 基目录，程序也会自动追加 `with_dead_rules` 或 `without_dead_rules`；检查点固化该开关并拒绝交叉续训/推理。启动时默认从各自的 `latest.pt` 原子检查点恢复；`--no-resume` 遇到已有检查点会拒绝启动，确保不会误覆盖训练状态。

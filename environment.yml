@@ -1,12 +1,11 @@
 name: siguozero
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
 dependencies:
   - python=3.12
-  - pytorch>=2.5
-  - pytorch-cuda>=12.4
+  - numpy=1.26.4
   - pyyaml>=6.0
   - tensorboard>=2.18
   - pip
+  - pip:
+      - torch==2.7.1

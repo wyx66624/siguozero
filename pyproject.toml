@@ -7,17 +7,19 @@ name = "siguozero"
 version = "0.2.0"
 description = "Trainable four-player and two-player Junqi rules engine"
 readme = "README.md"
-requires-python = ">=3.10"
-dependencies = []
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=1.26.4,<2",
+]
 
 [project.optional-dependencies]
 training = [
-    "torch>=2.5",
+    "torch==2.7.1",
     "PyYAML>=6.0",
     "tensorboard>=2.18",
 ]
 test = [
-    "torch>=2.5",
+    "torch==2.7.1",
     "PyYAML>=6.0",
 ]
 docs = [
@@ -35,6 +37,7 @@ siguozero-infer = "junqi.training.inference:main"
 siguozero-infer-four-dark = "junqi.training.infer_four_dark:main"
 siguozero-infer-double-open = "junqi.training.infer_double_open:main"
 siguozero-infer-two-player = "junqi.training.infer_two_player:main"
+siguozero-eval = "junqi.training.evaluate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

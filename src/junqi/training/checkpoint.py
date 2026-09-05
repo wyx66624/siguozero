@@ -11,6 +11,13 @@ from typing import Any
 import torch
 from torch import nn
 
+from .accelerator import (
+    ACCELERATOR_DEVICE_TYPES,
+    accelerator_available,
+    accelerator_module,
+    is_accelerator,
+)
+
 
 # Version 4 makes the deterministic dead-rule feature set an explicit,
 # architecture-changing training variant.  Cross-variant resume is forbidden.
@@ -18,36 +25,61 @@ CHECKPOINT_FORMAT_VERSION = 4
 
 
 def capture_rng_state(
-    cuda_device: torch.device | str | None = None,
+    accelerator_device: torch.device | str | None = None,
 ) -> dict[str, Any]:
     state: dict[str, Any] = {
         "python": random.getstate(),
         "torch_cpu": torch.get_rng_state(),
     }
-    if torch.cuda.is_available():
-        if cuda_device is None:
-            state["torch_cuda"] = torch.cuda.get_rng_state_all()
-        else:
-            device = torch.device(cuda_device)
-            if device.type == "cuda":
-                state["torch_cuda_local"] = torch.cuda.get_rng_state(device)
+    if accelerator_device is not None:
+        device = torch.device(accelerator_device)
+        if is_accelerator(device) and accelerator_available(device.type):
+            module = accelerator_module(device.type)
+            if device.index is None:
+                device = torch.device(device.type, module.current_device())
+            state["torch_accelerator"] = {
+                "device_type": device.type,
+                "device_index": device.index,
+                "rng_state": module.get_rng_state(device).cpu(),
+            }
+    elif torch.cuda.is_available():
+        # Preserve compatibility for callers that relied on capturing all CUDA
+        # generators before the generic accelerator checkpoint was added.
+        state["torch_cuda"] = torch.cuda.get_rng_state_all()
     return state
 
 
 def restore_rng_state(
     state: dict[str, Any],
-    cuda_device: torch.device | str | None = None,
+    accelerator_device: torch.device | str | None = None,
 ) -> None:
     random.setstate(state["python"])
     torch.set_rng_state(state["torch_cpu"].cpu())
-    if torch.cuda.is_available() and "torch_cuda" in state:
+    accelerator_state = state.get("torch_accelerator")
+    if isinstance(accelerator_state, dict):
+        saved_type = str(accelerator_state.get("device_type", ""))
+        if saved_type not in ACCELERATOR_DEVICE_TYPES:
+            raise RuntimeError("checkpoint contains an invalid accelerator RNG type")
+        target = (
+            torch.device(accelerator_device)
+            if accelerator_device is not None
+            else torch.device(
+                saved_type,
+                int(accelerator_state.get("device_index", 0)),
+            )
+        )
+        if target.type == saved_type and accelerator_available(saved_type):
+            accelerator_module(saved_type).set_rng_state(
+                accelerator_state["rng_state"].cpu(), target
+            )
+    elif torch.cuda.is_available() and "torch_cuda" in state:
         torch.cuda.set_rng_state_all(
             [generator_state.cpu() for generator_state in state["torch_cuda"]]
         )
     elif torch.cuda.is_available() and "torch_cuda_local" in state:
         device = (
-            torch.device(cuda_device)
-            if cuda_device is not None
+            torch.device(accelerator_device)
+            if accelerator_device is not None
             else torch.device("cuda", torch.cuda.current_device())
         )
         torch.cuda.set_rng_state(state["torch_cuda_local"].cpu(), device)
@@ -163,6 +195,7 @@ def restore_training_state(
     reference_layout: nn.Module,
     policy_optimizer: torch.optim.Optimizer,
     layout_optimizer: torch.optim.Optimizer,
+    accelerator_device: torch.device | str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     if payload["mode"] != expected_mode:
         raise RuntimeError(
@@ -180,5 +213,5 @@ def restore_training_state(
     reference_layout.load_state_dict(payload["reference_layout"], strict=True)
     policy_optimizer.load_state_dict(payload["policy_optimizer"])
     layout_optimizer.load_state_dict(payload["layout_optimizer"])
-    restore_rng_state(payload["rng_state"])
+    restore_rng_state(payload["rng_state"], accelerator_device)
     return int(payload["update"]), dict(payload.get("trainer_state", {}))
