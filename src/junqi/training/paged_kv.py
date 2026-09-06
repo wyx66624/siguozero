@@ -175,22 +175,21 @@ class PagedKVCache:
     def fork_for_append(
         self, prefixes: Sequence[PagedKVState]
     ) -> tuple[list[PagedKVState], Tensor, Tensor]:
-        """Fork immutable prefixes, copying at most their final partial page."""
+        """Fork variable-length prefixes, copying each final partial page."""
 
         if not prefixes:
             raise ValueError("cannot fork an empty paged KV batch")
-        length = prefixes[0].length
-        if any(prefix.length != length for prefix in prefixes):
-            raise ValueError("paged KV append batch must have one prefix length")
-        if length >= self.max_tokens:
+        if any(prefix.length >= self.max_tokens for prefix in prefixes):
             raise ValueError("paged KV append exceeds model position capacity")
-        remainder = length % self.page_size
         children: list[PagedKVState] = []
         append_pages: list[int] = []
+        append_offsets: list[int] = []
         clone_sources: list[int] = []
         clone_targets: list[int] = []
         try:
             for prefix in prefixes:
+                length = prefix.length
+                remainder = length % self.page_size
                 prefix_pages = prefix.page_indices
                 page = self._allocate_page()
                 if remainder:
@@ -215,6 +214,7 @@ class PagedKVCache:
                     PagedKVState(length + 1, child_pages, prefix.context)
                 )
                 append_pages.append(page)
+                append_offsets.append(append_offset)
             if clone_sources:
                 sources = torch.tensor(
                     clone_sources, dtype=torch.long, device=self.device
@@ -226,11 +226,8 @@ class PagedKVCache:
             page_tensor = torch.tensor(
                 append_pages, dtype=torch.long, device=self.device
             )
-            offset_tensor = torch.full(
-                (len(prefixes),),
-                append_offset,
-                dtype=torch.long,
-                device=self.device,
+            offset_tensor = torch.tensor(
+                append_offsets, dtype=torch.long, device=self.device
             )
             return children, page_tensor, offset_tensor
         except BaseException:
@@ -240,7 +237,7 @@ class PagedKVCache:
 
     def make_page_table(
         self, states: Sequence[PagedKVState]
-    ) -> tuple[Tensor, int]:
+    ) -> tuple[Tensor, Tensor | None, int]:
         if not states:
             raise ValueError("cannot build an empty paged KV page table")
         max_pages_per_state = max(len(state.page_indices) for state in states)
@@ -254,9 +251,22 @@ class PagedKVCache:
             page_table_cpu[index, : len(state.page_indices)] = torch.tensor(
                 state.page_indices, dtype=torch.int32
             )
-        maximum_length = max(state.length for state in states)
+        length_values = [state.length for state in states]
+        maximum_length = max(length_values)
+        valid_tokens = None
+        if min(length_values) != maximum_length:
+            lengths = torch.tensor(
+                length_values,
+                dtype=torch.long,
+                device=self.device,
+            )
+            valid_tokens = (
+                torch.arange(maximum_length, device=self.device).unsqueeze(0)
+                < lengths.unsqueeze(1)
+            ).unsqueeze(1).unsqueeze(1)
         return (
             page_table_cpu.to(self.device, non_blocking=pin_memory),
+            valid_tokens,
             maximum_length,
         )
 
@@ -276,6 +286,7 @@ class PagedKVCache:
         layer_index: int,
         queries: Tensor,
         page_table: Tensor,
+        valid_tokens: Tensor | None,
         max_tokens: int,
     ) -> Tensor:
         if queries.ndim != 3:
@@ -306,6 +317,7 @@ class PagedKVCache:
             queries.unsqueeze(2),
             keys,
             values,
+            attn_mask=valid_tokens,
             dropout_p=0.0,
             is_causal=False,
         ).squeeze(2)

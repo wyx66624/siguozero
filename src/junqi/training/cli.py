@@ -77,6 +77,7 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
     parser.add_argument("--rollout-anchor-wave", type=int, default=None)
     parser.add_argument("--environment-workers", type=int, default=None)
     parser.add_argument("--temporal-cache-entries", type=int, default=None)
+    parser.add_argument("--paged-kv-length-bucket", type=int, default=None)
     parser.add_argument(
         "--no-incremental-inference",
         action="store_true",
@@ -167,6 +168,7 @@ def main(
     )
     if (
         args.temporal_cache_entries is not None
+        or args.paged_kv_length_bucket is not None
         or args.no_incremental_inference
         or args.no_paged_kv
     ):
@@ -186,6 +188,11 @@ def main(
                 ),
                 paged_kv_cache=(
                     False if args.no_paged_kv else settings.model.paged_kv_cache
+                ),
+                paged_kv_length_bucket_tokens=(
+                    settings.model.paged_kv_length_bucket_tokens
+                    if args.paged_kv_length_bucket is None
+                    else args.paged_kv_length_bucket
                 ),
             ),
         )

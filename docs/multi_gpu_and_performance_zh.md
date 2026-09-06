@@ -148,12 +148,16 @@ global embedding，以免为每个棋盘常驻全部 60/129 个点向量而耗�
 - `encoding/temporal_cache_hits`
 - `encoding/temporal_cold_states`
 - `encoding/temporal_incremental_tokens`
+- `encoding/temporal_incremental_batches`
+- `encoding/temporal_incremental_batch_mean`
+- `encoding/temporal_incremental_batch_max`
 - `encoding/temporal_attention_saved_fraction`
 - `encoding/paged_kv_enabled`
 - `encoding/paged_kv_pages`
 - `encoding/paged_kv_peak_pages`
 - `encoding/paged_kv_capacity_pages`
 - `encoding/paged_kv_allocated_gib`
+- `encoding/paged_kv_padding_fraction`
 - `optimizer/temporal_padding_fraction`
 
 双进程 CPU tiny 冒烟中，`board_encoder_saved_fraction` 为约 `54%`。这只证明
@@ -214,6 +218,18 @@ update 11 从 update 10 的同一 checkpoint 独立恢复，产生 `1,024` 条 c
 `2,996,804,192` 步约需 `54.8` 个连续运行日；按 90% 可用率是 `60.9` 日。
 考虑后续分布变化和训练外评测，单张 4090 规划为 **61～70 天**，继续用至少
 10 个新实现 update 的移动中位数修正。
+
+2026-09-06 的长跑复核发现：旧实现按精确 prefix length 拆分页式 KV decode。
+基础棋局池从 update 100 的 `6` 种历史长度扩散到 update 205 的 `52` 种后，
+名义 actor batch `160` 实际退化成约 `8～10` row 的大量小调用。现在对不同长度
+使用有效 token mask，并以完整 `1001`-token 历史窗合并 decode；每个独立 anchor
+wave 还会归还已经无用的 SDPA 临时缓存。update 205 checkpoint 的完整训练栈、
+全部 `64` 个池槽只读 A/B 达到 **500.38 continuation plies/s**，实际增量 batch
+均值 `57.31`、最大值 `160`，无 batch 回退；峰值 reserved `19.81 GiB`，最后一个
+wave 后为 `14.53 GiB`。这项数字是同断点 rollout 基准，仍需后续完整 update
+持续确认。随后正式恢复的 update 206 完成 `196,778` 步，rollout 为
+**509.90 continuation plies/s**，整轮从修复前 update 205 的 `1669.21 s`
+降至 `413.86 s`；梯度、优化器和原子 checkpoint 均正常，并已继续 update 207。
 
 ## 8. 后续按收益排序的工程路线
 

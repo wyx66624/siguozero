@@ -21,6 +21,7 @@ exec python -m junqi.training.train_two_player \
   --rollout-anchor-wave 20 \
   --environment-workers 2 \
   --temporal-cache-entries 480 \
+  --paged-kv-length-bucket 1001 \
   --target-continuation-plies 3000000000 \
   --checkpoint-every 1 \
   --archive-every 100 \

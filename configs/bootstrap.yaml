@@ -350,6 +350,9 @@ runtime:
   # 避免每 token/层 cat 整段历史。
   # learner 仍走普通全序列 attention；CLI --no-paged-kv 可做严格 A/B。
   paged_kv_cache: true
+  # 页式 KV 允许不同历史长度共用一次带 mask 的 SDPA。1001 覆盖完整历史窗，
+  # 避免长期训练后退化成大量 8-row 小批次；真实 checkpoint A/B 快于窄桶。
+  paged_kv_length_bucket_tokens: 1001
   inference_temporal_cache_entries: 192
   base_game_pool_size:
     four_dark: 32

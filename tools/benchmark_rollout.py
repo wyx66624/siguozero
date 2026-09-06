@@ -68,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--incremental", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--paged-kv", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--paged-kv-length-bucket", type=int, default=1001)
     parser.add_argument("--dead-rules", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
@@ -89,6 +90,7 @@ def make_config(args: argparse.Namespace, mode: TrainingMode) -> ModelConfig:
         base,
         incremental_inference=args.incremental,
         paged_kv_cache=args.paged_kv,
+        paged_kv_length_bucket_tokens=args.paged_kv_length_bucket,
         inference_temporal_cache_entries=args.temporal_cache_entries,
     )
 
@@ -117,6 +119,7 @@ def main() -> None:
             ModelConfig(**checkpoint_payload["config"]["model"]),
             incremental_inference=args.incremental,
             paged_kv_cache=args.paged_kv,
+            paged_kv_length_bucket_tokens=args.paged_kv_length_bucket,
             inference_temporal_cache_entries=args.temporal_cache_entries,
         )
     torch.manual_seed(20260903)
@@ -253,6 +256,7 @@ def main() -> None:
         "policy_parameters": parameter_count(policy),
         "incremental_inference": args.incremental,
         "paged_kv_cache": args.paged_kv,
+        "paged_kv_length_bucket_tokens": args.paged_kv_length_bucket,
         "anchors": len(groups),
         "max_game_plies": benchmark_max_game_plies,
         "actor_batch": actor.max_batch_size,

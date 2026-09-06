@@ -138,6 +138,9 @@ class TrainingSettings:
                 runtime.get("incremental_inference", True)
             ),
             paged_kv_cache=bool(runtime.get("paged_kv_cache", True)),
+            paged_kv_length_bucket_tokens=int(
+                runtime.get("paged_kv_length_bucket_tokens", 1001)
+            ),
         )
         profile_pool = runtime.get("base_game_pool_size", {})
         microbatch_profile = runtime.get("policy_microbatch", 1)

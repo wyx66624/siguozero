@@ -177,6 +177,13 @@ class FrozenPolicyActor:
         """Bound KV memory between independent anchor waves."""
 
         self.policy.reset_inference_temporal_cache()
+        if self.device_type in ("cuda", "npu"):
+            # The fixed paged arena remains allocated, while temporary SDPA
+            # gathers and variable-length workspaces are no longer useful to
+            # the next independent wave.  Returning those cached blocks here
+            # prevents WDDM reserved memory from ratcheting toward device
+            # capacity during long, diverse rollouts.
+            empty_cache(self.policy.device)
 
 
 class BaseGamePool:

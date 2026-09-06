@@ -67,6 +67,7 @@ class ModelConfig:
     inference_temporal_cache_entries: int = 192
     incremental_inference: bool = True
     paged_kv_cache: bool = True
+    paged_kv_length_bucket_tokens: int = 1001
     activation_checkpointing: bool = True
     dead_rules_enabled: bool = True
 
@@ -90,6 +91,8 @@ class ModelConfig:
             raise ValueError("incremental_inference must be a boolean")
         if not isinstance(self.paged_kv_cache, bool):
             raise ValueError("paged_kv_cache must be a boolean")
+        if self.paged_kv_length_bucket_tokens <= 0:
+            raise ValueError("paged KV length bucket must be positive")
         if not isinstance(self.dead_rules_enabled, bool):
             raise ValueError("dead_rules_enabled must be a boolean")
 
@@ -856,6 +859,11 @@ class GamePolicyTransformer(nn.Module):
         self._temporal_cache_hits = 0
         self._temporal_cold_states = 0
         self._temporal_incremental_tokens = 0
+        self._temporal_incremental_batches = 0
+        self._temporal_incremental_batch_rows = 0
+        self._temporal_incremental_batch_max = 0
+        self._paged_kv_valid_attention_tokens = 0
+        self._paged_kv_total_attention_tokens = 0
 
     def board_encoding_metrics(self) -> dict[str, float]:
         raw_tokens = max(self._raw_board_tokens, 1)
@@ -914,6 +922,25 @@ class GamePolicyTransformer(nn.Module):
             "encoding/temporal_cold_states": float(self._temporal_cold_states),
             "encoding/temporal_incremental_tokens": float(
                 self._temporal_incremental_tokens
+            ),
+            "encoding/temporal_incremental_batches": float(
+                self._temporal_incremental_batches
+            ),
+            "encoding/temporal_incremental_batch_mean": float(
+                0.0
+                if self._temporal_incremental_batches == 0
+                else self._temporal_incremental_batch_rows
+                / self._temporal_incremental_batches
+            ),
+            "encoding/temporal_incremental_batch_max": float(
+                self._temporal_incremental_batch_max
+            ),
+            "encoding/paged_kv_padding_fraction": float(
+                0.0
+                if self._paged_kv_total_attention_tokens == 0
+                else 1.0
+                - self._paged_kv_valid_attention_tokens
+                / self._paged_kv_total_attention_tokens
             ),
             "encoding/temporal_attention_saved_fraction": float(
                 0.0
@@ -1080,9 +1107,17 @@ class GamePolicyTransformer(nn.Module):
         records: Sequence[StateTokenRecord],
         mode: TrainingMode,
         board_globals: Tensor,
-        position: int,
+        position: int | Sequence[int],
     ) -> Tensor:
-        if position >= self.config.max_sequence_tokens:
+        if isinstance(position, int):
+            positions = [position] * len(records)
+        else:
+            positions = [int(value) for value in position]
+            if len(positions) != len(records):
+                raise ValueError("incremental positions must match record batch")
+        if not positions or min(positions) < 0:
+            raise ValueError("incremental positions must be non-negative")
+        if max(positions) >= self.config.max_sequence_tokens:
             raise ValueError("incremental history exceeds model position capacity")
         pin_memory = supports_pinned_memory(self.device)
         fields = torch.zeros(
@@ -1108,12 +1143,9 @@ class GamePolicyTransformer(nn.Module):
         return (
             tokens
             + self.position_embedding(
-                torch.full(
-                    (len(records), 1),
-                    position,
-                    dtype=torch.long,
-                    device=self.device,
-                )
+                torch.tensor(
+                    positions, dtype=torch.long, device=self.device
+                ).unsqueeze(1)
             )
             + self.mode_embedding(
                 torch.full(
@@ -1169,6 +1201,11 @@ class GamePolicyTransformer(nn.Module):
                 point_mask,
             )
 
+        self._temporal_incremental_batches += missing
+        self._temporal_incremental_batch_rows += len(states) * missing
+        self._temporal_incremental_batch_max = max(
+            self._temporal_incremental_batch_max, len(states)
+        )
         for offset in range(missing):
             position = caches[0].length
             if any(cache.length != position for cache in caches):
@@ -1246,10 +1283,13 @@ class GamePolicyTransformer(nn.Module):
             )
             return PolicyFeatures(contexts, current_points, point_mask)
 
+        self._temporal_incremental_batches += missing
+        self._temporal_incremental_batch_rows += len(states) * missing
+        self._temporal_incremental_batch_max = max(
+            self._temporal_incremental_batch_max, len(states)
+        )
         for offset in range(missing):
-            position = caches[0].length
-            if any(cache.length != position for cache in caches):
-                raise ValueError("paged incremental cache lengths must be bucketed")
+            positions = [cache.length for cache in caches]
             records = [
                 state.records[len(state.records) - missing + offset]
                 for state in states
@@ -1258,11 +1298,13 @@ class GamePolicyTransformer(nn.Module):
                 records, mode
             )
             hidden = self._record_temporal_tokens(
-                records, mode, board_globals, position
+                records, mode, board_globals, positions
             )
             children, append_pages, append_offsets = store.fork_for_append(caches)
             try:
-                page_table, max_tokens = store.make_page_table(children)
+                page_table, valid_tokens, max_tokens = store.make_page_table(
+                    children
+                )
                 for layer_index, layer in enumerate(self.temporal_layers):
                     queries, keys, values = layer.incremental_projection(hidden)
                     store.append(
@@ -1276,6 +1318,7 @@ class GamePolicyTransformer(nn.Module):
                         layer_index,
                         queries.squeeze(2),
                         page_table,
+                        valid_tokens,
                         max_tokens,
                     )
                     attended = attended.reshape(
@@ -1297,7 +1340,10 @@ class GamePolicyTransformer(nn.Module):
                     store.release(cache)
             caches = children
             self._temporal_incremental_tokens += len(states)
-            self._temporal_computed_pairs += len(states) * (position + 1)
+            valid_attention_tokens = sum(cache.length for cache in caches)
+            self._temporal_computed_pairs += valid_attention_tokens
+            self._paged_kv_valid_attention_tokens += valid_attention_tokens
+            self._paged_kv_total_attention_tokens += len(caches) * max_tokens
 
         for state, cache in zip(states, caches, strict=True):
             self._put_temporal_cache((mode, state.records), cache)
@@ -1372,13 +1418,26 @@ class GamePolicyTransformer(nn.Module):
                 points[index] = cold_features.current_points[row]
                 masks[index] = cold_features.point_mask[row]
 
-        buckets: dict[tuple[int, int], list[int]] = {}
+        buckets: dict[tuple[str, int, int], list[int]] = {}
         for index, prefix in enumerate(prefixes):
             if prefix is None:
                 continue
-            key = (prefix.length, missing_counts[index])
+            if isinstance(prefix, PagedKVState):
+                # Paged attention can mask padded tail tokens, so nearby
+                # prefix lengths should share one accelerator invocation.
+                # Exact-length bucketing eventually shrinks a nominal actor
+                # batch to the eight replicas of a single diverse anchor.
+                length_bucket = (
+                    (prefix.length - 1)
+                    // self.config.paged_kv_length_bucket_tokens
+                )
+                key = ("paged", length_bucket, missing_counts[index])
+            else:
+                # Contiguous tensors still require exactly matching lengths
+                # before they can be stacked.
+                key = ("contiguous", prefix.length, missing_counts[index])
             buckets.setdefault(key, []).append(index)
-        for (_prefix_length, missing), indices in buckets.items():
+        for (_cache_kind, _length_bucket, missing), indices in buckets.items():
             bucket_states = [unique_states[index] for index in indices]
             bucket_prefixes = [prefixes[index] for index in indices]
             features = self._advance_temporal_group(
