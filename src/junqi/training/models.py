@@ -37,6 +37,7 @@ from .encoding import (
     MAX_CASUALTY_BITS,
     PolicyState,
     StateTokenRecord,
+    history_prefix_groups,
 )
 from .accelerator import is_accelerator, supports_pinned_memory
 from .modes import MODE_SPECS, TrainingMode, mode_spec, normalize_mode
@@ -46,6 +47,51 @@ from .paged_kv import PagedKVCache, PagedKVState
 DEPLOYMENT_POINT_ORDER: tuple[tuple[int, int], ...] = tuple(
     sorted(SETUP_COORDINATES)
 )
+
+
+def _validate_sampling_uniforms(
+    uniforms: Tensor, *, state_count: int, sample_count: int
+) -> None:
+    """Check the sampling contract without synchronizing accelerator inputs.
+
+    Accelerator values are checked when sampled actions return to the referee.
+    Arena callers normally supply CPU uniforms from their per-game generators.
+    """
+
+    if not isinstance(uniforms, Tensor) or not uniforms.is_floating_point():
+        raise ValueError("sampling_uniforms must be a floating-point tensor")
+    if uniforms.shape != (state_count, sample_count, 2):
+        raise ValueError(
+            "sampling_uniforms must have shape [states, count, 2] "
+            f"= [{state_count}, {sample_count}, 2]"
+        )
+    if uniforms.device.type == "cpu" and not bool(
+        (torch.isfinite(uniforms) & (uniforms >= 0) & (uniforms < 1)).all()
+    ):
+        raise ValueError("sampling_uniforms must contain finite values in [0, 1)")
+
+
+def _categorical_from_uniforms(probabilities: Tensor, uniforms: Tensor) -> Tensor:
+    """Sample rows with supplied uniforms, without consuming a global RNG.
+
+    Explicit positive weights skip masked points even at a rounded CDF plateau.
+    Normalizing by the cumulative total makes the last positive entry exactly
+    one; clamping handles float64 uniforms that round up when cast to float32.
+    """
+
+    probabilities = probabilities.float()
+    cumulative = probabilities.cumsum(dim=-1)
+    cumulative = cumulative / cumulative[..., -1:]
+    # Cast on the originating device: Ascend does not support transferring a
+    # CPU float64 tensor to the NPU and casting it afterwards.
+    uniforms = uniforms.to(dtype=torch.float32).to(device=probabilities.device)
+    uniforms = uniforms.clamp(max=1.0 - 2.0**-24)
+    eligible = (cumulative.unsqueeze(-2) > uniforms.unsqueeze(-1)) & (
+        probabilities.unsqueeze(-2) > 0
+    )
+    return eligible.to(torch.float32).argmax(dim=-1)
+
+
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
     board_dim: int = 256
@@ -791,7 +837,7 @@ class GamePolicyTransformer(nn.Module):
         # The cache is explicitly enabled only for a frozen rollout actor and
         # cleared before learner mode.  It stores detached board-global tokens,
         # never tensors used for gradient computation.
-        self._inference_board_cache: dict[object, Tensor] = {}
+        self._inference_board_cache: OrderedDict[object, Tensor] = OrderedDict()
         self._inference_board_cache_limit = 0
         self._inference_temporal_cache: OrderedDict[
             object, _TemporalStateCache | PagedKVState
@@ -1008,6 +1054,12 @@ class GamePolicyTransformer(nn.Module):
 
     def _ensure_paged_kv_store(self, dtype: torch.dtype) -> PagedKVCache | None:
         if not self._paged_kv_requested:
+            return None
+        if dtype not in (torch.float16, torch.bfloat16):
+            if self._paged_kv_store is not None:
+                raise RuntimeError("actor autocast dtype changed inside a paged KV phase")
+            # Float32 evaluation is supported by the contiguous cache. Paged
+            # decode kernels require half precision; keep the chosen arithmetic.
             return None
         if self._paged_kv_store is None:
             self._paged_kv_store = PagedKVCache(
@@ -1288,20 +1340,25 @@ class GamePolicyTransformer(nn.Module):
         self._temporal_incremental_batch_max = max(
             self._temporal_incremental_batch_max, len(states)
         )
-        for offset in range(missing):
-            positions = [cache.length for cache in caches]
-            records = [
-                state.records[len(state.records) - missing + offset]
-                for state in states
-            ]
-            board_globals, current_points, point_mask = self._record_board_batch(
-                records, mode
-            )
-            hidden = self._record_temporal_tokens(
-                records, mode, board_globals, positions
-            )
-            children, append_pages, append_offsets = store.fork_for_append(caches)
-            try:
+        # Initial prefixes belong to the LRU. Every fork belongs to this call
+        # until installed in that LRU; errors at a later append offset must
+        # release intermediate generations as well as partially computed tips.
+        owned_caches: dict[int, PagedKVState] = {}
+        try:
+            for offset in range(missing):
+                positions = [cache.length for cache in caches]
+                records = [
+                    state.records[len(state.records) - missing + offset]
+                    for state in states
+                ]
+                board_globals, current_points, point_mask = self._record_board_batch(
+                    records, mode
+                )
+                hidden = self._record_temporal_tokens(
+                    records, mode, board_globals, positions
+                )
+                children, append_pages, append_offsets = store.fork_for_append(caches)
+                owned_caches.update((id(child), child) for child in children)
                 page_table, valid_tokens, max_tokens = store.make_page_table(
                     children
                 )
@@ -1328,27 +1385,34 @@ class GamePolicyTransformer(nn.Module):
                 contexts = self.temporal_norm(hidden).squeeze(1)
                 for index, child in enumerate(children):
                     child.context = contexts[index].detach()
-            except BaseException:
-                for child in children:
-                    store.release(child)
-                raise
 
-            # Prefixes created only for a multi-token gap are not LRU-owned and
-            # can be released as soon as their child generation is complete.
-            if offset > 0:
+                # Borrowed prefixes remain owned by the LRU. Only release
+                # parents created by an earlier offset of this same call.
                 for cache in caches:
-                    store.release(cache)
-            caches = children
-            self._temporal_incremental_tokens += len(states)
-            valid_attention_tokens = sum(cache.length for cache in caches)
-            self._temporal_computed_pairs += valid_attention_tokens
-            self._paged_kv_valid_attention_tokens += valid_attention_tokens
-            self._paged_kv_total_attention_tokens += len(caches) * max_tokens
+                    if id(cache) in owned_caches:
+                        store.release(cache)
+                        del owned_caches[id(cache)]
+                caches = children
+                self._temporal_incremental_tokens += len(states)
+                valid_attention_tokens = sum(cache.length for cache in caches)
+                self._temporal_computed_pairs += valid_attention_tokens
+                self._paged_kv_valid_attention_tokens += valid_attention_tokens
+                self._paged_kv_total_attention_tokens += len(caches) * max_tokens
 
-        for state, cache in zip(states, caches, strict=True):
-            self._put_temporal_cache((mode, state.records), cache)
-        assert current_points is not None and point_mask is not None
-        return PolicyFeatures(contexts, current_points, point_mask)
+            for state, cache in zip(states, caches, strict=True):
+                key = (mode, state.records)
+                self._put_temporal_cache(key, cache)
+                if self._inference_temporal_cache.get(key) is cache:
+                    del owned_caches[id(cache)]
+            assert current_points is not None and point_mask is not None
+            return PolicyFeatures(contexts, current_points, point_mask)
+        finally:
+            if owned_caches:
+                retained = {id(cache) for cache in self._inference_temporal_cache.values()}
+                for identity, cache in owned_caches.items():
+                    # Also tolerate an exception after a cache insertion committed.
+                    if identity not in retained:
+                        store.release(cache)
 
     def _encode_incremental(
         self, states: Sequence[PolicyState]
@@ -1481,13 +1545,25 @@ class GamePolicyTransformer(nn.Module):
         states: Sequence[PolicyState],
         *,
         count_history_stats: bool = True,
+        pack_prefixes: bool = False,
     ) -> PolicyFeatures:
         if not states:
             raise ValueError("cannot encode an empty policy batch")
         deduplicate = not self.training or self.config.dropout == 0.0
         original_states = states
+        packed = pack_prefixes and self.config.dropout == 0.0
+        query_rows: list[int] = []
+        query_positions: list[int] = []
         state_inverse: list[int] = []
-        if deduplicate:
+        if packed:
+            groups = history_prefix_groups(states)
+            query_rows = [0] * len(original_states)
+            query_positions = [len(state.records) - 1 for state in original_states]
+            for row, members in enumerate(groups):
+                for index in members:
+                    query_rows[index] = row
+            states = [original_states[members[0]] for members in groups]
+        elif deduplicate:
             unique_states: list[PolicyState] = []
             state_to_unique: dict[object, int] = {}
             for state in original_states:
@@ -1501,6 +1577,9 @@ class GamePolicyTransformer(nn.Module):
             states = unique_states
         else:
             state_inverse = list(range(len(states)))
+        if not packed:
+            query_rows = list(range(len(states)))
+            query_positions = [len(state.records) - 1 for state in states]
         if count_history_stats:
             self._history_input_states += len(original_states)
             self._history_unique_states += len(states)
@@ -1535,10 +1614,11 @@ class GamePolicyTransformer(nn.Module):
         unique_keys: list[object] = []
         unique_source_offsets: list[int] = []
         inverse_offsets: list[int] = []
-        last_unique_offsets: list[int] = []
+        sequence_starts: list[int] = []
         key_to_unique: dict[object, int] = {}
         compact_offset = 0
         for state in states:
+            sequence_starts.append(compact_offset)
             for record in state.records:
                 key: object
                 if deduplicate:
@@ -1557,18 +1637,22 @@ class GamePolicyTransformer(nn.Module):
                     unique_source_offsets.append(compact_offset)
                 inverse_offsets.append(unique_offset)
                 compact_offset += 1
-            last_unique_offsets.append(inverse_offsets[-1])
+        last_unique_offsets = [
+            inverse_offsets[sequence_starts[row] + position]
+            for row, position in zip(query_rows, query_positions, strict=True)
+        ]
 
         self._board_input_tokens += len(inverse_offsets)
         self._board_unique_tokens += len(unique_keys)
         current_unique = set(last_unique_offsets)
         encode_unique: list[int] = []
         global_rows: list[Tensor | None] = [None] * len(unique_keys)
-        current_point_rows: list[Tensor | None] = [None] * batch_size
+        current_point_rows: list[Tensor | None] = [None] * len(query_rows)
         if cache_active:
             for unique_offset, key in enumerate(unique_keys):
                 cached = self._inference_board_cache.get(key)
                 if cached is not None and unique_offset not in current_unique:
+                    self._inference_board_cache.move_to_end(key)
                     global_rows[unique_offset] = cached
                     self._board_cache_hits += 1
                 else:
@@ -1604,16 +1688,17 @@ class GamePolicyTransformer(nn.Module):
             )
             for local_offset, unique_offset in enumerate(chunk_unique):
                 global_rows[unique_offset] = chunk_globals[local_offset]
-                if (
-                    cache_active
-                    and unique_keys[unique_offset]
-                    not in self._inference_board_cache
-                    and len(self._inference_board_cache)
-                    < self._inference_board_cache_limit
-                ):
-                    self._inference_board_cache[unique_keys[unique_offset]] = (
+                if cache_active:
+                    key = unique_keys[unique_offset]
+                    self._inference_board_cache[key] = (
                         chunk_globals[local_offset].detach().clone()
                     )
+                    self._inference_board_cache.move_to_end(key)
+                    # A continuous arena must retain recent games after the
+                    # cache fills; global_rows still owns any evicted tensors
+                    # needed by the current batch.
+                    while len(self._inference_board_cache) > self._inference_board_cache_limit:
+                        self._inference_board_cache.popitem(last=False)
             matches = (
                 chunk_unique_tensor.unsqueeze(1)
                 == last_unique_tensor.unsqueeze(0)
@@ -1674,6 +1759,7 @@ class GamePolicyTransformer(nn.Module):
             self._inference_temporal_cache_limit > 0
             and not self.training
             and not torch.is_grad_enabled()
+            and not packed
         )
         captured_keys: list[Tensor] = []
         captured_values: list[Tensor] = []
@@ -1701,9 +1787,12 @@ class GamePolicyTransformer(nn.Module):
                     attention_mask=causal_mask,
                 )
         tokens = self.temporal_norm(tokens)
-        last_indices = batch.token_mask.sum(dim=1) - 1
-        contexts = tokens[torch.arange(batch_size, device=self.device), last_indices]
-        features = PolicyFeatures(contexts, current_points, batch.point_mask)
+        query_row_tensor = torch.tensor(query_rows, dtype=torch.long, device=self.device)
+        query_position_tensor = torch.tensor(query_positions, dtype=torch.long, device=self.device)
+        contexts = tokens[query_row_tensor, query_position_tensor]
+        features = PolicyFeatures(
+            contexts, current_points, batch.point_mask.index_select(0, query_row_tensor)
+        )
         if capture_temporal:
             paged_store = self._ensure_paged_kv_store(captured_keys[0].dtype)
             for index, state in enumerate(states):
@@ -1738,7 +1827,7 @@ class GamePolicyTransformer(nn.Module):
                     self._temporal_requested_pairs += pairs
                 self._temporal_computed_pairs += pairs
                 self._temporal_cold_states += 1
-        if len(states) != len(original_states):
+        if not packed and len(states) != len(original_states):
             expansion = torch.tensor(
                 state_inverse, dtype=torch.long, device=self.device
             )
@@ -1754,11 +1843,13 @@ class GamePolicyTransformer(nn.Module):
         states: Sequence[PolicyState],
         actions_by_state: Sequence[Sequence[tuple[int, int]]],
         temperature: float = 1.0,
+        *,
+        pack_sequences: bool = False,
     ) -> list[Tensor]:
         """DDP-compatible entry point for policy likelihood training."""
 
         return self.log_probs_for_action_groups(
-            states, actions_by_state, temperature=temperature
+            states, actions_by_state, temperature=temperature, pack_sequences=pack_sequences
         )
 
     def _source_log_probs(
@@ -1857,14 +1948,20 @@ class GamePolicyTransformer(nn.Module):
         actions_by_state: Sequence[Sequence[tuple[int, int]]],
         *,
         temperature: float = 1.0,
+        pack_sequences: bool = False,
     ) -> list[Tensor]:
         if len(states) != len(actions_by_state):
             raise ValueError("states and action groups must have the same length")
-        features = self.encode(states)
+        features = (self._encode_full(states, pack_prefixes=True)
+                    if pack_sequences else self.encode(states))
         source_log_probs = self._source_log_probs(features, states, temperature)
         flat_batch: list[int] = []
         flat_sources: list[int] = []
         flat_targets: list[int] = []
+        source_groups: dict[tuple[int, int], int] = {}
+        unique_batch: list[int] = []
+        unique_sources: list[int] = []
+        destination_rows: list[int] = []
         lengths: list[int] = []
         for batch_index, actions in enumerate(actions_by_state):
             lengths.append(len(actions))
@@ -1874,16 +1971,28 @@ class GamePolicyTransformer(nn.Module):
                 flat_batch.append(batch_index)
                 flat_sources.append(source)
                 flat_targets.append(target)
+                key = (batch_index, source)
+                group = source_groups.get(key)
+                if group is None:
+                    group = len(unique_batch)
+                    source_groups[key] = group
+                    unique_batch.append(batch_index)
+                    unique_sources.append(source)
+                destination_rows.append(group)
         if not flat_batch:
             return [torch.empty(0, device=self.device) for _ in states]
         batch_indices = torch.tensor(flat_batch, dtype=torch.long, device=self.device)
         sources = torch.tensor(flat_sources, dtype=torch.long, device=self.device)
         targets = torch.tensor(flat_targets, dtype=torch.long, device=self.device)
+        # All destinations of one source share its conditional distribution.
+        # Evaluate it once, avoiding one duplicated point matrix per legal move.
         destination_log_probs = self._destination_log_probs(
-            features, states, batch_indices, sources, temperature
+            features, states,
+            torch.tensor(unique_batch, dtype=torch.long, device=self.device),
+            torch.tensor(unique_sources, dtype=torch.long, device=self.device), temperature
         )
         joint = source_log_probs[batch_indices, sources] + destination_log_probs[
-            torch.arange(len(flat_batch), device=self.device), targets
+            torch.tensor(destination_rows, dtype=torch.long, device=self.device), targets
         ]
         return list(joint.split(lengths))
 
@@ -1895,11 +2004,29 @@ class GamePolicyTransformer(nn.Module):
         count: int = 1,
         temperature: float = 1.0,
         return_log_probs: bool = True,
+        sampling_uniforms: Tensor | None = None,
     ) -> tuple[list[list[tuple[int, int]]], list[Tensor]]:
-        """IID joint-policy samples with replacement and their behavior log-probs."""
+        """Joint-policy samples and logs, optionally using per-state RNG draws.
+
+        ``sampling_uniforms[batch, sample]`` supplies source and destination
+        uniforms, making game randomness independent of actor batching order.
+        Omitting it preserves the training multinomial sampling path.
+        """
 
         if count <= 0:
             raise ValueError("sample count must be positive")
+        uniform_values_valid = None
+        if sampling_uniforms is not None:
+            _validate_sampling_uniforms(
+                sampling_uniforms, state_count=len(states), sample_count=count
+            )
+            if sampling_uniforms.device.type != "cpu":
+                uniform_values_valid = (
+                    torch.isfinite(sampling_uniforms)
+                    & (sampling_uniforms >= 0)
+                    & (sampling_uniforms < 1)
+                ).all().to(self.device)
+            sampling_uniforms = sampling_uniforms.to(dtype=torch.float32).to(self.device)
         features = self.encode(states)
         source_masks, destination_masks = self._sampling_legal_masks(
             states, features.current_points.shape[1]
@@ -1911,8 +2038,12 @@ class GamePolicyTransformer(nn.Module):
             legal_masks=source_masks,
         )
         source_probabilities = source_log_probs.exp()
-        sampled_sources = torch.multinomial(
-            source_probabilities, count, replacement=True
+        sampled_sources = (
+            torch.multinomial(source_probabilities, count, replacement=True)
+            if sampling_uniforms is None
+            else _categorical_from_uniforms(
+                source_probabilities, sampling_uniforms[..., 0]
+            )
         )
         batch_indices = torch.arange(len(states), device=self.device).repeat_interleave(
             count
@@ -1935,8 +2066,12 @@ class GamePolicyTransformer(nn.Module):
             ),
             dim=-1,
         )
-        sampled_targets = torch.multinomial(
-            destination_log_probs.exp(), 1, replacement=True
+        sampled_targets = (
+            torch.multinomial(destination_log_probs.exp(), 1, replacement=True)
+            if sampling_uniforms is None
+            else _categorical_from_uniforms(
+                destination_log_probs.exp(), sampling_uniforms[..., 1].reshape(-1, 1)
+            )
         ).squeeze(-1)
         joint = None
         if return_log_probs:
@@ -1945,7 +2080,22 @@ class GamePolicyTransformer(nn.Module):
             ]
         # This is the only mandatory device-to-host synchronization in a
         # sampling step: the Python rules engine needs the chosen action.
-        sampled_pairs = torch.stack((flat_sources, sampled_targets), dim=-1).cpu()
+        sampled_pairs = torch.stack((flat_sources, sampled_targets), dim=-1)
+        if uniform_values_valid is not None:
+            # Include validation with the required action transfer: invalid
+            # device inputs raise normally without an extra synchronization or
+            # an asynchronous assertion that could poison the CUDA context.
+            sampled_pairs = torch.cat((
+                sampled_pairs,
+                uniform_values_valid.to(torch.long).reshape(1, 1).expand(1, 2),
+            ))
+        sampled_pairs = sampled_pairs.cpu()
+        if uniform_values_valid is not None:
+            if not bool(sampled_pairs[-1, 0]):
+                raise ValueError(
+                    "sampling_uniforms must contain finite values in [0, 1)"
+                )
+            sampled_pairs = sampled_pairs[:-1]
         joint_cpu = None if joint is None else joint.detach().cpu()
         actions: list[list[tuple[int, int]]] = []
         log_probs: list[Tensor] = []
@@ -1969,6 +2119,39 @@ class GamePolicyTransformer(nn.Module):
         groups = [state.legal_actions for state in states]
         logs = self.log_probs_for_action_groups(states, groups)
         return logs, [item.exp() for item in logs]
+
+
+class GameValueTransformer(GamePolicyTransformer):
+    """Independent policy-sized critic with one scalar per player-view history.
+
+    The board and causal history encoders are identical to the policy's.  Only
+    the two action queries are replaced; no policy parameters or caches are
+    shared.  Values describe the observing player's team's expected return.
+    """
+
+    def __init__(self, config: ModelConfig | None = None) -> None:
+        super().__init__(config)
+        del self.source_query
+        del self.destination_query
+        self.value_head = nn.Linear(self.config.temporal_dim, 1)
+        nn.init.zeros_(self.value_head.weight)
+        nn.init.zeros_(self.value_head.bias)
+
+    def initialize_from_policy(self, policy: GamePolicyTransformer) -> None:
+        if policy.config != self.config:
+            raise ValueError("critic and policy configurations must match")
+        backbone = {
+            key: value for key, value in policy.state_dict().items()
+            if not key.startswith(("source_query.", "destination_query."))
+        }
+        missing, unexpected = self.load_state_dict(backbone, strict=False)
+        if set(missing) != {"value_head.weight", "value_head.bias"} or unexpected:
+            raise RuntimeError("policy and critic backbones do not match")
+
+    def forward(self, states: Sequence[PolicyState], *, pack_sequences: bool = False) -> Tensor:
+        features = (self._encode_full(states, pack_prefixes=True)
+                    if pack_sequences else self.encode(states))
+        return self.value_head(features.context).squeeze(-1).float()
 
 
 def _layout_rule_mask() -> Tensor:

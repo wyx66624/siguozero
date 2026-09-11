@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 from typing import Any, Sequence
@@ -47,10 +48,11 @@ class InferenceEngine:
         mode: TrainingMode | str | None = None,
         device: str = "auto",
         dead_rules_enabled: bool | None = None,
+        temporal_cache_entries: int | None = None,
     ) -> InferenceEngine:
         resolved_device = resolve_device(device)
         payload = torch.load(
-            Path(checkpoint), map_location=resolved_device, weights_only=False
+            Path(checkpoint), map_location="cpu", mmap=True, weights_only=False
         )
         if payload.get("format_version") != CHECKPOINT_FORMAT_VERSION:
             raise ValueError(
@@ -74,6 +76,15 @@ class InferenceEngine:
         config = ModelConfig(**model_values) if model_values else ModelConfig()
         if config.dead_rules_enabled != checkpoint_dead_rules:
             raise ValueError("checkpoint model config contradicts its dead-rule marker")
+        # Evaluation needs only Policy/Layout, never the reference or optimizer
+        # tensors on an accelerator. mmap also avoids eagerly copying the full
+        # multi-GB training checkpoint into host RAM.
+        if temporal_cache_entries is not None:
+            config = replace(
+                config,
+                inference_temporal_cache_entries=temporal_cache_entries,
+                inference_board_cache_entries=2048,
+            )
         policy = GamePolicyTransformer(config).to(resolved_device)
         layout = PieceConditionedLayoutPointerDecoder(config).to(resolved_device)
         policy.load_state_dict(payload["policy"], strict=True)
@@ -85,7 +96,9 @@ class InferenceEngine:
                 if is_bf16_supported(resolved_device)
                 else torch.float16
             )
-        return cls(requested_mode, policy, layout, amp_dtype=amp_dtype)
+        engine = cls(requested_mode, policy, layout, amp_dtype=amp_dtype)
+        engine.checkpoint_update = int(payload.get("update", 0))
+        return engine
 
     def sample_layouts(
         self, count: int | None = None, *, temperature: float = 0.7

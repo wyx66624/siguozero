@@ -106,7 +106,7 @@ class CheckpointManager:
         dead_rules_enabled: bool,
         policy: nn.Module,
         layout: nn.Module,
-        reference_policy: nn.Module,
+        reference_policy: nn.Module | None,
         reference_layout: nn.Module,
         policy_optimizer: torch.optim.Optimizer,
         layout_optimizer: torch.optim.Optimizer,
@@ -115,18 +115,28 @@ class CheckpointManager:
         archive: bool,
         reason: str,
         rng_state: dict[str, Any] | None = None,
+        algorithm: str = "grpo",
+        critic: nn.Module | None = None,
+        critic_optimizer: torch.optim.Optimizer | None = None,
     ) -> Path:
         if not isinstance(dead_rules_enabled, bool):
             raise ValueError("dead_rules_enabled must be a boolean")
+        if algorithm not in ("grpo", "ppo"):
+            raise ValueError("invalid checkpoint training algorithm")
+        if (algorithm == "ppo") != (critic is not None and critic_optimizer is not None):
+            raise ValueError("PPO checkpoints require a critic and its optimizer")
         payload = {
             "format_version": CHECKPOINT_FORMAT_VERSION,
             "update": update,
             "mode": mode,
+            "algorithm": algorithm,
             "dead_rules_enabled": dead_rules_enabled,
             "reason": reason,
             "policy": policy.state_dict(),
             "layout": layout.state_dict(),
-            "reference_policy": reference_policy.state_dict(),
+            "reference_policy": (
+                None if reference_policy is None else reference_policy.state_dict()
+            ),
             "reference_layout": reference_layout.state_dict(),
             "policy_optimizer": policy_optimizer.state_dict(),
             "layout_optimizer": layout_optimizer.state_dict(),
@@ -134,6 +144,9 @@ class CheckpointManager:
             "config": config,
             "rng_state": capture_rng_state() if rng_state is None else rng_state,
         }
+        if critic is not None and critic_optimizer is not None:
+            payload["critic"] = critic.state_dict()
+            payload["critic_optimizer"] = critic_optimizer.state_dict()
         temporary = self.directory / ".latest.pt.tmp"
         torch.save(payload, temporary)
         os.replace(temporary, self.latest_path)
@@ -148,6 +161,7 @@ class CheckpointManager:
             "latest": self.latest_path.name,
             "update": update,
             "mode": mode,
+            "algorithm": algorithm,
             "dead_rules_enabled": dead_rules_enabled,
             "reason": reason,
         }
@@ -191,11 +205,14 @@ def restore_training_state(
     expected_dead_rules_enabled: bool,
     policy: nn.Module,
     layout: nn.Module,
-    reference_policy: nn.Module,
+    reference_policy: nn.Module | None,
     reference_layout: nn.Module,
     policy_optimizer: torch.optim.Optimizer,
     layout_optimizer: torch.optim.Optimizer,
     accelerator_device: torch.device | str | None = None,
+    expected_algorithm: str = "grpo",
+    critic: nn.Module | None = None,
+    critic_optimizer: torch.optim.Optimizer | None = None,
 ) -> tuple[int, dict[str, Any]]:
     if payload["mode"] != expected_mode:
         raise RuntimeError(
@@ -207,11 +224,24 @@ def restore_training_state(
         raise RuntimeError(
             "checkpoint dead-rule variant does not match this training run"
         )
+    if payload.get("algorithm", "grpo") != expected_algorithm:
+        raise RuntimeError(
+            "checkpoint algorithm does not match this training run; "
+            "use --init-from with a new run directory for an intentional GRPO-to-PPO migration"
+        )
+    if expected_algorithm == "ppo":
+        if (critic is None or critic_optimizer is None
+                or "critic" not in payload or "critic_optimizer" not in payload):
+            raise RuntimeError("PPO checkpoint is missing critic training state")
     policy.load_state_dict(payload["policy"], strict=True)
     layout.load_state_dict(payload["layout"], strict=True)
-    reference_policy.load_state_dict(payload["reference_policy"], strict=True)
+    if reference_policy is not None:
+        reference_policy.load_state_dict(payload["reference_policy"], strict=True)
     reference_layout.load_state_dict(payload["reference_layout"], strict=True)
     policy_optimizer.load_state_dict(payload["policy_optimizer"])
     layout_optimizer.load_state_dict(payload["layout_optimizer"])
+    if critic is not None and critic_optimizer is not None:
+        critic.load_state_dict(payload["critic"], strict=True)
+        critic_optimizer.load_state_dict(payload["critic_optimizer"])
     restore_rng_state(payload["rng_state"], accelerator_device)
     return int(payload["update"]), dict(payload.get("trainer_state", {}))

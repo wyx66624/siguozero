@@ -38,6 +38,9 @@ siguozero-infer-four-dark = "junqi.training.infer_four_dark:main"
 siguozero-infer-double-open = "junqi.training.infer_double_open:main"
 siguozero-infer-two-player = "junqi.training.infer_two_player:main"
 siguozero-eval = "junqi.training.evaluate:main"
+siguozero-eval-history = "junqi.training.evaluate_history:main"
+siguozero-eval-two-player = "junqi.training.evaluate_two_player:main"
+siguozero-eval-four-player = "junqi.training.evaluate_four_player:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

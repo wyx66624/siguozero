@@ -1,0 +1,40 @@
+{
+  "recorded_utc": "2026-09-11T01:19:29.629438+00:00",
+  "git_head": "b488ec6dce2944479306b680fe18fdfe0a289759",
+  "worktree": "existing uncommitted PPO and arena changes preserved; HEAD alone does not identify the tested code",
+  "source_sha256": {
+    "configs/bootstrap.yaml": "fa7d7cdb8621bc9f8b66ace0026658744bb1e03e5e7fcf825396d5168f679198",
+    "scripts/start_four_player_ppo.sh": "6e96ec8137ceeef089dfabf4a19ebc2793f6721b7bcf9445585fabfab79be377",
+    "src/junqi/training/models.py": "ec555cc2904f7c36b456db98182ec9c76494244f822f1a8d26ea80dcfea8ef06",
+    "src/junqi/training/trainer.py": "2ea38b7e183183f0d37d42b5bb66209037f0233117f64d833739a02c26de8992",
+    "src/junqi/training/ppo.py": "9a84c3b4a50accefce01f79db1a427be892aa662c2fd5923ed229e3e40786f95",
+    "src/junqi/training/rollout.py": "88fe378c77f8a3af8827b83bc75be613d1ddb3b8a9887a71417ba196820b52cb",
+    "src/junqi/training/encoding.py": "4c5880bfc53e2799d96162cc75693bc070129d79f5b161984ae2b8dd85d66211",
+    "src/junqi/training/inference.py": "f8ca3b391586192c833c53f7bf437c8195a0760f989e1a86283b86c2b4a2fb22",
+    "tools/benchmark_cuda.py": "c3b57fdcf9f65247aba9e5dcc364056247a2ac956cf4623461f7b0be21cab628",
+    "tools/benchmark_ppo_sequences.py": "92d3924e477f4e3933ea32154a6c4ee0bab9a88510250fa85dd49c8282a57319",
+    "tools/benchmark_ppo_timing.py": "edd7f1e762882e7225235c07d122ced08f70dc4443a76ccc06280dd68ccc80e3",
+    "tools/estimate_ppo_eta.py": "30ea11ff3efd46c90e52222223ffdcbc04883a5500ba3c98abe83346f8f545b0"
+  },
+  "probes": [
+    {
+      "mode": "four_dark",
+      "source": "docs/benchmarks/2026-09-11_ppo_eta_four_dark_4090.json",
+      "source_sha256": "4d46b6343f6de4bfc336b77f379df02d5bfa44db5f63da470f301260d5dc27e7",
+      "command": "python tools/benchmark_ppo_sequences.py --mode four_dark --games 20 --transitions 5120 --updates 2 --run-dir runs_ppo_eta_four_dark_20260911 --output docs/benchmarks/2026-09-11_ppo_eta_four_dark_4090.json",
+      "exit_code": 0
+    },
+    {
+      "mode": "double_open",
+      "source": "docs/benchmarks/2026-09-11_ppo_eta_double_open_4090.json",
+      "source_sha256": "071158e00a3727bcded1363aa022ef925a041da31a6333b101a6f4e94d825f2f",
+      "command": "python tools/benchmark_ppo_sequences.py --mode double_open --games 20 --transitions 5120 --updates 2 --run-dir runs_ppo_eta_double_open_20260911 --output docs/benchmarks/2026-09-11_ppo_eta_double_open_4090.json",
+      "exit_code": 0
+    }
+  ],
+  "training_runtime_or_configuration_changed_for_this_reestimate": false,
+  "production_training_launched": false,
+  "actual_total_probe_environment_steps": 20480,
+  "forecast_file_sha256": "e983555ee02914e5bce7cac0b489f925d2335601d43611c4212bd0f86abbf7c2",
+  "report_sha256": "7366e7ca689e5ad90d76a739db4cb5da0e0ee8f7d16bf0db99a4bd6ad67cf3c3"
+}

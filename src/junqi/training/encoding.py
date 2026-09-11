@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from ..game import CombatOutcome, JunqiGame, Observation, ObservedEvent
 from ..pieces import PieceType
@@ -258,6 +258,37 @@ class PolicyState:
     @property
     def current_board(self) -> tuple[int, ...]:
         return self.records[-1].board_codes
+
+
+def history_prefix_groups(states: Sequence[PolicyState]) -> list[list[int]]:
+    """Group exact history prefixes; each group's first index is its longest.
+
+    A shared initial board alone is insufficient: windows after the 1000-step
+    cutoff and divergent continuations must stay separate. Full record equality
+    also checks actions, public counters and casualties, not just board codes.
+    """
+    groups: list[list[int]] = []
+    roots: dict[object, list[int]] = {}
+    windows: dict[object, list[int]] = {}
+    for index in sorted(range(len(states)), key=lambda i: len(states[i].records), reverse=True):
+        state = states[index]
+        if not state.records:
+            raise ValueError("a policy history cannot be empty")
+        root = (state.mode, state.records[0])
+        window = (*root, state.records[1]) if len(state.records) > 1 else None
+        candidates = roots.get(root, []) if window is None else windows.get(window, [])
+        for group_index in candidates:
+            longest = states[groups[group_index][0]]
+            if longest.records[:len(state.records)] == state.records:
+                groups[group_index].append(index)
+                break
+        else:
+            group_index = len(groups)
+            groups.append([index])
+            roots.setdefault(root, []).append(group_index)
+            if window is not None:
+                windows.setdefault(window, []).append(group_index)
+    return groups
 
 
 class PlayerHistory:

@@ -17,6 +17,7 @@ from .models import (
     GamePolicyTransformer,
     LayoutSample,
     PieceConditionedLayoutPointerDecoder,
+    _validate_sampling_uniforms,
     layout_sample_from_trace,
 )
 from .modes import TrainingMode, mode_spec, new_game, normalize_mode
@@ -57,6 +58,9 @@ class LayoutOutcome:
 
 @dataclass(slots=True)
 class RolloutMetrics:
+    policy_samples: int = 0
+    environment_plies: int = 0
+    critic_inference_seconds: float = 0.0
     anchors: int = 0
     root_candidates: int = 0
     terminal_continuations: int = 0
@@ -70,8 +74,25 @@ class RolloutMetrics:
     actor_inference_seconds: float = 0.0
     environment_step_seconds: float = 0.0
 
+    def record_environment_steps(self, count: int = 1, *, continuation: bool = False) -> None:
+        """Count executed state transitions, including every simulated branch.
+
+        Copies, resets, model calls and replayed learner samples add no steps.
+        A selected action executed again on the base game is another transition.
+        """
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("environment step count must be a nonnegative integer")
+        if continuation:
+            self.continuation_plies += count
+        else:
+            self.base_plies += count
+        self.environment_plies += count
+
     def as_dict(self) -> dict[str, float | int]:
         return {
+            "rollout/policy_samples": self.policy_samples,
+            "rollout/environment_plies": self.environment_plies,
+            "rollout/critic_inference_seconds": self.critic_inference_seconds,
             "rollout/anchors": self.anchors,
             "rollout/root_candidates": self.root_candidates,
             "rollout/terminal_continuations": self.terminal_continuations,
@@ -88,7 +109,7 @@ class RolloutMetrics:
                 self.terminal_continuations / max(self.wall_seconds, 1e-9)
             ),
             "rollout/plies_per_second": (
-                self.continuation_plies / max(self.wall_seconds, 1e-9)
+                self.environment_plies / max(self.wall_seconds, 1e-9)
             ),
         }
 
@@ -138,7 +159,12 @@ class FrozenPolicyActor:
         count: int = 1,
         temperature: float = 1.0,
         return_log_probs: bool = True,
+        sampling_uniforms: torch.Tensor | None = None,
     ) -> tuple[list[list[tuple[int, int]]], list[torch.Tensor]]:
+        if sampling_uniforms is not None:
+            _validate_sampling_uniforms(
+                sampling_uniforms, state_count=len(states), sample_count=count
+            )
         enabled = self.amp_dtype is not None and self.device_type in ("cuda", "npu")
         all_actions: list[list[tuple[int, int]]] = []
         all_logs: list[torch.Tensor] = []
@@ -151,11 +177,19 @@ class FrozenPolicyActor:
             while start < len(states):
                 batch_size = min(self.max_batch_size, len(states) - start)
                 try:
+                    sampling_options = {}
+                    if sampling_uniforms is not None:
+                        # Retry the same draws when an OOM reduces the batch;
+                        # advancing game RNGs here would alter match outcomes.
+                        sampling_options["sampling_uniforms"] = sampling_uniforms[
+                            start : start + batch_size
+                        ]
                     actions, logs = self.policy.sample_action_groups(
                         states[start : start + batch_size],
                         count=count,
                         temperature=temperature,
                         return_log_probs=return_log_probs,
+                        **sampling_options,
                     )
                 except RuntimeError as error:
                     if (
@@ -625,6 +659,6 @@ def collect_policy_groups(
                     behavior_version=behavior_version,
                 )
             )
-        metrics.continuation_plies += sum(continuation_plies)
+        metrics.record_environment_steps(sum(continuation_plies), continuation=True)
     metrics.wall_seconds = time.perf_counter() - started
     return groups, metrics

@@ -1,5 +1,9 @@
 # 训练计算量、显存、批大小与总样本预算
 
+> 2026-09-10：四国当前使用 PPO + Critic，参数量、真实环境步口径和 4090
+> 容量实测见[四国 PPO 文档](four_player_ppo_zh.md)。下文的四国 `4×2`
+> 蒙特卡洛预算为原 GRPO 历史基线，不能用于估算当前 PPO 的训练总时间。
+
 版本：0.7  
 估算日期：2026-09-03  
 适用方案：reinforcement_learning_plan_zh.md 1.4、state_token_encoding_zh.md 0.4

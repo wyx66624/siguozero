@@ -1,4 +1,4 @@
-"""Resumable terminal-only self-play trainer for all three supported modes."""
+"""Resumable four-player PPO and two-player terminal-rollout GRPO training."""
 
 from __future__ import annotations
 
@@ -37,8 +37,10 @@ from .checkpoint import (
 from .distributed import DistributedContext
 from .losses import layout_grpo_loss, policy_grpo_loss
 from .metrics import MetricLogger
+from .model_selection import ModelSelection
 from .models import (
     GamePolicyTransformer,
+    GameValueTransformer,
     PieceConditionedLayoutPointerDecoder,
     layout_sample_from_trace,
     parameter_count,
@@ -52,6 +54,11 @@ from .rollout import (
     collect_policy_groups,
 )
 from .settings import TrainingSettings
+from .ppo import (
+    FrozenValueActor, PPOSample, collect_ppo_samples, critic_ppo_loss,
+    normalize_advantages, policy_ppo_loss, sequence_training_batches,
+)
+from .encoding import history_prefix_groups
 
 
 T = TypeVar("T")
@@ -69,8 +76,10 @@ class SelfPlayTrainer:
         run_directory: str | Path | None = None,
         auto_resume: bool = True,
         distributed: DistributedContext | None = None,
+        initialize_from: str | Path | None = None,
     ) -> None:
         self.settings = settings
+        self.initialize_from = None if initialize_from is None else Path(initialize_from).resolve()
         self.device = (
             resolve_device(settings.device)
             if distributed is None
@@ -117,6 +126,8 @@ class SelfPlayTrainer:
                 "resume is disabled but the run directory is not empty; "
                 "choose a new empty run directory"
             )
+        if initialize_from is not None and self._had_existing_run_artifacts:
+            raise RuntimeError("--init-from requires a new empty run directory")
         expected_latest = self.run_directory / "checkpoints" / "latest.pt"
         if (
             auto_resume
@@ -146,6 +157,8 @@ class SelfPlayTrainer:
         self.effective_actor_inference_batch = settings.actor_inference_batch
         self.policy_lr_scale = 1.0
         self.cumulative: dict[str, int] = {
+            "policy_samples": 0,
+            "environment_plies": 0,
             "anchors": 0,
             "root_candidates": 0,
             "terminal_continuations": 0,
@@ -154,6 +167,8 @@ class SelfPlayTrainer:
             "base_games": 0,
         }
         self.layout_buffer: list[LayoutOutcome] = []
+        self.model_selection = ModelSelection(settings, self.run_directory, self.distributed)
+        self._saved_model_selection: dict[str, Any] = {}
 
         random.seed(settings.seed)
         torch.manual_seed(settings.seed)
@@ -170,7 +185,17 @@ class SelfPlayTrainer:
         )
         self.distributed.broadcast_module(self.policy)
         self.distributed.broadcast_module(self.layout)
-        self.reference_policy = copy.deepcopy(self.policy).eval().requires_grad_(False)
+        self.reference_policy = (
+            copy.deepcopy(self.policy).eval().requires_grad_(False)
+            if settings.algorithm == "grpo" else None
+        )
+        self.critic = (
+            GameValueTransformer(settings.model).to(self.device)
+            if settings.algorithm == "ppo" else None
+        )
+        if self.critic is not None:
+            self.critic.initialize_from_policy(self.policy)
+            self.distributed.broadcast_module(self.critic)
         self.reference_layout = copy.deepcopy(self.layout).eval().requires_grad_(False)
         self.policy_parallel: nn.Module
         if self.distributed.enabled:
@@ -191,6 +216,14 @@ class SelfPlayTrainer:
             )
         else:
             self.policy_parallel = self.policy
+        self.critic_parallel: nn.Module | None = self.critic
+        if self.critic is not None and self.distributed.enabled:
+            self.critic_parallel = DistributedDataParallel(
+                self.critic,
+                device_ids=([self.distributed.local_rank] if is_accelerator(self.device) else None),
+                output_device=(self.distributed.local_rank if is_accelerator(self.device) else None),
+                broadcast_buffers=False, gradient_as_bucket_view=True,
+            )
         self.policy_optimizer = torch.optim.AdamW(
             self.policy.parameters(),
             lr=settings.policy_learning_rate,
@@ -205,11 +238,20 @@ class SelfPlayTrainer:
             eps=1e-8,
             weight_decay=0.05,
         )
+        self.critic_optimizer = (
+            torch.optim.AdamW(
+                self.critic.parameters(), lr=settings.critic_learning_rate,
+                betas=(0.9, 0.95), eps=1e-8, weight_decay=0.05,
+            ) if self.critic is not None else None
+        )
         self.amp_dtype = self._amp_dtype()
         self.grad_scaler = make_grad_scaler(
             self.device.type, enabled=self.amp_dtype is torch.float16
         )
         self.layout_grad_scaler = make_grad_scaler(
+            self.device.type, enabled=self.amp_dtype is torch.float16
+        )
+        self.critic_grad_scaler = make_grad_scaler(
             self.device.type, enabled=self.amp_dtype is torch.float16
         )
         self._seed_runtime()
@@ -221,14 +263,26 @@ class SelfPlayTrainer:
             dead_rules_enabled=settings.dead_rules_enabled,
             seed=settings.seed + 17 + 1_000_003 * self.distributed.rank,
         )
-        resumed = self._resume_if_available() if auto_resume else False
+        try:
+            if self.initialize_from is not None:
+                self._initialize_weights(self.initialize_from)
+            resumed = self._resume_if_available() if auto_resume else False
+            if settings.arena_enabled:
+                if self._saved_model_selection and not self.model_selection.state_path.exists():
+                    raise RuntimeError("model selection state is missing from the resumed run")
+                self.model_selection.initialize(
+                    self.policy, self.layout, update=self.update, cumulative=self.cumulative,
+                )
+        except BaseException:
+            self.logger.close()
+            raise
         self._write_run_config()
         self._install_signal_handlers()
         if not resumed:
             self.save_checkpoint(reason="initialized", archive=False)
         self.logger.event(
             "initialized mode=%s device=%s policy_params=%d layout_params=%d "
-            "resume_update=%d dead_rules_enabled=%s target_continuation_plies=%s "
+            "resume_update=%d dead_rules_enabled=%s step_budget=%s:%s "
             "player_models=1(shared_across_all_seats) rank=%d/%d "
             "local_anchor_batch=%d local_pool=%d per_device_microbatch=%d"
             % (
@@ -238,7 +292,8 @@ class SelfPlayTrainer:
                 parameter_count(self.layout),
                 self.update,
                 settings.dead_rules_enabled,
-                settings.target_continuation_plies,
+                settings.step_budget_counter,
+                settings.step_budget_target,
                 self.distributed.rank,
                 self.distributed.world_size,
                 self.local_anchor_batch,
@@ -246,8 +301,33 @@ class SelfPlayTrainer:
                 self.effective_policy_microbatch,
             )
         )
+        self.logger.event(
+            f"algorithm={settings.algorithm} critic_params="
+            f"{0 if self.critic is None else parameter_count(self.critic)} "
+            f"frozen_reference_policy={self.reference_policy is not None}"
+        )
+        if settings.arena_enabled:
+            self.logger.event(
+                f"model selection enabled: milestones={self.model_selection.milestones} "
+                f"games={settings.arena_games} best_update={self.model_selection.state['best_update']} "
+                f"best_checkpoint={self.model_selection.best_path}"
+            )
+        if settings.grpo_equivalent_plies is not None:
+            self.logger.event(
+                f"planning_grpo_equivalent_plies={settings.grpo_equivalent_plies} "
+                f"assumed_mean_remaining_plies={settings.grpo_mean_remaining_plies} "
+                f"actual_ppo_environment_target={settings.target_environment_plies}; "
+                "equivalent root-state coverage only, not equivalent playing strength"
+            )
         self.logger.start_resource_monitor(
             lambda: {
+                "training/algorithm": self.settings.algorithm,
+                "training/environment_plies": self.cumulative["environment_plies"],
+                "training/step_budget_counter": self.settings.step_budget_counter,
+                "training/target_environment_plies": (
+                    -1 if self.settings.target_environment_plies is None
+                    else self.settings.target_environment_plies
+                ),
                 "training/update": self.update,
                 "training/phase": self.phase,
                 "training/continuation_plies": self.cumulative[
@@ -294,6 +374,9 @@ class SelfPlayTrainer:
         destination = self.run_directory / "resolved_config.json"
         temporary = self.run_directory / ".resolved_config.json.tmp"
         resolved = self.settings.serializable()
+        resolved["initialized_from"] = (
+            None if self.initialize_from is None else str(self.initialize_from)
+        )
         resolved["distributed_runtime"] = {
             "world_size": self.distributed.world_size,
             "anchor_batch_semantics": "global",
@@ -315,8 +398,27 @@ class SelfPlayTrainer:
         )
         os.replace(temporary, destination)
 
+    def _initialize_weights(self, path: Path) -> None:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        if payload.get("mode") != self.settings.mode.value:
+            raise RuntimeError("initialization checkpoint mode does not match")
+        if payload.get("dead_rules_enabled") is not self.settings.dead_rules_enabled:
+            raise RuntimeError("initialization checkpoint dead-rule variant does not match")
+        self.policy.load_state_dict(payload["policy"], strict=True)
+        self.layout.load_state_dict(payload["layout"], strict=True)
+        if self.reference_policy is not None:
+            self.reference_policy.load_state_dict(self.policy.state_dict())
+        self.reference_layout.load_state_dict(self.layout.state_dict())
+        if self.critic is not None:
+            if payload.get("algorithm") == "ppo" and "critic" in payload:
+                self.critic.load_state_dict(payload["critic"], strict=True)
+            else:
+                self.critic.initialize_from_policy(self.policy)
+        self.logger.event(f"initialized model weights from {path}; new optimizers and counters")
+
     def _resume_if_available(self) -> bool:
-        payload = self.checkpoints.load_latest(map_location=self.device)
+        # Avoid a second accelerator-resident copy of every model and optimizer.
+        payload = self.checkpoints.load_latest(map_location="cpu")
         if payload is None:
             if self._had_existing_run_artifacts:
                 raise RuntimeError(
@@ -336,8 +438,12 @@ class SelfPlayTrainer:
             policy_optimizer=self.policy_optimizer,
             layout_optimizer=self.layout_optimizer,
             accelerator_device=self.device,
+            expected_algorithm=self.settings.algorithm,
+            critic=self.critic,
+            critic_optimizer=self.critic_optimizer,
         )
         self.policy_lr_scale = float(trainer_state.get("policy_lr_scale", 1.0))
+        self._saved_model_selection = dict(trainer_state.get("model_selection", {}))
         restored_microbatch = int(
             trainer_state.get(
                 "effective_policy_microbatch",
@@ -384,10 +490,18 @@ class SelfPlayTrainer:
             self.layout_grad_scaler.load_state_dict(
                 trainer_state["layout_grad_scaler"]
             )
+        if "critic_grad_scaler" in trainer_state:
+            self.critic_grad_scaler.load_state_dict(trainer_state["critic_grad_scaler"])
         restored_cumulative = trainer_state.get("cumulative", {})
         self.cumulative.update(
             {key: int(value) for key, value in restored_cumulative.items()}
         )
+        if "environment_plies" not in restored_cumulative:
+            # Older checkpoints retain the disjoint base/branch counts. Rebuild
+            # the total once, never add it to an already saved environment total.
+            self.cumulative["environment_plies"] = (
+                self.cumulative["base_plies"] + self.cumulative["continuation_plies"]
+            )
         restored_layout_buffer = [
             LayoutOutcome(
                 sample=layout_sample_from_trace(
@@ -529,6 +643,11 @@ class SelfPlayTrainer:
         value = self._learning_rate(update)
         for group in self.policy_optimizer.param_groups:
             group["lr"] = value
+        if self.critic_optimizer is not None:
+            for group in self.critic_optimizer.param_groups:
+                group["lr"] = value * (
+                    self.settings.critic_learning_rate / self.settings.policy_learning_rate
+                )
         return value
 
     def _autocast(self):
@@ -539,25 +658,28 @@ class SelfPlayTrainer:
         )
 
     def _backward_policy_epoch(
-        self, groups: Sequence[PolicyGroup]
+        self, groups: Sequence[PolicyGroup] | Sequence[PPOSample]
     ) -> dict[str, float]:
         """Accumulate one epoch so an OOM can safely restart before step()."""
 
         self.policy_optimizer.zero_grad(set_to_none=True)
         epoch_metrics: dict[str, float] = {}
-        ordered_groups = (
-            sorted(groups, key=lambda group: len(group.state.records))
-            if self.settings.learner_length_bucketing
-            else list(groups)
-        )
-        chunks = _chunks(ordered_groups, self.effective_policy_microbatch)
-        padded_tokens = sum(
-            len(chunk) * max(len(group.state.records) for group in chunk)
+        chunks = self._learner_chunks(groups)
+        token_lengths = [
+            [len(chunk[group[0]].state.records) for group in
+             history_prefix_groups([item.state for item in chunk])]
+            if self._sequence_training_enabled() else [len(item.state.records) for item in chunk]
             for chunk in chunks
-        )
-        real_tokens = sum(len(group.state.records) for group in ordered_groups)
+        ]
+        padded_tokens = sum(len(lengths) * max(lengths) for lengths in token_lengths)
+        real_tokens = sum(sum(lengths) for lengths in token_lengths)
         epoch_metrics["optimizer/temporal_padding_fraction"] = (
             1.0 - real_tokens / max(padded_tokens, 1)
+        )
+        epoch_metrics["optimizer/learner_sequences"] = float(sum(map(len, token_lengths)))
+        epoch_metrics["optimizer/learner_samples"] = float(len(groups))
+        epoch_metrics["optimizer/history_token_reuse_fraction"] = (
+            1.0 - real_tokens / max(sum(len(item.state.records) for item in groups), 1)
         )
         for chunk_index, chunk in enumerate(chunks):
             synchronization = (
@@ -569,14 +691,20 @@ class SelfPlayTrainer:
             # The final normal pass synchronizes all accumulated gradients.
             with synchronization:
                 with self._autocast():
-                    output = policy_grpo_loss(
-                        self.policy_parallel,
-                        self.reference_policy,
-                        chunk,
-                        clip_epsilon=self.settings.clip_epsilon,
-                        kl_coefficient=self.settings.kl_coefficient,
-                        entropy_coefficient=self.settings.entropy_coefficient,
-                    )
+                    if self.settings.algorithm == "ppo":
+                        output = policy_ppo_loss(
+                            self.policy_parallel, chunk,
+                            clip_epsilon=self.settings.clip_epsilon,
+                            entropy_coefficient=self.settings.entropy_coefficient,
+                            sequence_training=self._sequence_training_enabled(),
+                        )
+                    else:
+                        output = policy_grpo_loss(
+                            self.policy_parallel, self.reference_policy, chunk,
+                            clip_epsilon=self.settings.clip_epsilon,
+                            kl_coefficient=self.settings.kl_coefficient,
+                            entropy_coefficient=self.settings.entropy_coefficient,
+                        )
                     scaled_loss = output.loss * (len(chunk) / len(groups))
                 self.grad_scaler.scale(scaled_loss).backward()
             for key, value in output.metrics.items():
@@ -585,12 +713,77 @@ class SelfPlayTrainer:
                 )
         return epoch_metrics
 
-    def _update_policy(self, groups: Sequence[PolicyGroup]) -> dict[str, float]:
+    def _sequence_training_enabled(self) -> bool:
+        return (self.settings.algorithm == "ppo" and self.settings.ppo_sequence_training
+                and self.settings.model.dropout == 0.0)
+
+    def _learner_chunks(self, samples):
+        if self._sequence_training_enabled():
+            return sequence_training_batches(
+                samples, sequences_per_batch=self.effective_policy_microbatch,
+                max_samples_per_sequence=self.settings.ppo_max_samples_per_sequence,
+            )
+        ordered = (sorted(samples, key=lambda item: len(item.state.records))
+                   if self.settings.learner_length_bucketing else list(samples))
+        return _chunks(ordered, self.effective_policy_microbatch)
+
+    def _update_policy(
+        self, groups: Sequence[PolicyGroup] | Sequence[PPOSample]
+    ) -> dict[str, float]:
+        if self.settings.algorithm == "ppo" and len(groups) > self.settings.ppo_minibatch_samples:
+            return self._update_ppo_minibatches(groups, critic=False)
+        return self._update_policy_batch(groups)
+
+    def _ppo_optimizer_batches(self, samples):
+        if self._sequence_training_enabled():
+            chains = sequence_training_batches(
+                samples, sequences_per_batch=1,
+                max_samples_per_sequence=self.settings.ppo_max_samples_per_sequence,
+            )
+            random.shuffle(chains)
+            ordered = [sample for chain in chains for sample in chain]
+        else:
+            ordered = list(samples)
+            random.shuffle(ordered)
+        # Fixed sample counts keep DDP optimizer/collective counts equal even
+        # when ranks have different game lengths or numbers of prefix chains.
+        return _chunks(ordered, self.settings.ppo_minibatch_samples)
+
+    def _update_ppo_minibatches(self, samples, *, critic: bool) -> dict[str, float]:
+        epochs = self.settings.critic_epochs if critic else self.settings.policy_epochs
+        aggregate: dict[str, float] = {}
+        processed = steps = 0
+        stop = False
+        for _ in range(epochs):
+            for batch in self._ppo_optimizer_batches(samples):
+                metrics = (self._update_critic_batch(batch, epochs=1) if critic
+                           else self._update_policy_batch(batch, epochs=1))
+                for key, value in metrics.items():
+                    aggregate[key] = aggregate.get(key, 0.) + value * len(batch)
+                processed += len(batch)
+                steps += 1
+                if not critic and (
+                    metrics["policy/approx_kl_old"] > self.settings.early_stop_kl_multiple * self.settings.target_kl
+                    or metrics["policy/clip_fraction"] > self.settings.early_stop_clip_fraction
+                ):
+                    stop = True
+                    break
+            if stop:
+                break
+        aggregate = {key: value / processed for key, value in aggregate.items()}
+        name = "critic" if critic else "policy"
+        aggregate[f"optimizer/{name}_epochs"] = processed / len(samples)
+        aggregate[f"optimizer/{name}_steps"] = float(steps)
+        return aggregate
+
+    def _update_policy_batch(
+        self, groups: Sequence[PolicyGroup] | Sequence[PPOSample], *, epochs: int | None = None,
+    ) -> dict[str, float]:
         self.policy.train()
         aggregate: dict[str, float] = {}
         epochs_completed = 0
         grad_norm_value = 0.0
-        for _epoch in range(self.settings.policy_epochs):
+        for _epoch in range(self.settings.policy_epochs if epochs is None else epochs):
             while True:
                 try:
                     epoch_metrics = self._backward_policy_epoch(groups)
@@ -629,7 +822,8 @@ class SelfPlayTrainer:
             epoch_metrics = self.distributed.mean_metrics(epoch_metrics)
             self.grad_scaler.unscale_(self.policy_optimizer)
             grad_norm = nn.utils.clip_grad_norm_(
-                self.policy.parameters(), self.settings.gradient_norm_clip
+                self.policy.parameters(), self.settings.gradient_norm_clip,
+                error_if_nonfinite=self.settings.algorithm == "ppo",
             )
             grad_norm_value = self.distributed.reduce_float(
                 float(grad_norm), operation="mean"
@@ -644,18 +838,106 @@ class SelfPlayTrainer:
             epochs_completed += 1
             aggregate = epoch_metrics
             if (
-                epoch_metrics["policy/kl_reference"]
+                epoch_metrics.get("policy/approx_kl_old", epoch_metrics.get("policy/kl_reference", 0.0))
                 > self.settings.early_stop_kl_multiple * self.settings.target_kl
                 or epoch_metrics["policy/clip_fraction"]
                 > self.settings.early_stop_clip_fraction
             ):
                 break
         aggregate["optimizer/policy_epochs"] = float(epochs_completed)
+        aggregate["optimizer/policy_steps"] = float(epochs_completed)
         aggregate["optimizer/policy_grad_norm"] = grad_norm_value
-        if aggregate.get("policy/kl_reference", 0.0) > 2 * self.settings.target_kl:
+        if aggregate.get("policy/approx_kl_old", aggregate.get("policy/kl_reference", 0.0)) > 2 * self.settings.target_kl:
             self.policy_lr_scale = max(0.1, self.policy_lr_scale * 0.5)
             aggregate["optimizer/lr_scale_reduced"] = 1.0
         return aggregate
+
+    def _normalize_ppo_batch(self, samples: Sequence[PPOSample]) -> list[PPOSample]:
+        count = self.distributed.reduce_int(len(samples))
+        total = self.distributed.reduce_float(
+            sum(item.advantage for item in samples), operation="sum"
+        )
+        squares = self.distributed.reduce_float(
+            sum(item.advantage ** 2 for item in samples), operation="sum"
+        )
+        mean = total / count
+        std = math.sqrt(max(0.0, squares / count - mean * mean))
+        return normalize_advantages(
+            samples, mean=mean, std=std, epsilon=self.settings.advantage_epsilon,
+        )
+
+    def _backward_critic_epoch(self, samples: Sequence[PPOSample]) -> dict[str, float]:
+        if self.critic_parallel is None or self.critic_optimizer is None:
+            raise RuntimeError("PPO critic was not initialized")
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        chunks = self._learner_chunks(samples)
+        metrics: dict[str, float] = {}
+        for index, chunk in enumerate(chunks):
+            synchronization = (
+                self.critic_parallel.no_sync()
+                if self.distributed.enabled and index < len(chunks) - 1
+                else nullcontext()
+            )
+            with synchronization:
+                with self._autocast():
+                    output = critic_ppo_loss(
+                        self.critic_parallel, chunk,
+                        clip_epsilon=self.settings.value_clip_epsilon,
+                        value_coefficient=self.settings.value_coefficient,
+                        sequence_training=self._sequence_training_enabled(),
+                    )
+                    loss = output.loss * len(chunk) / len(samples)
+                self.critic_grad_scaler.scale(loss).backward()
+            for key, value in output.metrics.items():
+                metrics[key] = metrics.get(key, 0.0) + value * len(chunk) / len(samples)
+        return metrics
+
+    def _update_critic(self, samples: Sequence[PPOSample]) -> dict[str, float]:
+        if len(samples) > self.settings.ppo_minibatch_samples:
+            return self._update_ppo_minibatches(samples, critic=True)
+        return self._update_critic_batch(samples)
+
+    def _update_critic_batch(self, samples: Sequence[PPOSample], *, epochs: int | None = None) -> dict[str, float]:
+        if self.critic is None or self.critic_optimizer is None:
+            raise RuntimeError("PPO critic was not initialized")
+        self.critic.train()
+        metrics: dict[str, float] = {}
+        applied_epochs = self.settings.critic_epochs if epochs is None else epochs
+        for _epoch in range(applied_epochs):
+            while True:
+                try:
+                    metrics = self._backward_critic_epoch(samples)
+                    break
+                except RuntimeError as error:
+                    if not is_out_of_memory(error, self.device.type):
+                        raise
+                    self.critic_optimizer.zero_grad(set_to_none=True)
+                    empty_cache(self.device)
+                    if (self.distributed.enabled
+                            or not self.settings.auto_reduce_microbatch_on_oom
+                            or self.effective_policy_microbatch <= self.settings.minimum_policy_microbatch):
+                        raise
+                    self.effective_policy_microbatch = max(
+                        self.settings.minimum_policy_microbatch,
+                        self.effective_policy_microbatch // 2,
+                    )
+                    self.logger.event(
+                        f"critic OOM; retrying unapplied critic epoch with microbatch="
+                        f"{self.effective_policy_microbatch}"
+                    )
+            self.critic_grad_scaler.unscale_(self.critic_optimizer)
+            norm = nn.utils.clip_grad_norm_(
+                self.critic.parameters(), self.settings.gradient_norm_clip,
+                error_if_nonfinite=True,
+            )
+            self.critic_grad_scaler.step(self.critic_optimizer)
+            self.critic_grad_scaler.update()
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            metrics = self.distributed.mean_metrics(metrics)
+            metrics["optimizer/critic_grad_norm"] = self.distributed.reduce_float(float(norm))
+        metrics["optimizer/critic_epochs"] = float(applied_epochs)
+        metrics["optimizer/critic_steps"] = float(applied_epochs)
+        return metrics
 
     def _update_layout(self) -> dict[str, float]:
         if len(self.layout_buffer) < self.settings.layout_outcomes_per_update:
@@ -697,6 +979,7 @@ class SelfPlayTrainer:
         self, rank_states: Sequence[dict[str, Any]] | None = None
     ) -> dict[str, Any]:
         state: dict[str, Any] = {
+            "model_selection": self.model_selection.state_dict(),
             "policy_lr_scale": self.policy_lr_scale,
             "effective_policy_microbatch": self.effective_policy_microbatch,
             "effective_actor_inference_batch": (
@@ -704,7 +987,9 @@ class SelfPlayTrainer:
             ),
             "grad_scaler": self.grad_scaler.state_dict(),
             "layout_grad_scaler": self.layout_grad_scaler.state_dict(),
+            "critic_grad_scaler": self.critic_grad_scaler.state_dict(),
             "cumulative": dict(self.cumulative),
+            "environment_step_definition": "base_and_simulated_branch_transitions_v1",
             "layout_buffer": [
                 {
                     "mode": item.sample.mode.value,
@@ -752,22 +1037,84 @@ class SelfPlayTrainer:
                 archive=archive,
                 reason=reason,
                 rng_state=capture_rng_state(self.device),
+                algorithm=self.settings.algorithm,
+                critic=self.critic,
+                critic_optimizer=self.critic_optimizer,
             )
             self.logger.event(f"checkpoint saved: {path} reason={reason}")
         self.distributed.barrier()
         return path
 
-    def _continuation_target_reached(self) -> bool:
-        target = self.settings.target_continuation_plies
+    def _training_budget_reached(self) -> bool:
+        target = self.settings.step_budget_target
         return (
             target is not None
-            and self.cumulative["continuation_plies"] >= target
+            and self.cumulative[self.settings.step_budget_counter] >= target
         )
+
+    def _maybe_evaluate_model(self) -> dict[str, Any] | None:
+        milestone = self.model_selection.due_milestone(
+            update=self.update, cumulative=self.cumulative,
+        )
+        if milestone is None or self.distributed.any(self.stop_requested):
+            return None
+        # Make the completed update durable before a possibly long match. If
+        # interrupted, resume this candidate and retry the uncommitted round.
+        self.phase = "model_selection_checkpoint"
+        self.save_checkpoint(reason="before_model_selection", archive=False)
+        self.phase = "model_selection"
+        self.logger.event(
+            f"model selection {milestone}%: update={self.update} versus "
+            f"best_update={self.model_selection.state['best_update']} "
+            f"games={self.settings.arena_games} parallel_games_per_rank={self.settings.arena_parallel_games} "
+            f"inference_batch={self.settings.arena_inference_batch_size}"
+        )
+        try:
+            result = self.model_selection.evaluate(
+                self.policy, self.layout, update=self.update, cumulative=self.cumulative,
+                amp_dtype=self.amp_dtype, stop_requested=lambda: self.stop_requested,
+            )
+        except InterruptedError:
+            self.stop_requested = True
+            self.phase = "ready"
+            self.logger.event("model selection interrupted; retaining best model and retrying this round on resume")
+            return None
+        if result is not None:
+            self.logger.log(self.update, {
+                "arena/milestone_percent": milestone,
+                "arena/progress_percent": result["progress_percent"],
+                "arena/games": result["games"], "arena/wins": result["wins"],
+                "arena/draws": result["draws"], "arena/losses": result["losses"],
+                "arena/win_rate": result["win_rate"], "arena/score": result["score"],
+                "arena/score_ci_lower": result["score_ci"][0],
+                "arena/score_ci_upper": result["score_ci"][1],
+                "arena/promoted": int(result["promoted"]),
+                "arena/best_update": result["best_update"],
+                "arena/score_delta_vs_best": result["score_delta_vs_best"],
+                "arena/strength_verdict": result["strength_verdict"],
+                "arena/parallel_games_per_rank": self.settings.arena_parallel_games,
+                "arena/inference_batch_size": self.settings.arena_inference_batch_size,
+                "arena/wall_seconds": result.get("wall_seconds", 0.0),
+                "arena/plies_per_second": result.get("plies_per_second", 0.0),
+                "arena/games_per_second": result.get("games_per_second", 0.0),
+            })
+            self.logger.event(
+                f"model selection {milestone}% complete: "
+                f"W/D/L={result['wins']}/{result['draws']}/{result['losses']} "
+                f"score={result['score']:.3%} decision={result['decision']} "
+                f"best_update={result['best_update']} strength={result['strength_verdict']}"
+            )
+            self.phase = "model_selection_checkpoint"
+            self.save_checkpoint(reason="after_model_selection", archive=False)
+        self.phase = "ready"
+        return result
 
     def _aggregate_rollout_metrics(
         self, metrics: RolloutMetrics
     ) -> RolloutMetrics:
         summed_fields = (
+            "policy_samples",
+            "environment_plies",
             "anchors",
             "root_candidates",
             "terminal_continuations",
@@ -791,16 +1138,52 @@ class SelfPlayTrainer:
         aggregated.actor_inference_seconds = self.distributed.reduce_float(
             metrics.actor_inference_seconds, operation="max"
         )
+        aggregated.critic_inference_seconds = self.distributed.reduce_float(
+            metrics.critic_inference_seconds, operation="max"
+        )
         aggregated.environment_step_seconds = self.distributed.reduce_float(
             metrics.environment_step_seconds, operation="max"
         )
         return aggregated
 
+    def _ppo_collection_count(self) -> int:
+        target = self.settings.step_budget_target
+        if target is None:
+            return self.local_anchor_batch
+        remaining = target - self.cumulative["environment_plies"]
+        # Current PPO has no branch simulations, so one card stops exactly.
+        # DDP keeps equal positive counts: at most world_size - 1 excess steps.
+        # A collector with extra branches may finish its batch over the rough
+        # budget; every actually executed branch transition must still count.
+        return min(self.local_anchor_batch, math.ceil(remaining / self.distributed.world_size))
+
+    def _gather_layout_outcomes(self, outcomes: Sequence[LayoutOutcome]) -> None:
+        if not self.distributed.enabled:
+            self.layout_buffer.extend(outcomes)
+            return
+        # PlayerSetup owns an immutable mappingproxy, which cannot be pickled
+        # by gather_object. Transfer its already checkpointed pointer trace.
+        records = [{"mode": item.sample.mode.value,
+                    "position_indices": item.sample.position_indices,
+                    "old_log_probs": item.sample.old_log_probs,
+                    "reward": item.reward, "seat": item.seat,
+                    "behavior_version": item.behavior_version} for item in outcomes]
+        gathered = self.distributed.gather_object(records)
+        if self.distributed.primary:
+            for rank_records in gathered or []:
+                self.layout_buffer.extend(LayoutOutcome(
+                    sample=layout_sample_from_trace(row["mode"], row["position_indices"], row["old_log_probs"]),
+                    reward=row["reward"], seat=row["seat"], behavior_version=row["behavior_version"],
+                ) for row in rank_records)
+
     def train(self) -> None:
         try:
+            # Also retries an interrupted last (100%) match when no training
+            # budget remains, instead of silently skipping the final selection.
+            self._maybe_evaluate_model()
             while (
                 self.update < self.settings.total_updates
-                and not self._continuation_target_reached()
+                and not self._training_budget_reached()
             ):
                 if self.distributed.any(self.stop_requested):
                     break
@@ -830,29 +1213,43 @@ class SelfPlayTrainer:
                     max_batch_size=self.effective_actor_inference_batch,
                 )
                 base_collection_started = time.perf_counter()
-                anchors, layout_outcomes, base_plies, completed_games = (
-                    self.pool.collect_anchors(
-                        actor,
-                        self.layout,
-                        count=self.local_anchor_batch,
-                        behavior_version=self.update,
+                if self.settings.algorithm == "ppo":
+                    self.phase = "ppo_trajectory_collection"
+                    assert self.critic is not None
+                    value_actor = FrozenValueActor(
+                        self.critic, amp_dtype=self.amp_dtype,
+                        max_batch_size=self.effective_actor_inference_batch,
                     )
-                )
-                base_collection_seconds = self.distributed.reduce_float(
-                    time.perf_counter() - base_collection_started,
-                    operation="max",
-                )
-                self.phase = "terminal_rollouts"
-                groups, rollout_metrics = collect_policy_groups(
-                    anchors,
-                    actor,
-                    behavior_version=self.update,
-                    advantage_epsilon=self.settings.advantage_epsilon,
-                    anchor_wave_size=self.settings.rollout_anchor_wave_size,
-                    environment_workers=self.settings.rollout_environment_workers,
-                )
-                rollout_metrics.base_plies = base_plies
-                rollout_metrics.base_games_completed = completed_games
+                    samples, layout_outcomes, rollout_metrics = collect_ppo_samples(
+                        self.pool, actor, value_actor, self.layout,
+                        count=self._ppo_collection_count(), behavior_version=self.update,
+                        discount=self.settings.discount, gae_lambda=self.settings.gae_lambda,
+                    )
+                    groups = self._normalize_ppo_batch(samples)
+                    actor.max_batch_size = min(actor.max_batch_size, value_actor.max_batch_size)
+                    base_collection_seconds = 0.0
+                else:
+                    anchors, layout_outcomes, base_plies, completed_games = (
+                        self.pool.collect_anchors(
+                            actor, self.layout, count=self.local_anchor_batch,
+                            behavior_version=self.update,
+                        )
+                    )
+                    base_collection_seconds = self.distributed.reduce_float(
+                        time.perf_counter() - base_collection_started, operation="max",
+                    )
+                    self.phase = "terminal_rollouts"
+                    groups, rollout_metrics = collect_policy_groups(
+                        anchors, actor, behavior_version=self.update,
+                        advantage_epsilon=self.settings.advantage_epsilon,
+                        anchor_wave_size=self.settings.rollout_anchor_wave_size,
+                        environment_workers=self.settings.rollout_environment_workers,
+                    )
+                    rollout_metrics.record_environment_steps(base_plies)
+                    rollout_metrics.base_games_completed = completed_games
+                    # The total-transition throughput includes the base-game
+                    # actions too, so include their collection time as well.
+                    rollout_metrics.wall_seconds += base_collection_seconds
                 rollout_metrics = self._aggregate_rollout_metrics(rollout_metrics)
                 encoding_metrics = self.distributed.mean_metrics(
                     self.policy.board_encoding_metrics()
@@ -871,6 +1268,12 @@ class SelfPlayTrainer:
                             self.effective_actor_inference_batch,
                         )
                     )
+                # Both independent KV arenas must be released before either
+                # learner backward.  Actor and critic graphs never coexist.
+                self.policy.clear_inference_board_cache()
+                if self.critic is not None:
+                    self.critic.clear_inference_board_cache()
+                empty_cache(self.device)
                 self.phase = "policy_backward"
                 policy_backward_started = time.perf_counter()
                 policy_metrics = self._update_policy(groups)
@@ -878,10 +1281,16 @@ class SelfPlayTrainer:
                     time.perf_counter() - policy_backward_started,
                     operation="max",
                 )
-                gathered_layouts = self.distributed.gather_object(layout_outcomes)
-                if self.distributed.primary:
-                    for rank_outcomes in gathered_layouts or []:
-                        self.layout_buffer.extend(rank_outcomes)
+                critic_metrics: dict[str, float] = {}
+                critic_backward_seconds = 0.0
+                if self.critic is not None:
+                    self.phase = "critic_backward"
+                    critic_started = time.perf_counter()
+                    critic_metrics = self._update_critic(groups)
+                    critic_backward_seconds = self.distributed.reduce_float(
+                        time.perf_counter() - critic_started, operation="max"
+                    )
+                self._gather_layout_outcomes(layout_outcomes)
                 layout_metrics: dict[str, float] = {}
                 layout_backward_seconds = 0.0
                 if next_update % self.settings.layout_update_interval == 0:
@@ -900,6 +1309,8 @@ class SelfPlayTrainer:
                 self.update = next_update
 
                 for key, value in (
+                    ("policy_samples", rollout_metrics.policy_samples),
+                    ("environment_plies", rollout_metrics.environment_plies),
                     ("anchors", rollout_metrics.anchors),
                     ("root_candidates", rollout_metrics.root_candidates),
                     (
@@ -912,17 +1323,20 @@ class SelfPlayTrainer:
                 ):
                     self.cumulative[key] += int(value)
                 if self.update % self.settings.reference_refresh_updates == 0:
-                    self.reference_policy.load_state_dict(self.policy.state_dict())
+                    if self.reference_policy is not None:
+                        self.reference_policy.load_state_dict(self.policy.state_dict())
                     self.reference_layout.load_state_dict(self.layout.state_dict())
                     self.logger.event(f"reference refreshed at update {self.update}")
 
                 metrics: dict[str, float | int | str] = {
+                    "algorithm": self.settings.algorithm,
                     "mode": self.settings.mode.value,
                     "model/dead_rules_enabled": int(
                         self.settings.dead_rules_enabled
                     ),
                     "model/shared_policy_instances_for_players": 1,
                     "model/shared_layout_instances_for_players": 1,
+                    "model/critic_instances": int(self.critic is not None),
                     "distributed/world_size": self.distributed.world_size,
                     "distributed/local_anchor_batch": self.local_anchor_batch,
                     "distributed/model_replicas": self.distributed.world_size,
@@ -931,6 +1345,12 @@ class SelfPlayTrainer:
                         if self.settings.target_continuation_plies is None
                         else self.settings.target_continuation_plies
                     ),
+                    "training/target_environment_plies": (
+                        self.settings.target_environment_plies
+                        if self.settings.target_environment_plies is not None
+                        else -1
+                    ),
+                    "training/step_budget_counter": self.settings.step_budget_counter,
                     "optimizer/effective_policy_microbatch": (
                         self.effective_policy_microbatch
                     ),
@@ -940,6 +1360,7 @@ class SelfPlayTrainer:
                     "optimizer/policy_lr": policy_lr,
                     "timing/base_collection_seconds": base_collection_seconds,
                     "timing/policy_backward_seconds": policy_backward_seconds,
+                    "timing/critic_backward_seconds": critic_backward_seconds,
                     "timing/layout_backward_seconds": layout_backward_seconds,
                     "timing/update_seconds": self.distributed.reduce_float(
                         time.perf_counter() - started, operation="max"
@@ -947,6 +1368,7 @@ class SelfPlayTrainer:
                     **rollout_metrics.as_dict(),
                     **encoding_metrics,
                     **policy_metrics,
+                    **critic_metrics,
                     **layout_metrics,
                 }
                 metrics.update(
@@ -958,7 +1380,8 @@ class SelfPlayTrainer:
                 if self.update % self.settings.metrics_every_updates == 0:
                     self.logger.log(self.update, metrics)
 
-                if self.update % self.settings.checkpoint_every_updates == 0:
+                selection_result = self._maybe_evaluate_model()
+                if selection_result is None and self.update % self.settings.checkpoint_every_updates == 0:
                     self.phase = "checkpoint"
                     self.save_checkpoint(
                         reason="periodic",
@@ -974,10 +1397,10 @@ class SelfPlayTrainer:
             # exception.  SIGKILL and power loss cannot be intercepted, hence the
             # frequent atomic latest checkpoint above.
             self.phase = "emergency_checkpoint"
-            if self.distributed.enabled:
+            if self.distributed.enabled or self.settings.algorithm == "ppo":
                 self.logger.event(
-                    "distributed exception: retaining the last completed atomic "
-                    "checkpoint; no potentially asymmetric emergency save"
+                    "training exception: retaining the last completed atomic checkpoint; "
+                    "partial actor/critic updates are not saved"
                 )
             else:
                 self.save_checkpoint(reason="emergency_exception", archive=False)

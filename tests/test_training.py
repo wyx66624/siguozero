@@ -605,11 +605,13 @@ class CheckpointTests(unittest.TestCase):
                     run_directory=directory,
                     auto_resume=False,
                 )
-                # Exactly one Policy/Layout copy is retained for KL reference.
-                # A training update must not clone another behavior pair.
-                self.assertEqual(copy_module.deepcopy.call_count, 2)
+                # Four-player PPO has an independent critic and only a Layout
+                # reference. pi_old is represented by stored action log-probs.
+                self.assertEqual(copy_module.deepcopy.call_count, 1)
+                self.assertIsNone(trainer.reference_policy)
+                self.assertIsNotNone(trainer.critic)
                 trainer.train()
-                self.assertEqual(copy_module.deepcopy.call_count, 2)
+                self.assertEqual(copy_module.deepcopy.call_count, 1)
                 self.assertTrue(
                     all(
                         parameter.grad is None

@@ -1,0 +1,94 @@
+{
+  "date": "2026-09-10",
+  "description": "Independent synthetic histories; full policy, critic, layout and layout reference resident; all three AdamW states initialized.",
+  "runs": [
+    {
+      "device": "NVIDIA GeForce RTX 4090",
+      "torch": "2.11.0+cu130",
+      "mode": "four_dark",
+      "model_scale": "main",
+      "microbatch": 8,
+      "context_tokens": 1001,
+      "games": 8,
+      "actor_batch": 8,
+      "cache_entries_per_model": 96,
+      "parameters": {
+        "policy": 144157704,
+        "critic": 143698441,
+        "layout": 17292288
+      },
+      "resident_parameters": 322440721,
+      "all_optimizer_states_initialized": true,
+      "resident_allocated_gib": 3.537217617034912,
+      "phases": [
+        {
+          "phase": "policy_backward_1",
+          "seconds": 3.6987605000000006,
+          "peak_allocated_gib": 14.022830963134766,
+          "peak_reserved_gib": 14.849609375,
+          "loss": -0.03517329320311546
+        },
+        {
+          "phase": "critic_backward_1",
+          "seconds": 3.5139365,
+          "peak_allocated_gib": 14.031620025634766,
+          "peak_reserved_gib": 14.857421875,
+          "loss": 0.25
+        },
+        {
+          "phase": "policy_backward_2",
+          "seconds": 3.4958491999999985,
+          "peak_allocated_gib": 14.031620025634766,
+          "peak_reserved_gib": 14.859375,
+          "loss": -0.18473975360393524
+        },
+        {
+          "phase": "critic_backward_2",
+          "seconds": 3.462095399999999,
+          "peak_allocated_gib": 14.031620025634766,
+          "peak_reserved_gib": 14.857421875,
+          "loss": 0.2499755173921585
+        },
+        {
+          "phase": "both_models_long_history_rollout",
+          "seconds": 10.3031221,
+          "peak_allocated_gib": 9.753019332885742,
+          "peak_reserved_gib": 10.0,
+          "cached_player_histories": 32,
+          "policy_kv_gib": 2.34375,
+          "critic_kv_gib": 2.34375
+        }
+      ]
+    },
+    {
+      "device": "NVIDIA GeForce RTX 4090",
+      "torch": "2.11.0+cu130",
+      "mode": "four_dark",
+      "model_scale": "main",
+      "microbatch": 8,
+      "context_tokens": 1001,
+      "games": 16,
+      "actor_batch": 16,
+      "cache_entries_per_model": 192,
+      "parameters": {
+        "policy": 144157704,
+        "critic": 143698441,
+        "layout": 17292288
+      },
+      "resident_parameters": 322440721,
+      "all_optimizer_states_initialized": true,
+      "resident_allocated_gib": 3.537217617034912,
+      "phases": [
+        {
+          "phase": "both_models_long_history_rollout",
+          "seconds": 20.3042381,
+          "peak_allocated_gib": 15.93693208694458,
+          "peak_reserved_gib": 16.427734375,
+          "cached_player_histories": 64,
+          "policy_kv_gib": 4.6875,
+          "critic_kv_gib": 4.6875
+        }
+      ]
+    }
+  ]
+}

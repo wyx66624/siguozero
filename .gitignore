@@ -91,6 +91,7 @@ tmp/
 # Self-play outputs and checkpoints
 runs/
 runs_*/
+eval_history/
 *.pt.tmp
 events.out.tfevents.*
 

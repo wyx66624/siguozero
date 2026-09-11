@@ -1,0 +1,379 @@
+{
+  "status": "archived assumptions; do not use as validated hardware ETA or purchasing evidence",
+  "followup_audit": "docs/four_player_ppo_compute_audit_zh.md",
+  "kind": "conditional projection, not hardware benchmark or confidence interval",
+  "generated_utc": "2026-09-10T14:54:54.370471+00:00",
+  "measured_source": "docs/benchmarks/2026-09-10_ppo_sequences_4090.json",
+  "target_real_moves_per_mode": 3000000000,
+  "availability": 0.8,
+  "baseline_moves_per_rank_per_update": 4096,
+  "baseline_phases": [
+    {
+      "inference_seconds": 36.69151590000011,
+      "learner_seconds": 51.290251,
+      "remaining_seconds": 7.3555256999998875
+    },
+    {
+      "inference_seconds": 60.48639319999985,
+      "learner_seconds": 103.18062359999999,
+      "remaining_seconds": 3.3655570000001234
+    }
+  ],
+  "checkpoint_seconds_per_global_update": 11.970663399999978,
+  "hardware_speedup_assumptions": {
+    "RTX 4090 24GB": {
+      "inference_speedup": [
+        1,
+        1
+      ],
+      "learner_speedup": [
+        1,
+        1
+      ],
+      "interconnect": "pcie"
+    },
+    "RTX PRO 6000 Blackwell Workstation 96GB": {
+      "inference_speedup": [
+        1.3,
+        1.8
+      ],
+      "learner_speedup": [
+        1.5,
+        2.2
+      ],
+      "interconnect": "pcie"
+    },
+    "H100 PCIe 80GB": {
+      "inference_speedup": [
+        1.5,
+        2.3
+      ],
+      "learner_speedup": [
+        2.0,
+        3.0
+      ],
+      "interconnect": "pcie"
+    },
+    "H100 SXM 80GB": {
+      "inference_speedup": [
+        2.0,
+        3.0
+      ],
+      "learner_speedup": [
+        2.5,
+        4.0
+      ],
+      "interconnect": "nvlink_nvswitch"
+    }
+  },
+  "parallel_efficiency_assumptions": {
+    "pcie": {
+      "1": [
+        1,
+        1
+      ],
+      "2": [
+        0.8,
+        0.9
+      ],
+      "4": [
+        0.6,
+        0.8
+      ],
+      "8": [
+        0.45,
+        0.65
+      ]
+    },
+    "nvlink_nvswitch": {
+      "1": [
+        1,
+        1
+      ],
+      "2": [
+        0.85,
+        0.95
+      ],
+      "4": [
+        0.75,
+        0.9
+      ],
+      "8": [
+        0.65,
+        0.85
+      ]
+    }
+  },
+  "formula": "days = target/(4096*N) * ((I/s_infer + L/s_learner + H)/efficiency + checkpoint) / 86400 / availability",
+  "excluded": [
+    "evaluation",
+    "hyperparameter search",
+    "retraining",
+    "unmeasured degradation from sliding history windows"
+  ],
+  "notes": [
+    "Global rollout/minibatch increase with ranks; same total real moves and epochs, not identical optimizer trajectory or playing strength.",
+    "Each rank needs independent CPU resources; checkpoint wall time assumed fixed and can grow with rank count.",
+    "Baseline has only two random-policy updates, mean history 127 and 370 tokens; ranges are not long-run bounds.",
+    "PRO 6000 means 600W Blackwell Workstation Edition; server/Max-Q/Ada are not interchangeable.",
+    "H100 SXM multi-card assumes one HGX/DGX NVLink/NVSwitch node; no cross-node efficiency assumed."
+  ],
+  "results": [
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 1,
+      "continuous_days": [
+        909.6608140733505,
+        1517.4292432996956
+      ],
+      "calendar_days_80_percent": [
+        1137.076017591688,
+        1896.7865541246194
+      ],
+      "calendar_months_80_percent": [
+        37.357733637509256,
+        62.31742272278011
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 2,
+      "continuous_days": [
+        499.72953165313334,
+        935.7087056901717
+      ],
+      "calendar_days_80_percent": [
+        624.6619145664166,
+        1169.6358821127144
+      ],
+      "calendar_months_80_percent": [
+        20.52277337384531,
+        38.42746224600294
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 4,
+      "continuous_days": [
+        277.92671871185297,
+        615.3494228786891
+      ],
+      "calendar_days_80_percent": [
+        347.40839838981617,
+        769.1867785983613
+      ],
+      "calendar_months_80_percent": [
+        11.41382828385433,
+        25.271023526845546
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 8,
+      "continuous_days": [
+        168.1046181214161,
+        406.00475812841336
+      ],
+      "calendar_days_80_percent": [
+        210.13077265177012,
+        507.50594766051665
+      ],
+      "calendar_months_80_percent": [
+        6.903680415663906,
+        16.67370669931882
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 1,
+      "continuous_days": [
+        534.2620430377992,
+        1107.544772417117
+      ],
+      "calendar_days_80_percent": [
+        667.827553797249,
+        1384.430965521396
+      ],
+      "calendar_months_80_percent": [
+        21.94094632598765,
+        45.48438490419371
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 2,
+      "continuous_days": [
+        291.17465885560483,
+        679.5309113885601
+      ],
+      "calendar_days_80_percent": [
+        363.968323569506,
+        849.4136392357001
+      ],
+      "calendar_months_80_percent": [
+        11.95789153411108,
+        27.90681360938645
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 4,
+      "continuous_days": [
+        160.6146027632432,
+        444.5642266776147
+      ],
+      "calendar_days_80_percent": [
+        200.768253454054,
+        555.7052833470184
+      ],
+      "calendar_months_80_percent": [
+        6.596082249003827,
+        18.25725776910122
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 8,
+      "continuous_days": [
+        95.91254676842549,
+        292.1479606610304
+      ],
+      "calendar_days_80_percent": [
+        119.89068346053185,
+        365.184950826288
+      ],
+      "calendar_months_80_percent": [
+        3.9389136249866725,
+        11.997862860822604
+      ]
+    },
+    {
+      "hardware": "H100 PCIe 80GB",
+      "cards": 1,
+      "continuous_days": [
+        443.9949241920746,
+        909.1762486210575
+      ],
+      "calendar_days_80_percent": [
+        554.9936552400933,
+        1136.4703107763219
+      ],
+      "calendar_months_80_percent": [
+        18.233877790228938,
+        37.337833618934596
+      ]
+    },
+    {
+      "hardware": "H100 PCIe 80GB",
+      "cards": 2,
+      "continuous_days": [
+        241.026259496869,
+        555.5505840160228
+      ],
+      "calendar_days_80_percent": [
+        301.28282437108624,
+        694.4382300200284
+      ],
+      "calendar_months_80_percent": [
+        9.898409014245132,
+        22.815219056099497
+      ]
+    },
+    {
+      "hardware": "H100 PCIe 80GB",
+      "cards": 4,
+      "continuous_days": [
+        132.40612812395426,
+        361.91067509592324
+      ],
+      "calendar_days_80_percent": [
+        165.5076601549428,
+        452.388343869904
+      ],
+      "calendar_months_80_percent": [
+        5.43762333157923,
+        14.862861400243252
+      ]
+    },
+    {
+      "hardware": "H100 PCIe 80GB",
+      "cards": 8,
+      "continuous_days": [
+        78.55348545193998,
+        237.04559293990275
+      ],
+      "calendar_days_80_percent": [
+        98.19185681492496,
+        296.3069911748784
+      ],
+      "calendar_months_80_percent": [
+        3.2260158296484587,
+        9.734931948250626
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 1,
+      "continuous_days": [
+        376.20762422349634,
+        736.2506988525392
+      ],
+      "calendar_days_80_percent": [
+        470.2595302793704,
+        920.313373565674
+      ],
+      "calendar_months_80_percent": [
+        15.450005101580958,
+        30.236168330699762
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 2,
+      "continuous_days": [
+        195.33357667086375,
+        424.1348312976315
+      ],
+      "calendar_days_80_percent": [
+        244.1669708385797,
+        530.1685391220393
+      ],
+      "calendar_months_80_percent": [
+        8.021912799624795,
+        17.418268225775417
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 4,
+      "continuous_days": [
+        101.68332420160718,
+        236.96051870275434
+      ],
+      "calendar_days_80_percent": [
+        127.10415525200897,
+        296.2006483784429
+      ],
+      "calendar_months_80_percent": [
+        4.175906538053683,
+        9.731438139743505
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 8,
+      "continuous_days": [
+        53.08619684954863,
+        134.75651904049087
+      ],
+      "calendar_days_80_percent": [
+        66.35774606193579,
+        168.44564880061358
+      ],
+      "calendar_months_80_percent": [
+        2.180131287455796,
+        5.534148625892849
+      ]
+    }
+  ]
+}

@@ -2,6 +2,19 @@
 
 本目录保存四国军棋与二人军棋的规则、棋盘编码、动作编码、可执行训练环境和自博弈方案。
 
+**四国当前训练入口**：[PPO、独立价值模型与 4090 显存实测](four_player_ppo_zh.md)。
+revision 19 的[统一环境步定义](environment_step_budget_zh.md)：30 亿指训练采样与实际模拟分支的总交互预算。
+预算口径见 [PPO 序列训练优化与 30 亿环境交互步预算](four_player_ppo_optimization_zh.md)；
+最新[计算量与性能剖析](four_player_ppo_compute_audit_zh.md)说明棋盘编码和实现开销；
+[30 亿总交互时间重估](four_player_ppo_eta_budget_zh.md)补测四暗、双明，并列出硬件条件情景和吞吐目标；
+[显卡及多卡历史情景](four_player_ppo_hardware_eta_zh.md)未获目标硬件实测验证，已暂停用于排期；
+[旧 PPO 计时](four_player_ppo_timing_zh.md)保留为未合并前缀的对照基线。
+训练中的千局选优见[自动最优模型选择](best_model_selection_zh.md)，资源配置见
+[并行模型对弈与资源调优](parallel_arena_zh.md)；固定旧对手比较见
+[历史模型棋力评测](historical_arena_zh.md)。
+自 revision 16 起四暗、双明使用 PPO；下列旧 GRPO 预算和架构 PDF 保留为历史
+对照与二人模式说明，四国当前参数以这份 PPO 文档为准。
+
 建议按以下顺序阅读：
 
 1. [四国军棋与二人军棋规则说明书](rules_zh.md)  

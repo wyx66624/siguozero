@@ -1,0 +1,839 @@
+{
+  "status": "conditional_sensitivity_scenarios_not_validated_hardware_etas",
+  "target_environment_steps_per_mode": 3000000000,
+  "definition": "sum of actual training environment transitions across every seat, game, branch and rank; forwards/backwards/GAE/reused epochs add zero",
+  "current_ppo_extra_simulation_branches": 0,
+  "calendar_training_availability": 0.8,
+  "calendar_month_days": 30.44,
+  "assumptions": {
+    "hardware_speedups": "manually selected sensitivities for the entire non-save phase; NOT inferred directly from TFLOPS or vendor application claims",
+    "ddp": "unmeasured weak scaling, full models per rank, rollout and effective optimizer batches grow with GPU count",
+    "save": "one full checkpoint per global update; same measured storage latency, no GPU or DDP speedup assigned to storage",
+    "excluded": "arena time, restarts/tuning, model initialization, mature-policy game-length distribution and >1000-transition sliding-window slowdown",
+    "range": "combination of individual short-batch measurements and selected assumptions; NOT a confidence interval or upper/lower bound on production time"
+  },
+  "measured_probes": [
+    {
+      "source": "docs/benchmarks/2026-09-11_ppo_eta_four_dark_4090.json",
+      "source_sha256": "4d46b6343f6de4bfc336b77f379df02d5bfa44db5f63da470f301260d5dc27e7",
+      "mode": "four_dark",
+      "device": "NVIDIA GeForce RTX 4090",
+      "torch": "2.11.0+cu130",
+      "games": 20,
+      "per_rank_transition_batch": 5120,
+      "sequence_microbatch": 8,
+      "optimizer_minibatch_samples": 512,
+      "checkpoint_seconds": 12.608053696000013,
+      "checkpoint_bytes": 3753404317,
+      "peak_allocated_gib": 16.266594886779785,
+      "peak_reserved_gib": 16.53515625,
+      "total_measured_environment_steps": 10240,
+      "weighted_environment_steps_per_second_with_periodic_save": 30.877319374844085,
+      "weighted_seconds_with_periodic_save": 331.635006125,
+      "updates": [
+        {
+          "environment_steps": 5120,
+          "base_steps": 5120,
+          "branch_steps": 0,
+          "history": {
+            "update": 1,
+            "mean_tokens": 128.5,
+            "min_tokens": 1,
+            "max_tokens": 256
+          },
+          "seconds_without_save": 100.541721161,
+          "seconds_with_save": 113.14977485700001,
+          "environment_steps_per_second_with_save": 45.249758618350896,
+          "policy_epochs": 2.6,
+          "critic_epochs": 3.0,
+          "policy_nonzero_advantage_fraction": 0.0,
+          "terminal_games": 0,
+          "policy_backward_seconds": 26.149837605000002,
+          "critic_backward_seconds": 27.08447737499999
+        },
+        {
+          "environment_steps": 5120,
+          "base_steps": 5120,
+          "branch_steps": 0,
+          "history": {
+            "update": 2,
+            "mean_tokens": 384.5,
+            "min_tokens": 257,
+            "max_tokens": 512
+          },
+          "seconds_without_save": 205.159763104,
+          "seconds_with_save": 217.76781680000002,
+          "environment_steps_per_second_with_save": 23.511279468362652,
+          "policy_epochs": 3.0,
+          "critic_epochs": 3.0,
+          "policy_nonzero_advantage_fraction": 0.0,
+          "terminal_games": 0,
+          "policy_backward_seconds": 59.60184570300001,
+          "critic_backward_seconds": 59.62948440900004
+        }
+      ]
+    },
+    {
+      "source": "docs/benchmarks/2026-09-11_ppo_eta_double_open_4090.json",
+      "source_sha256": "071158e00a3727bcded1363aa022ef925a041da31a6333b101a6f4e94d825f2f",
+      "mode": "double_open",
+      "device": "NVIDIA GeForce RTX 4090",
+      "torch": "2.11.0+cu130",
+      "games": 20,
+      "per_rank_transition_batch": 5120,
+      "sequence_microbatch": 8,
+      "optimizer_minibatch_samples": 512,
+      "checkpoint_seconds": 12.554144380000025,
+      "checkpoint_bytes": 3750131869,
+      "peak_allocated_gib": 16.257701873779297,
+      "peak_reserved_gib": 16.53515625,
+      "total_measured_environment_steps": 10240,
+      "weighted_environment_steps_per_second_with_periodic_save": 30.983023856375674,
+      "weighted_seconds_with_periodic_save": 330.503570196,
+      "updates": [
+        {
+          "environment_steps": 5120,
+          "base_steps": 5120,
+          "branch_steps": 0,
+          "history": {
+            "update": 1,
+            "mean_tokens": 126.1767578125,
+            "min_tokens": 1,
+            "max_tokens": 256
+          },
+          "seconds_without_save": 108.747948684,
+          "seconds_with_save": 121.30209306400002,
+          "environment_steps_per_second_with_save": 42.208669864407405,
+          "policy_epochs": 2.6,
+          "critic_epochs": 3.0,
+          "policy_nonzero_advantage_fraction": 0.0,
+          "terminal_games": 1,
+          "policy_backward_seconds": 29.09067802200002,
+          "critic_backward_seconds": 30.74574610899998
+        },
+        {
+          "environment_steps": 5120,
+          "base_steps": 5120,
+          "branch_steps": 0,
+          "history": {
+            "update": 2,
+            "mean_tokens": 371.8376953125,
+            "min_tokens": 1,
+            "max_tokens": 512
+          },
+          "seconds_without_save": 195.96145839700006,
+          "seconds_with_save": 208.51560277700008,
+          "environment_steps_per_second_with_save": 24.554517416500747,
+          "policy_epochs": 3.0,
+          "critic_epochs": 3.0,
+          "policy_nonzero_advantage_fraction": 0.0,
+          "terminal_games": 1,
+          "policy_backward_seconds": 62.14047229000005,
+          "critic_backward_seconds": 58.100179725999965
+        }
+      ]
+    }
+  ],
+  "weighted_short_probe_linear_extrapolations": [
+    {
+      "mode": "four_dark",
+      "steps_per_second": 30.877319374844085,
+      "linear_continuous_days": 1124.5219120449492,
+      "linear_calendar_days": 1405.6523900561865
+    },
+    {
+      "mode": "double_open",
+      "steps_per_second": 30.983023856375674,
+      "linear_continuous_days": 1120.6853915608724,
+      "linear_calendar_days": 1400.8567394510903
+    }
+  ],
+  "hardware_scenarios": [
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 1,
+      "non_save_speedup_assumption": [
+        1.0,
+        1.0
+      ],
+      "ddp_efficiency_assumption": [
+        1.0,
+        1.0
+      ],
+      "global_rollout_batch": 5120,
+      "global_updates": 585938,
+      "calendar_days_scenario_envelope": [
+        959.183344620383,
+        1846.042231483773
+      ],
+      "calendar_months_scenario_envelope": [
+        31.510622359408114,
+        60.64527698698335
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          959.183344620383,
+          1846.042231483773
+        ],
+        "double_open": [
+          1028.2914613098096,
+          1767.6101744784414
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        1987.4748059301926,
+        3613.6524059622143
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 2,
+      "non_save_speedup_assumption": [
+        1.0,
+        1.0
+      ],
+      "ddp_efficiency_assumption": [
+        0.8,
+        0.95
+      ],
+      "global_rollout_batch": 10240,
+      "global_updates": 292969,
+      "calendar_days_scenario_envelope": [
+        502.0207106773462,
+        1140.4164088437956
+      ],
+      "calendar_months_scenario_envelope": [
+        16.49213898414409,
+        37.46440239302876
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          502.0207106773462,
+          1140.4164088437956
+        ],
+        "double_open": [
+          538.4054298645195,
+          1091.4534976309692
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        1040.4261405418656,
+        2231.869906474765
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 4,
+      "non_save_speedup_assumption": [
+        1.0,
+        1.0
+      ],
+      "ddp_efficiency_assumption": [
+        0.7,
+        0.9
+      ],
+      "global_rollout_batch": 20480,
+      "global_updates": 146485,
+      "calendar_days_scenario_envelope": [
+        263.4718315226625,
+        647.851591853721
+      ],
+      "calendar_months_scenario_envelope": [
+        8.655447816119004,
+        21.282903805969806
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          263.4718315226625,
+          647.851591853721
+        ],
+        "double_open": [
+          282.6812904856226,
+          619.8890112627639
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        546.1531220082851,
+        1267.7406031164849
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 8,
+      "non_save_speedup_assumption": [
+        1.0,
+        1.0
+      ],
+      "ddp_efficiency_assumption": [
+        0.55,
+        0.8
+      ],
+      "global_rollout_batch": 40960,
+      "global_updates": 73243,
+      "calendar_days_scenario_envelope": [
+        146.53390162905137,
+        408.6283394175385
+      ],
+      "calendar_months_scenario_envelope": [
+        4.8138601060792165,
+        13.42405845655514
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          146.53390162905137,
+          408.6283394175385
+        ],
+        "double_open": [
+          157.34643668478162,
+          390.84942802043514
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        303.880338313833,
+        799.4777674379736
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 1,
+      "non_save_speedup_assumption": [
+        1.5,
+        2.5
+      ],
+      "ddp_efficiency_assumption": [
+        1.0,
+        1.0
+      ],
+      "global_rollout_batch": 5120,
+      "global_updates": 585938,
+      "calendar_days_scenario_envelope": [
+        447.80126984925437,
+        1266.3214498786829
+      ],
+      "calendar_months_scenario_envelope": [
+        14.710948418175242,
+        41.60057325488445
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          447.80126984925437,
+          1266.3214498786829
+        ],
+        "double_open": [
+          475.17031933059445,
+          1213.8810801004447
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        922.9715891798488,
+        2480.2025299791276
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 2,
+      "non_save_speedup_assumption": [
+        1.5,
+        2.5
+      ],
+      "ddp_efficiency_assumption": [
+        0.8,
+        0.95
+      ],
+      "global_rollout_batch": 10240,
+      "global_updates": 292969,
+      "calendar_days_scenario_envelope": [
+        232.8722502714891,
+        778.090920340614
+      ],
+      "calendar_months_scenario_envelope": [
+        7.650205330863636,
+        25.561462560466953
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          232.8722502714891,
+          778.090920340614
+        ],
+        "double_open": [
+          247.28903934914314,
+          745.3728136447214
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        480.16128962063226,
+        1523.4637339853355
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 4,
+      "non_save_speedup_assumption": [
+        1.5,
+        2.5
+      ],
+      "ddp_efficiency_assumption": [
+        0.7,
+        0.9
+      ],
+      "global_rollout_batch": 20480,
+      "global_updates": 146485,
+      "calendar_days_scenario_envelope": [
+        121.42077033179558,
+        440.8077488595532
+      ],
+      "calendar_months_scenario_envelope": [
+        3.988855792765952,
+        14.481200685267845
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          121.42077033179558,
+          440.8077488595532
+        ],
+        "double_open": [
+          129.03600438439057,
+          422.12794539192123
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        250.45677471618615,
+        862.9356942514744
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 8,
+      "non_save_speedup_assumption": [
+        1.5,
+        2.5
+      ],
+      "ddp_efficiency_assumption": [
+        0.55,
+        0.8
+      ],
+      "global_rollout_batch": 40960,
+      "global_updates": 73243,
+      "calendar_days_scenario_envelope": [
+        66.62963423544112,
+        276.8722671582593
+      ],
+      "calendar_months_scenario_envelope": [
+        2.1888841733062128,
+        9.095672377078165
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          66.62963423544112,
+          276.8722671582593
+        ],
+        "double_open": [
+          70.92037325745729,
+          265.0006178933704
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        137.5500074928984,
+        541.8728850516297
+      ]
+    },
+    {
+      "hardware": "H100 PCIe 80GB",
+      "cards": 1,
+      "non_save_speedup_assumption": [
+        2.0,
+        3.5
+      ],
+      "ddp_efficiency_assumption": [
+        1.0,
+        1.0
+      ],
+      "global_rollout_batch": 5120,
+      "global_updates": 585938,
+      "calendar_days_scenario_envelope": [
+        350.3951603690394,
+        976.4610590761375
+      ],
+      "calendar_months_scenario_envelope": [
+        11.511010524607075,
+        32.078221388835004
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          350.3951603690394,
+          976.4610590761375
+        ],
+        "double_open": [
+          369.81391133455344,
+          937.0165329114462
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        720.2090717035928,
+        1913.4775919875838
+      ]
+    },
+    {
+      "hardware": "H100 PCIe 80GB",
+      "cards": 2,
+      "non_save_speedup_assumption": [
+        2.0,
+        3.5
+      ],
+      "ddp_efficiency_assumption": [
+        0.8,
+        0.95
+      ],
+      "global_rollout_batch": 10240,
+      "global_updates": 292969,
+      "calendar_days_scenario_envelope": [
+        181.60587686084966,
+        596.9281760890233
+      ],
+      "calendar_months_scenario_envelope": [
+        5.966027492143549,
+        19.609992644186047
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          181.60587686084966,
+          596.9281760890233
+        ],
+        "double_open": [
+          191.83829829859522,
+          572.3324716515973
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        373.44417515944485,
+        1169.2606477406207
+      ]
+    },
+    {
+      "hardware": "H100 PCIe 80GB",
+      "cards": 4,
+      "non_save_speedup_assumption": [
+        2.0,
+        3.5
+      ],
+      "ddp_efficiency_assumption": [
+        0.7,
+        0.9
+      ],
+      "global_rollout_batch": 20480,
+      "global_updates": 146485,
+      "calendar_days_scenario_envelope": [
+        94.363425343059,
+        337.2858273624693
+      ],
+      "calendar_months_scenario_envelope": [
+        3.099981121651084,
+        11.080349124916863
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          94.363425343059,
+          337.2858273624693
+        ],
+        "double_open": [
+          99.77023560320352,
+          323.2474124564999
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        194.13366094626252,
+        660.5332398189692
+      ]
+    },
+    {
+      "hardware": "H100 PCIe 80GB",
+      "cards": 8,
+      "non_save_speedup_assumption": [
+        2.0,
+        3.5
+      ],
+      "ddp_efficiency_assumption": [
+        0.55,
+        0.8
+      ],
+      "global_rollout_batch": 40960,
+      "global_updates": 73243,
+      "calendar_days_scenario_envelope": [
+        51.40977377951535,
+        210.99423102861968
+      ],
+      "calendar_months_scenario_envelope": [
+        1.6888887575399258,
+        6.931479337339674
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          51.40977377951535,
+          210.99423102861968
+        ],
+        "double_open": [
+          54.45826593796693,
+          202.0762128298381
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        105.86803971748228,
+        413.0704438584578
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB (HGX/NVSwitch)",
+      "cards": 1,
+      "non_save_speedup_assumption": [
+        2.5,
+        4.5
+      ],
+      "ddp_efficiency_assumption": [
+        1.0,
+        1.0
+      ],
+      "global_rollout_batch": 5120,
+      "global_updates": 585938,
+      "calendar_days_scenario_envelope": [
+        296.2806551022533,
+        802.5448245946104
+      ],
+      "calendar_months_scenario_envelope": [
+        9.73326725040254,
+        26.364810269205336
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          296.2806551022533,
+          802.5448245946104
+        ],
+        "double_open": [
+          311.2825735589752,
+          770.8978045980473
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        607.5632286612285,
+        1573.4426291926577
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB (HGX/NVSwitch)",
+      "cards": 2,
+      "non_save_speedup_assumption": [
+        2.5,
+        4.5
+      ],
+      "ddp_efficiency_assumption": [
+        0.85,
+        0.95
+      ],
+      "global_rollout_batch": 10240,
+      "global_updates": 292969,
+      "calendar_days_scenario_envelope": [
+        153.1245582993833,
+        462.6546127025501
+      ],
+      "calendar_months_scenario_envelope": [
+        5.0303731372990566,
+        15.198903176824903
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          153.1245582993833,
+          462.6546127025501
+        ],
+        "double_open": [
+          161.03233104829087,
+          444.07904170375264
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        314.15688934767417,
+        906.7336544063028
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB (HGX/NVSwitch)",
+      "cards": 4,
+      "non_save_speedup_assumption": [
+        2.5,
+        4.5
+      ],
+      "ddp_efficiency_assumption": [
+        0.8,
+        0.95
+      ],
+      "global_rollout_batch": 20480,
+      "global_updates": 146485,
+      "calendar_days_scenario_envelope": [
+        76.56254048204815,
+        244.11609801509374
+      ],
+      "calendar_months_scenario_envelope": [
+        2.515195153812357,
+        8.019582720600976
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          76.56254048204815,
+          244.11609801509374
+        ],
+        "double_open": [
+          80.51644035242256,
+          234.25493281462067
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        157.0789808344707,
+        478.3710308297144
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB (HGX/NVSwitch)",
+      "cards": 8,
+      "non_save_speedup_assumption": [
+        2.5,
+        4.5
+      ],
+      "ddp_efficiency_assumption": [
+        0.7,
+        0.9
+      ],
+      "global_rollout_batch": 40960,
+      "global_updates": 73243,
+      "calendar_days_scenario_envelope": [
+        39.66605429191831,
+        137.58727648416416
+      ],
+      "calendar_months_scenario_envelope": [
+        1.303089825621495,
+        4.519949950202502
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          39.66605429191831,
+          137.58727648416416
+        ],
+        "double_open": [
+          41.75602263589104,
+          131.96044718761635
+        ]
+      },
+      "two_modes_sequential_calendar_days": [
+        81.42207692780934,
+        269.54772367178055
+      ]
+    }
+  ],
+  "checkpoint_sensitivity": [
+    {
+      "mode": "four_dark",
+      "save_every_updates": 1,
+      "saves": 585938,
+      "save_only_continuous_days": 85.50390933480156,
+      "save_only_calendar_days": 106.87988666850195,
+      "cumulative_checkpoint_payload_pib": 1.9533372419061354,
+      "status": "current launch script"
+    },
+    {
+      "mode": "four_dark",
+      "save_every_updates": 10,
+      "saves": 58594,
+      "save_only_continuous_days": 8.550420118789638,
+      "save_only_calendar_days": 10.688025148487048,
+      "cumulative_checkpoint_payload_pib": 0.1953343909291565,
+      "status": "sensitivity only; not applied"
+    },
+    {
+      "mode": "four_dark",
+      "save_every_updates": 100,
+      "saves": 5860,
+      "save_only_continuous_days": 0.8551295678074083,
+      "save_only_calendar_days": 1.0689119597592605,
+      "cumulative_checkpoint_payload_pib": 0.01953543930854451,
+      "status": "sensitivity only; not applied"
+    },
+    {
+      "mode": "double_open",
+      "save_every_updates": 1,
+      "saves": 585938,
+      "save_only_continuous_days": 85.13831307556083,
+      "save_only_calendar_days": 106.42289134445103,
+      "cumulative_checkpoint_payload_pib": 1.9516342027420226,
+      "status": "current launch script"
+    },
+    {
+      "mode": "double_open",
+      "save_every_updates": 10,
+      "saves": 58594,
+      "save_only_continuous_days": 8.51386036807548,
+      "save_only_calendar_days": 10.64232546009435,
+      "cumulative_checkpoint_payload_pib": 0.19516408643144167,
+      "status": "sensitivity only; not applied"
+    },
+    {
+      "mode": "double_open",
+      "save_every_updates": 100,
+      "saves": 5860,
+      "save_only_continuous_days": 0.8514732183657425,
+      "save_only_calendar_days": 1.064341522957178,
+      "cumulative_checkpoint_payload_pib": 0.019518407114862413,
+      "status": "sensitivity only; not applied"
+    }
+  ],
+  "throughput_sensitivity": [
+    {
+      "whole_machine_steps_per_second": 25,
+      "continuous_days": 1388.888888888889,
+      "calendar_days": 1736.111111111111
+    },
+    {
+      "whole_machine_steps_per_second": 50,
+      "continuous_days": 694.4444444444445,
+      "calendar_days": 868.0555555555555
+    },
+    {
+      "whole_machine_steps_per_second": 100,
+      "continuous_days": 347.22222222222223,
+      "calendar_days": 434.02777777777777
+    },
+    {
+      "whole_machine_steps_per_second": 250,
+      "continuous_days": 138.88888888888889,
+      "calendar_days": 173.6111111111111
+    },
+    {
+      "whole_machine_steps_per_second": 500,
+      "continuous_days": 69.44444444444444,
+      "calendar_days": 86.80555555555554
+    },
+    {
+      "whole_machine_steps_per_second": 1000,
+      "continuous_days": 34.72222222222222,
+      "calendar_days": 43.40277777777777
+    }
+  ],
+  "deadline_throughput_requirements": [
+    {
+      "calendar_days": 30,
+      "required_whole_machine_steps_per_running_second": 1446.7592592592594
+    },
+    {
+      "calendar_days": 60,
+      "required_whole_machine_steps_per_running_second": 723.3796296296297
+    },
+    {
+      "calendar_days": 90,
+      "required_whole_machine_steps_per_running_second": 482.25308641975306
+    },
+    {
+      "calendar_days": 180,
+      "required_whole_machine_steps_per_running_second": 241.12654320987653
+    },
+    {
+      "calendar_days": 365,
+      "required_whole_machine_steps_per_running_second": 118.9117199391172
+    }
+  ]
+}

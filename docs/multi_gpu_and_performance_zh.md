@@ -1,5 +1,12 @@
 # 多 GPU/NPU 训练与历史编码加速设计
 
+四国 revision 18 的 PPO 为 Policy/Critic 分别创建 DDP 包装和优化器；全局 batch
+按真实动作数计，反传时顺序更新两个网络，采样时共享全座位的 Policy 和 Critic。
+采样批与优化器小批分开：每 rank 每 512 个决策执行一次 optimizer step，
+序列 microbatch=8 对完全相同的历史前缀共享计算并保留所有决策梯度。
+当前 4090 容量及并行参数见[四国 PPO 优化报告](four_player_ppo_optimization_zh.md)。下文 `4×2`
+分叉与旧 Actor 吞吐数字是 GRPO 口径。
+
 ## 1. 已实现的多加速器语义
 
 训练采用 PyTorch `torchrun + DistributedDataParallel`（DDP），每张 CUDA GPU

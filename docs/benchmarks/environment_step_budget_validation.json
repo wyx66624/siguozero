@@ -1,0 +1,48 @@
+{
+  "kind": "accounting validation on fresh tiny CPU models, not a throughput benchmark",
+  "ppo_ddp_resume": {"resumed_update": 2, "environment_plies": 14, "new_rollout_updates": 0, "exit_code": 0},
+  "suite": {
+    "passed": 201,
+    "subtests_passed": 246
+  },
+  "runs": [
+    {
+      "name": "ppo_ddp",
+      "mode": "four_dark",
+      "target_environment_plies": 13,
+      "actual_environment_plies": 14,
+      "base_plies": 14,
+      "continuation_plies": 0,
+      "world_size": 2,
+      "updates": 2,
+      "checkpoint": "runs_environment_budget_ddp_smoke_20260911/four_dark/with_dead_rules/checkpoints/latest.pt",
+      "per_update_environment_plies": [
+        8,
+        6
+      ],
+      "checkpoint_and_log_agree": true
+    },
+    {
+      "name": "grpo_total_environment",
+      "mode": "two_player",
+      "target_environment_plies": 33,
+      "actual_environment_plies": 33,
+      "base_plies": 1,
+      "continuation_plies": 32,
+      "world_size": 1,
+      "updates": 1,
+      "checkpoint": "runs_environment_budget_grpo_smoke_20260911/two_player/with_dead_rules/checkpoints/latest.pt",
+      "per_update_environment_plies": [
+        33
+      ],
+      "checkpoint_and_log_agree": true
+    }
+  ],
+  "source_sha256": {
+    "src/junqi/training/settings.py": "4a037b2b819393782b7088b8929244d188df038d2e7bbb1eb57fafad842093ab",
+    "src/junqi/training/trainer.py": "2ea38b7e183183f0d37d42b5bb66209037f0233117f64d833739a02c26de8992",
+    "src/junqi/training/rollout.py": "88fe378c77f8a3af8827b83bc75be613d1ddb3b8a9887a71417ba196820b52cb",
+    "src/junqi/training/ppo.py": "9a84c3b4a50accefce01f79db1a427be892aa662c2fd5923ed229e3e40786f95",
+    "src/junqi/training/model_selection.py": "456dbdd3aceaf3192f83fbc658a873749e538cc6019305982e0bf1adffeba9be"
+  }
+}

@@ -1,8 +1,8 @@
 # 共享训练配置：同时定义 bootstrap/main/extended 三档；实际档位必须由
-# --model-scale 明确选择。正式二人入口固定使用 main，不会训练 bootstrap 权重。
+# --model-scale 明确选择。正式启动脚本选 main，直接使用 Python CLI 默认 bootstrap。
 schema_version: 1
-config_revision: 15
-experiment_name: siguozero_v15_paged_kv
+config_revision: 19
+experiment_name: siguozero_v19_four_player_ppo_environment_budget_3b
 
 rules:
   game_modes:
@@ -230,6 +230,8 @@ history:
   recompute_board_embedding_in_learner: true
   debug_recent_decisions: 256
 
+# Terminal branching below is used by two-player GRPO. Four-player PPO uses
+# the ppo section and never consumes these candidate/replica counts.
 rollout:
   parallel_environments_min: 256
   rollout_to_terminal: true
@@ -253,6 +255,35 @@ rollout:
   keep_root_candidate_replica_groups_atomic: true
   environment_steps_per_update: variable_until_all_branches_terminal
 
+# Four-player move policies use PPO; two-player and the separate deployment
+# policy retain their terminal-return updates. No PPO move spawns replicas.
+ppo:
+  discount: 1.0
+  gae_lambda: 0.95
+  value_coefficient: 0.5
+  value_clip_epsilon: 0.2
+  critic_learning_rate: 1.0e-4
+  critic_epochs: 3
+  # Reuse exact causal prefixes and supervise every collected decision.
+  sequence_training: true
+  max_samples_per_sequence: 64
+  # Samples per optimizer step per rank; distinct from the rollout buffer.
+  optimizer_minibatch_samples: 512
+  transition_batch: 5120
+  # Total TRAINING environment transitions across games, seats and ranks:
+  # base-game actions + every actually executed simulated-branch action.
+  # E.g. 8 branches x 32 actions = 256 steps; a separate base action adds 1.
+  # Network forward/backward, value bootstrap and repeated epochs add 0 steps.
+  # total_updates is derived from this target unless --updates is explicit.
+  target_environment_plies: 3000000000
+  # 4090: learner microbatch=8 sequences, actor=20 independent games.
+  base_game_pool_size: 20
+  actor_inference_batch: 20
+  # 3 prefixes x 4 seats x 20 games per model; full-window probe: 19.02 GiB.
+  inference_temporal_cache_entries: 240
+  # Historical four-player estimate, used only by --grpo-equivalent-plies.
+  grpo_mean_remaining_plies: 334.5
+
 grpo:
   strategy_grouping: sampled_root_candidate_slots
   root_candidate_count: 4
@@ -267,7 +298,7 @@ grpo:
 
 learner:
   optimizer: adamw
-  # Policy 的 batch 单位是含 4 个候选槽、每槽 2 条续局的完整锚点组。
+  # 下方为 GRPO 锚点 batch；四国由 ppo.transition_batch 覆盖为真实动作数。
   policy_batch:
     unit: anchor_state_group
     global_target: 128
@@ -319,6 +350,22 @@ learner:
     model: bfloat16
     loss_and_reductions: float32
 
+model_selection:
+  # 训练进度达到 30%、35%、...、100% 时，当前模型对阵此前 best。
+  # games 是全体 rank 合计局数；二人按 2 局换边、四国按 4 局整队轮转分组。
+  enabled: true
+  start_percent: 30
+  interval_percent: 5
+  games: 1000
+  max_plies: 2000
+  seed: 20260910
+  temporal_cache_entries: 8
+  # 每个 rank 的并发局数、单次推理上限与 CPU 环境 worker 数。
+  # 新旧两个版本共享各自权重；并发不会增加全局评测总局数。
+  parallel_games: 32
+  inference_batch_size: 32
+  environment_workers: 4
+
 staleness:
   maximum_behavior_policy_versions: 1
   store_source_and_destination_log_probs: true
@@ -331,8 +378,10 @@ runtime:
   # <output_root>/<mode>/without_dead_rules；自定义 --run-dir 也会追加该层。
   output_root: runs
   total_updates: 200000
-  # null 表示只受 total_updates 限制；二人 30 亿步正式运行由 CLI 设为
-  # 3000000000，并按 cumulative/continuation_plies 精确停止。
+  # 二人 null 表示只受 total_updates 限制；可通过 CLI 指定 GRPO 分支步数。
+  # 四国由 ppo.target_environment_plies 覆盖，统计训练采样与模拟分支的总交互。
+  target_environment_plies: null
+  # 兼容旧二人 GRPO 的仅分支预算；总交互预算用上面的字段/CLI 入口。
   target_continuation_plies: null
   seed: 20260902
   device: auto

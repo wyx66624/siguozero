@@ -54,8 +54,22 @@ if (( nnodes > 1 )) && [[ "$master_addr" == "127.0.0.1" ]]; then
   exit 2
 fi
 
-anchor_batch="${ANCHOR_BATCH:-$((world_size * 8))}"
-base_game_pool="${BASE_GAME_POOL:-$((world_size * 4))}"
+if [[ "$mode" == "two_player" ]]; then
+  default_batch=$((world_size * 8))
+  default_pool=$((world_size * 4))
+  default_actor=64
+  default_cache=192
+  default_run_dir=runs_npu_910b
+else
+  # PPO batches are real transitions; each rank keeps 8 games and two KV arenas.
+  default_batch=$((world_size * 512))
+  default_pool=$((world_size * 8))
+  default_actor=8
+  default_cache=96
+  default_run_dir=runs_npu_910b_ppo_3b
+fi
+anchor_batch="${ANCHOR_BATCH:-$default_batch}"
+base_game_pool="${BASE_GAME_POOL:-$default_pool}"
 if (( anchor_batch % world_size != 0 )); then
   echo "ANCHOR_BATCH=$anchor_batch must be divisible by world size $world_size" >&2
   exit 2
@@ -80,22 +94,32 @@ trainer_args=(
   --config "${CONFIG:-configs/bootstrap.yaml}"
   --device npu
   --model-scale "${MODEL_SCALE:-main}"
-  --updates "${UPDATES:-200000}"
   --anchor-batch "$anchor_batch"
   --base-game-pool "$base_game_pool"
   --microbatch "${MICROBATCH:-8}"
-  --actor-batch "${ACTOR_BATCH:-64}"
+  --actor-batch "${ACTOR_BATCH:-$default_actor}"
   --rollout-anchor-wave "${ROLLOUT_ANCHOR_WAVE:-8}"
   --environment-workers "${ENVIRONMENT_WORKERS:-2}"
-  --temporal-cache-entries "${TEMPORAL_CACHE_ENTRIES:-192}"
+  --temporal-cache-entries "${TEMPORAL_CACHE_ENTRIES:-$default_cache}"
+  --arena-parallel-games "${EVAL_PARALLEL_GAMES:-32}"
+  --arena-inference-batch "${EVAL_INFERENCE_BATCH_SIZE:-32}"
+  --arena-environment-workers "${EVAL_ENVIRONMENT_WORKERS:-4}"
   --checkpoint-every "${CHECKPOINT_EVERY:-10}"
   --archive-every "${ARCHIVE_EVERY:-500}"
   --keep-checkpoint-archives "${KEEP_CHECKPOINT_ARCHIVES:-10}"
   --resource-monitor-seconds "${RESOURCE_MONITOR_SECONDS:-30}"
   "$dead_rules_flag"
-  --run-dir "${RUN_DIR:-runs_npu_910b}"
+  --run-dir "${RUN_DIR:-$default_run_dir}"
 )
-if [[ -n "${TARGET_CONTINUATION_PLIES:-}" ]]; then
+if [[ -n "${UPDATES:-}" ]]; then
+  trainer_args+=(--updates "$UPDATES")
+elif [[ "$mode" == "two_player" ]]; then
+  trainer_args+=(--updates 200000)
+fi
+# Four-player PPO derives its update limit from the real-step target in YAML.
+if [[ "$mode" != "two_player" && -n "${TARGET_ENVIRONMENT_PLIES:-}" ]]; then
+  trainer_args+=(--target-environment-plies "$TARGET_ENVIRONMENT_PLIES")
+elif [[ -n "${TARGET_CONTINUATION_PLIES:-}" ]]; then
   trainer_args+=(--target-continuation-plies "$TARGET_CONTINUATION_PLIES")
 fi
 

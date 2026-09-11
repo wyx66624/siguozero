@@ -14,7 +14,7 @@ from .trainer import SelfPlayTrainer
 
 def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train SiguoZero with terminal-only K=4, M=2 Game-GRPO"
+        description="Train four-player PPO with a critic, or two-player K=4/M=2 GRPO"
     )
     parser.add_argument(
         "--mode",
@@ -65,14 +65,28 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
         default="bootstrap",
     )
     parser.add_argument("--updates", type=int, default=None)
-    parser.add_argument(
-        "--target-continuation-plies",
+    budget = parser.add_mutually_exclusive_group()
+    budget.add_argument(
+        "--target-environment-plies",
         type=int,
         default=None,
-        help="stop after at least this many terminal-continuation environment plies",
+        help="total training environment transitions across all games/ranks, including simulated branches; network passes and repeated epochs add no steps",
     )
-    parser.add_argument("--anchor-batch", type=int, default=None)
+    budget.add_argument(
+        "--target-continuation-plies", type=int, default=None,
+        help="legacy GRPO branch-only budget; for PPO an alias for --target-environment-plies",
+    )
+    parser.add_argument("--anchor-batch", "--transition-batch", type=int, default=None,
+                        help="global PPO transitions or GRPO anchor groups per update")
     parser.add_argument("--microbatch", type=int, default=None)
+    parser.add_argument("--ppo-minibatch", type=int, default=None,
+                        help="PPO decision samples per optimizer step per rank")
+    parser.add_argument("--no-ppo-sequences", action="store_true",
+                        help="disable exact prefix sequence training for A/B measurements")
+    parser.add_argument("--grpo-equivalent-plies", type=int, default=None,
+                        help="legacy estimated root-state coverage, not an environment interaction count; overrides the default budget")
+    parser.add_argument("--grpo-mean-remaining-plies", type=float, default=None)
+    parser.add_argument("--warmup-updates", type=int, default=None)
     parser.add_argument("--actor-batch", type=int, default=None)
     parser.add_argument("--rollout-anchor-wave", type=int, default=None)
     parser.add_argument("--environment-workers", type=int, default=None)
@@ -93,6 +107,25 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
     parser.add_argument("--checkpoint-every", type=int, default=None)
     parser.add_argument("--archive-every", type=int, default=None)
     parser.add_argument("--keep-checkpoint-archives", type=int, default=None)
+    parser.add_argument(
+        "--no-model-selection",
+        action="store_true",
+        help="disable scheduled current-versus-best model matches",
+    )
+    parser.add_argument("--arena-games", type=int, default=None,
+                        help="total games per selection, divisible by 2 (two-player) or 4 (four-player)")
+    parser.add_argument("--arena-start-percent", type=int, default=None,
+                        help="first training progress percentage to evaluate (default: 30)")
+    parser.add_argument("--arena-interval-percent", type=int, default=None,
+                        help="training progress between selections (default: 5 percentage points)")
+    parser.add_argument("--arena-max-plies", type=int, default=None,
+                        help="maximum moves per arena game before adjudicating a draw")
+    parser.add_argument("--arena-parallel-games", type=int, default=None,
+                        help="active arena games per rank (default: 32)")
+    parser.add_argument("--arena-inference-batch", dest="arena_inference_batch_size", type=int,
+                        default=None, help="maximum arena inference requests per batch (default: 32)")
+    parser.add_argument("--arena-environment-workers", type=int, default=None,
+                        help="arena environment threads per rank (default: 4)")
     parser.add_argument("--resource-monitor-seconds", type=float, default=None)
     parser.add_argument(
         "--no-auto-microbatch-fallback",
@@ -110,9 +143,13 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
         help="require an empty/new run directory; existing checkpoints are never overwritten",
     )
     parser.add_argument(
+        "--init-from", default=None,
+        help="initialize weights from a checkpoint in a new run, with fresh optimizers/counters",
+    )
+    parser.add_argument(
         "--smoke-test",
         action="store_true",
-        help="use a tiny model, one anchor, eight short terminal continuations",
+        help="use a tiny model and one short PPO/GRPO update; disable model selection",
     )
     return parser
 
@@ -130,10 +167,22 @@ def main(
         overrides["total_updates"] = args.updates
     if args.target_continuation_plies is not None:
         overrides["target_continuation_plies"] = args.target_continuation_plies
+    if args.target_environment_plies is not None:
+        overrides["target_environment_plies"] = args.target_environment_plies
     if args.anchor_batch is not None:
         overrides["anchor_batch"] = args.anchor_batch
     if args.microbatch is not None:
         overrides["policy_microbatch"] = args.microbatch
+    if args.ppo_minibatch is not None:
+        overrides["ppo_minibatch_samples"] = args.ppo_minibatch
+    if args.no_ppo_sequences:
+        overrides["ppo_sequence_training"] = False
+    if args.grpo_equivalent_plies is not None:
+        overrides["grpo_equivalent_plies"] = args.grpo_equivalent_plies
+    if args.grpo_mean_remaining_plies is not None:
+        overrides["grpo_mean_remaining_plies"] = args.grpo_mean_remaining_plies
+    if args.warmup_updates is not None:
+        overrides["warmup_updates"] = args.warmup_updates
     if args.actor_batch is not None:
         overrides["actor_inference_batch"] = args.actor_batch
     if args.rollout_anchor_wave is not None:
@@ -150,6 +199,15 @@ def main(
         overrides["archive_every_updates"] = args.archive_every
     if args.keep_checkpoint_archives is not None:
         overrides["keep_checkpoint_archives"] = args.keep_checkpoint_archives
+    if args.no_model_selection:
+        overrides["arena_enabled"] = False
+    for name in (
+        "arena_games", "arena_start_percent", "arena_interval_percent", "arena_max_plies",
+        "arena_parallel_games", "arena_inference_batch_size", "arena_environment_workers",
+    ):
+        value = getattr(args, name)
+        if value is not None:
+            overrides[name] = value
     if args.resource_monitor_seconds is not None:
         overrides["resource_monitor_interval_seconds"] = (
             args.resource_monitor_seconds
@@ -206,6 +264,7 @@ def main(
             run_directory=run_directory,
             auto_resume=not args.no_resume,
             distributed=distributed,
+            initialize_from=args.init_from,
         )
         trainer.train()
     finally:

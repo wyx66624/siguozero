@@ -1,0 +1,888 @@
+{
+  "status": "partial: real workload and CPU/CUDA profile completed; checkpoint-off stress stopped",
+  "audit_notes": [
+    "The initial diagnostic set total_updates=2. Exact JSON learning rates were 1e-6 in both updates (the text logger rounds them to 0.0), matching the production warmup floor for these two updates. This is a short workload measurement, not a convergence run.",
+    "All completed phases retained below. The checkpoint-off test on the 128-sample subset saturated local VRAM (nvidia-smi around 24064 MiB); the owned probe process was stopped. No checkpoint-off time or successful capacity result is claimed.",
+    "The tool was subsequently changed to preserve the production schedule, limit its allocator to 85 percent of device memory, and require explicit opt-in for checkpoint-off stress.",
+    "Profiler instrumentation changed the subset wall time from 0.637 s to 1.019 s; CUDA event service time is not a measurement of tensor-core utilization. Recognized FLOPs omit fused attention and other operators."
+  ],
+  "device": "NVIDIA GeForce RTX 4090",
+  "torch": "2.11.0+cu130",
+  "games": 16,
+  "transitions_per_update": 4096,
+  "updates": 2,
+  "weights": "fresh random, no strength conclusion",
+  "source_sha256": {
+    "src/junqi/training/models.py": "ec555cc2904f7c36b456db98182ec9c76494244f822f1a8d26ea80dcfea8ef06",
+    "src/junqi/training/trainer.py": "ce4c98c48fbc5976d88da15a435a6381b327b160c37d1e696a3fbeecacc6db5e",
+    "src/junqi/training/encoding.py": "4c5880bfc53e2799d96162cc75693bc070129d79f5b161984ae2b8dd85d66211",
+    "src/junqi/training/ppo.py": "be31803b326c5ec983888e1e5b4f25aeb0eba1c331215d4e90f56a7c1c326fd6"
+  },
+  "parameters": {
+    "policy": {
+      "total": 144157704,
+      "children": {
+        "board_encoder": 8633608,
+        "action_encoder": 150272,
+        "position_embedding": 512512,
+        "mode_embedding": 1536,
+        "no_interaction_embedding": 31232,
+        "active_embedding": 8192,
+        "revealed_embedding": 8192,
+        "current_player_embedding": 2560,
+        "temporal_layers": 134348800,
+        "temporal_norm": 1024,
+        "source_query": 197120,
+        "destination_query": 262656
+      }
+    },
+    "critic": {
+      "total": 143698441,
+      "children": {
+        "board_encoder": 8633608,
+        "action_encoder": 150272,
+        "position_embedding": 512512,
+        "mode_embedding": 1536,
+        "no_interaction_embedding": 31232,
+        "active_embedding": 8192,
+        "revealed_embedding": 8192,
+        "current_player_embedding": 2560,
+        "temporal_layers": 134348800,
+        "temporal_norm": 1024,
+        "value_head": 513
+      }
+    },
+    "layout": {
+      "total": 17292288,
+      "children": {
+        "point_embedding": 6400,
+        "occupant_embedding": 3328,
+        "row_embedding": 1792,
+        "point_type_embedding": 512,
+        "mode_embedding": 768,
+        "piece_embedding": 3072,
+        "step_embedding": 6400,
+        "layers": 16809984,
+        "final_norm": 512,
+        "query": 328192,
+        "query_projection": 65536,
+        "key_projection": 65536
+      }
+    }
+  },
+  "phases": [
+    {
+      "phase": "real_training_without_checkpoint",
+      "seconds": 260.155026419,
+      "peak_allocated_gib": 13.702332973480225,
+      "blocks_including_checkpoint_replays": {}
+    },
+    {
+      "phase": "policy_one_epoch_512",
+      "seconds": 2.4330659899999887,
+      "peak_allocated_gib": 9.107352256774902,
+      "blocks_including_checkpoint_replays": {
+        "board": {
+          "calls": 672,
+          "batch_tokens": 11086400,
+          "estimated_forward_flops": 24725687500800
+        },
+        "temporal": {
+          "calls": 128,
+          "batch_tokens": 359744,
+          "estimated_forward_flops": 3394233565184
+        }
+      },
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.05177014766055865,
+        "optimizer/learner_sequences": 11.0,
+        "optimizer/learner_samples": 512.0,
+        "optimizer/history_token_reuse_fraction": 0.9728645467412,
+        "loss/policy_ppo": 0.0,
+        "loss/policy_total": -0.03667542205948848,
+        "policy/approx_kl_old": 0.008327726160132443,
+        "policy/entropy": 3.6675422908738256,
+        "policy/clip_fraction": 0.1269531210709829,
+        "policy/importance_ratio_mean": 0.988345978083089,
+        "policy/nonzero_advantage_fraction": 0.0
+      },
+      "encoding": {
+        "encoding/history_input_states": 512.0,
+        "encoding/history_unique_states": 11.0,
+        "encoding/raw_board_tokens": 196422.0,
+        "encoding/board_input_tokens": 5330.0,
+        "encoding/board_unique_tokens": 5330.0,
+        "encoding/board_encoder_tokens": 5330.0,
+        "encoding/within_batch_history_saved_fraction": 0.978515625,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9728645467412,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "critic_one_epoch_512",
+      "seconds": 2.5027925969999956,
+      "peak_allocated_gib": 8.868808269500732,
+      "blocks_including_checkpoint_replays": {
+        "board": {
+          "calls": 672,
+          "batch_tokens": 11086400,
+          "estimated_forward_flops": 24725687500800
+        },
+        "temporal": {
+          "calls": 128,
+          "batch_tokens": 359744,
+          "estimated_forward_flops": 3394233565184
+        }
+      },
+      "metrics": {
+        "loss/critic_total": 0.0,
+        "critic/value_mse": 0.0,
+        "critic/value_mean": 0.0,
+        "critic/target_mean": 0.0
+      },
+      "encoding": {
+        "encoding/history_input_states": 512.0,
+        "encoding/history_unique_states": 11.0,
+        "encoding/raw_board_tokens": 196422.0,
+        "encoding/board_input_tokens": 5330.0,
+        "encoding/board_unique_tokens": 5330.0,
+        "encoding/board_encoder_tokens": 5330.0,
+        "encoding/within_batch_history_saved_fraction": 0.978515625,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9728645467412,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "policy_profile_subset_uninstrumented",
+      "seconds": 0.6370467760000338,
+      "peak_allocated_gib": 5.813446044921875,
+      "blocks_including_checkpoint_replays": {
+        "board": {
+          "calls": 160,
+          "batch_tokens": 2647840,
+          "estimated_forward_flops": 5905403412480
+        },
+        "temporal": {
+          "calls": 64,
+          "batch_tokens": 97728,
+          "estimated_forward_flops": 921676677120
+        }
+      },
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.16633922724296002,
+        "optimizer/learner_sequences": 3.0,
+        "optimizer/learner_samples": 128.0,
+        "optimizer/history_token_reuse_fraction": 0.9732236759076185,
+        "loss/policy_ppo": 0.0,
+        "loss/policy_total": -0.0376938134431839,
+        "policy/approx_kl_old": 0.010326918214559555,
+        "policy/entropy": 3.769381523132324,
+        "policy/clip_fraction": 0.1796875,
+        "policy/importance_ratio_mean": 0.9892383813858032,
+        "policy/nonzero_advantage_fraction": 0.0
+      },
+      "encoding": {
+        "encoding/history_input_states": 128.0,
+        "encoding/history_unique_states": 3.0,
+        "encoding/raw_board_tokens": 47542.0,
+        "encoding/board_input_tokens": 1273.0,
+        "encoding/board_unique_tokens": 1273.0,
+        "encoding/board_encoder_tokens": 1273.0,
+        "encoding/within_batch_history_saved_fraction": 0.9765625,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9732236759076185,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "policy_profile_subset_instrumented",
+      "seconds": 1.0188562220000108,
+      "peak_allocated_gib": 5.81063985824585,
+      "blocks_including_checkpoint_replays": {
+        "board": {
+          "calls": 160,
+          "batch_tokens": 2647840,
+          "estimated_forward_flops": 5905403412480
+        },
+        "temporal": {
+          "calls": 64,
+          "batch_tokens": 97728,
+          "estimated_forward_flops": 921676677120
+        }
+      },
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.16633922724296002,
+        "optimizer/learner_sequences": 3.0,
+        "optimizer/learner_samples": 128.0,
+        "optimizer/history_token_reuse_fraction": 0.9732236759076185,
+        "loss/policy_ppo": 0.0,
+        "loss/policy_total": -0.0376938134431839,
+        "policy/approx_kl_old": 0.010326918214559555,
+        "policy/entropy": 3.769381523132324,
+        "policy/clip_fraction": 0.1796875,
+        "policy/importance_ratio_mean": 0.9892383813858032,
+        "policy/nonzero_advantage_fraction": 0.0
+      },
+      "encoding": {
+        "encoding/history_input_states": 128.0,
+        "encoding/history_unique_states": 3.0,
+        "encoding/raw_board_tokens": 47542.0,
+        "encoding/board_input_tokens": 1273.0,
+        "encoding/board_unique_tokens": 1273.0,
+        "encoding/board_encoder_tokens": 1273.0,
+        "encoding/within_batch_history_saved_fraction": 0.9765625,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9732236759076185,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    }
+  ],
+  "real_updates": [
+    {
+      "accelerator/max_memory_allocated_gib": 13.0213942527771,
+      "accelerator/memory_allocated_gib": 3.5551276206970215,
+      "accelerator/memory_reserved_gib": 12.39453125,
+      "accelerator/name": "NVIDIA GeForce RTX 4090",
+      "accelerator/type": "cuda",
+      "algorithm": "ppo",
+      "critic/target_mean": 0.0,
+      "critic/value_mean": 0.0,
+      "critic/value_mse": 0.0,
+      "cumulative/anchors": 0,
+      "cumulative/base_games": 1,
+      "cumulative/base_plies": 4096,
+      "cumulative/continuation_plies": 0,
+      "cumulative/environment_plies": 4096,
+      "cumulative/policy_samples": 4096,
+      "cumulative/root_candidates": 0,
+      "cumulative/terminal_continuations": 0,
+      "distributed/local_anchor_batch": 4096,
+      "distributed/model_replicas": 1,
+      "distributed/world_size": 1,
+      "encoding/board_cache_entries": 170.0,
+      "encoding/board_encoder_saved_fraction": 0.9687346380729999,
+      "encoding/board_encoder_tokens": 16282.0,
+      "encoding/board_input_tokens": 16282.0,
+      "encoding/board_unique_tokens": 16282.0,
+      "encoding/cross_step_cache_hit_fraction": 0.0,
+      "encoding/history_input_states": 4096.0,
+      "encoding/history_unique_states": 4096.0,
+      "encoding/paged_kv_allocated_gib": 4.6875,
+      "encoding/paged_kv_capacity_pages": 4800.0,
+      "encoding/paged_kv_enabled": 1.0,
+      "encoding/paged_kv_padding_fraction": 0.00893689473724757,
+      "encoding/paged_kv_pages": 1095.0,
+      "encoding/paged_kv_peak_pages": 1127.0,
+      "encoding/raw_board_tokens": 520768.0,
+      "encoding/temporal_attention_saved_fraction": 0.9537885519674847,
+      "encoding/temporal_cache_entries": 192.0,
+      "encoding/temporal_cache_hits": 4028.0,
+      "encoding/temporal_cold_states": 68.0,
+      "encoding/temporal_incremental_batch_max": 16.0,
+      "encoding/temporal_incremental_batch_mean": 15.984126984126984,
+      "encoding/temporal_incremental_batches": 1008.0,
+      "encoding/temporal_incremental_tokens": 16112.0,
+      "encoding/within_batch_dedup_saved_fraction": 0.0,
+      "encoding/within_batch_history_saved_fraction": 0.0,
+      "loss/critic_total": 0.0,
+      "loss/policy_ppo": 0.0,
+      "loss/policy_total": -0.03541374385531526,
+      "mode": "four_dark",
+      "model/critic_instances": 1,
+      "model/dead_rules_enabled": 1,
+      "model/shared_layout_instances_for_players": 1,
+      "model/shared_policy_instances_for_players": 1,
+      "optimizer/critic_epochs": 3.0,
+      "optimizer/critic_grad_norm": 0.0,
+      "optimizer/critic_steps": 24.0,
+      "optimizer/effective_policy_microbatch": 8,
+      "optimizer/history_token_reuse_fraction": 0.9674395478671571,
+      "optimizer/learner_samples": 512.0,
+      "optimizer/learner_sequences": 9.083333333333334,
+      "optimizer/policy_epochs": 3.0,
+      "optimizer/policy_grad_norm": 0.01002208337498208,
+      "optimizer/policy_lr": 1e-06,
+      "optimizer/policy_steps": 24.0,
+      "optimizer/temporal_padding_fraction": 0.08410361501878875,
+      "policy/approx_kl_old": 0.003915194970744551,
+      "policy/clip_fraction": 0.04874674524156338,
+      "policy/entropy": 3.541374482214451,
+      "policy/importance_ratio_mean": 0.9984236002589265,
+      "policy/nonzero_advantage_fraction": 0.0,
+      "rollout/actor_inference_seconds": 18.06618511900001,
+      "rollout/anchors": 0,
+      "rollout/base_games_completed": 1,
+      "rollout/base_plies": 4096,
+      "rollout/continuation_plies": 0,
+      "rollout/continuations_per_second": 0.0,
+      "rollout/critic_inference_seconds": 17.588620360999897,
+      "rollout/draws": 1,
+      "rollout/effective_actor_inference_batch": 16,
+      "rollout/environment_plies": 4096,
+      "rollout/environment_step_work_seconds": 3.6968855289999567,
+      "rollout/losses": 0,
+      "rollout/plies_per_second": 96.31360116442283,
+      "rollout/policy_samples": 4096,
+      "rollout/root_candidates": 0,
+      "rollout/terminal_continuations": 0,
+      "rollout/wall_seconds": 42.52774219300001,
+      "rollout/wins": 0,
+      "timestamp_unix": 1789053627.152023,
+      "timing/base_collection_seconds": 0.0,
+      "timing/critic_backward_seconds": 23.565355369000002,
+      "timing/layout_backward_seconds": 0.0,
+      "timing/policy_backward_seconds": 26.595274922,
+      "timing/update_seconds": 92.755312393,
+      "training/target_continuation_plies": 8192,
+      "training/target_environment_plies": 8192,
+      "update": 1
+    },
+    {
+      "accelerator/max_memory_allocated_gib": 13.702332973480225,
+      "accelerator/memory_allocated_gib": 3.5551276206970215,
+      "accelerator/memory_reserved_gib": 16.32421875,
+      "accelerator/name": "NVIDIA GeForce RTX 4090",
+      "accelerator/type": "cuda",
+      "algorithm": "ppo",
+      "critic/target_mean": 0.0,
+      "critic/value_mean": 0.0,
+      "critic/value_mse": 0.0,
+      "cumulative/anchors": 0,
+      "cumulative/base_games": 1,
+      "cumulative/base_plies": 8192,
+      "cumulative/continuation_plies": 0,
+      "cumulative/environment_plies": 8192,
+      "cumulative/policy_samples": 8192,
+      "cumulative/root_candidates": 0,
+      "cumulative/terminal_continuations": 0,
+      "distributed/local_anchor_batch": 4096,
+      "distributed/model_replicas": 1,
+      "distributed/world_size": 1,
+      "encoding/board_cache_entries": 15616.0,
+      "encoding/board_encoder_saved_fraction": 0.9790969436233108,
+      "encoding/board_encoder_tokens": 31679.0,
+      "encoding/board_input_tokens": 31679.0,
+      "encoding/board_unique_tokens": 31679.0,
+      "encoding/cross_step_cache_hit_fraction": 0.0,
+      "encoding/history_input_states": 4096.0,
+      "encoding/history_unique_states": 4096.0,
+      "encoding/paged_kv_allocated_gib": 4.6875,
+      "encoding/paged_kv_capacity_pages": 4800.0,
+      "encoding/paged_kv_enabled": 1.0,
+      "encoding/paged_kv_padding_fraction": 0.03786015399143605,
+      "encoding/paged_kv_pages": 1995.0,
+      "encoding/paged_kv_peak_pages": 2083.0,
+      "encoding/raw_board_tokens": 1515520.0,
+      "encoding/temporal_attention_saved_fraction": 0.9733680257298128,
+      "encoding/temporal_cache_entries": 192.0,
+      "encoding/temporal_cache_hits": 4032.0,
+      "encoding/temporal_cold_states": 64.0,
+      "encoding/temporal_incremental_batch_max": 16.0,
+      "encoding/temporal_incremental_batch_mean": 14.57622504537205,
+      "encoding/temporal_incremental_batches": 1102.0,
+      "encoding/temporal_incremental_tokens": 16063.0,
+      "encoding/within_batch_dedup_saved_fraction": 0.0,
+      "encoding/within_batch_history_saved_fraction": 0.0,
+      "loss/critic_total": 0.0,
+      "loss/policy_ppo": 0.0,
+      "loss/policy_total": -0.03622510445651036,
+      "mode": "four_dark",
+      "model/critic_instances": 1,
+      "model/dead_rules_enabled": 1,
+      "model/shared_layout_instances_for_players": 1,
+      "model/shared_policy_instances_for_players": 1,
+      "optimizer/critic_epochs": 3.0,
+      "optimizer/critic_grad_norm": 0.0,
+      "optimizer/critic_steps": 24.0,
+      "optimizer/effective_policy_microbatch": 8,
+      "optimizer/history_token_reuse_fraction": 0.9752360545493876,
+      "optimizer/learner_samples": 512.0,
+      "optimizer/learner_sequences": 9.541666666666666,
+      "optimizer/policy_epochs": 3.0,
+      "optimizer/policy_grad_norm": 0.007012270332779735,
+      "optimizer/policy_lr": 1e-06,
+      "optimizer/policy_steps": 24.0,
+      "optimizer/temporal_padding_fraction": 0.03953691337494581,
+      "policy/approx_kl_old": 0.002584795121038592,
+      "policy/clip_fraction": 0.013590495254751053,
+      "policy/entropy": 3.6225105368260606,
+      "policy/importance_ratio_mean": 0.9986186380847357,
+      "policy/nonzero_advantage_fraction": 0.0,
+      "rollout/actor_inference_seconds": 30.83422590500001,
+      "rollout/anchors": 0,
+      "rollout/base_games_completed": 0,
+      "rollout/base_plies": 4096,
+      "rollout/continuation_plies": 0,
+      "rollout/continuations_per_second": 0.0,
+      "rollout/critic_inference_seconds": 30.043900235000166,
+      "rollout/draws": 0,
+      "rollout/effective_actor_inference_batch": 16,
+      "rollout/environment_plies": 4096,
+      "rollout/environment_step_work_seconds": 3.0565355690002036,
+      "rollout/losses": 0,
+      "rollout/plies_per_second": 63.82099652629455,
+      "rollout/policy_samples": 4096,
+      "rollout/root_candidates": 0,
+      "rollout/terminal_continuations": 0,
+      "rollout/wall_seconds": 64.179505538,
+      "rollout/wins": 0,
+      "timestamp_unix": 1789053794.544437,
+      "timing/base_collection_seconds": 0.0,
+      "timing/critic_backward_seconds": 49.94989495599998,
+      "timing/layout_backward_seconds": 0.0,
+      "timing/policy_backward_seconds": 53.09174851100002,
+      "timing/update_seconds": 167.38531032400002,
+      "training/target_continuation_plies": 8192,
+      "training/target_environment_plies": 8192,
+      "update": 2
+    }
+  ],
+  "real_history_batches": [
+    {
+      "update": 1,
+      "mean_tokens": 127.140625,
+      "min_tokens": 1,
+      "max_tokens": 256
+    },
+    {
+      "update": 2,
+      "mean_tokens": 370,
+      "min_tokens": 25,
+      "max_tokens": 512
+    }
+  ],
+  "sample_batch": {
+    "samples": 512,
+    "mean_history": 383.63671875,
+    "min_history": 257,
+    "max_history": 511
+  },
+  "profile_sample_batch": {
+    "samples": 128,
+    "mean_history": 371.421875,
+    "min_history": 257,
+    "max_history": 509
+  },
+  "profiler": {
+    "recognized_flops_lower_bound": 12757939724350,
+    "cuda_kernel_copy_events": 23515,
+    "cuda_event_service_seconds": 0.4531834169999978,
+    "cuda_event_union_seconds": 0.4531834169999978,
+    "top_cpu": [
+      {
+        "name": "cudaLaunchKernel",
+        "calls": 18589,
+        "self_cpu_ms": 88.68548599999833,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "MaskedFillBackward0",
+        "calls": 114,
+        "self_cpu_ms": 88.387337999999,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::mm",
+        "calls": 1618,
+        "self_cpu_ms": 44.38024599999882,
+        "self_cuda_ms": 97.44985600000142,
+        "recognized_flops": 12350270983168
+      },
+      {
+        "name": "aten::select",
+        "calls": 28937,
+        "self_cpu_ms": 38.29404500000305,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "cudaMalloc",
+        "calls": 86,
+        "self_cpu_ms": 34.597398000000176,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::copy_",
+        "calls": 20059,
+        "self_cpu_ms": 33.637032000006336,
+        "self_cuda_ms": 95.7169509999962,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::empty",
+        "calls": 15115,
+        "self_cpu_ms": 33.046620999995184,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "cudaMemcpyAsync",
+        "calls": 2407,
+        "self_cpu_ms": 24.11927199999764,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::native_layer_norm",
+        "calls": 470,
+        "self_cpu_ms": 23.057047999999252,
+        "self_cuda_ms": 9.50707800000011,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::as_strided",
+        "calls": 42186,
+        "self_cpu_ms": 15.49814799999196,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::add_",
+        "calls": 3199,
+        "self_cpu_ms": 14.824588999994115,
+        "self_cuda_ms": 24.9740079999999,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::transpose",
+        "calls": 6626,
+        "self_cpu_ms": 14.621517000006511,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::addmm",
+        "calls": 239,
+        "self_cpu_ms": 13.201093999998324,
+        "self_cuda_ms": 3.8231340000001217,
+        "recognized_flops": 399804727296
+      },
+      {
+        "name": "aten::_to_copy",
+        "calls": 2525,
+        "self_cpu_ms": 11.79071000000363,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::_scaled_dot_product_efficient_attention",
+        "calls": 224,
+        "self_cpu_ms": 11.343992999999246,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::empty_strided",
+        "calls": 2606,
+        "self_cpu_ms": 10.80553699999892,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "cudaStreamSynchronize",
+        "calls": 74,
+        "self_cpu_ms": 10.198816999999922,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::mul",
+        "calls": 981,
+        "self_cpu_ms": 10.108202000002304,
+        "self_cuda_ms": 46.61685199999963,
+        "recognized_flops": 5823913808
+      },
+      {
+        "name": "autograd::engine::evaluate_function: SelectBackward0",
+        "calls": 1875,
+        "self_cpu_ms": 9.894364999999292,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::masked_fill",
+        "calls": 565,
+        "self_cpu_ms": 9.212658999998064,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::view",
+        "calls": 6934,
+        "self_cpu_ms": 8.963278999999414,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::add",
+        "calls": 801,
+        "self_cpu_ms": 8.863368000001268,
+        "self_cuda_ms": 23.107446999999535,
+        "recognized_flops": 1740704494
+      },
+      {
+        "name": "aten::fill_",
+        "calls": 2645,
+        "self_cpu_ms": 8.847555000001968,
+        "self_cuda_ms": 14.26231399999895,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::clone",
+        "calls": 2618,
+        "self_cpu_ms": 8.832613000001583,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::linear",
+        "calls": 1698,
+        "self_cpu_ms": 8.636355999998356,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      }
+    ],
+    "top_cuda": [
+      {
+        "name": "aten::mm",
+        "calls": 1618,
+        "self_cpu_ms": 44.38024599999882,
+        "self_cuda_ms": 97.44985600000142,
+        "recognized_flops": 12350270983168
+      },
+      {
+        "name": "aten::copy_",
+        "calls": 20059,
+        "self_cpu_ms": 33.637032000006336,
+        "self_cuda_ms": 95.7169509999962,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::mul",
+        "calls": 981,
+        "self_cpu_ms": 10.108202000002304,
+        "self_cuda_ms": 46.61685199999963,
+        "recognized_flops": 5823913808
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "calls": 2064,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 46.21230599999917,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1})",
+        "calls": 336,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 37.7255410000011,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::_efficient_attention_backward",
+        "calls": 112,
+        "self_cpu_ms": 3.0602210000013583,
+        "self_cuda_ms": 33.411589000000504,
+        "recognized_flops": 0
+      },
+      {
+        "name": "fmha_cutlassB_bf16_aligned_64x64_k32_sm80(PyTorchMemEffAttention::AttentionBackwardKernel<cutlass::arch::Sm80, cutlass::bfloat16_t, true, false, true, 64, 64, 32, false>::Params)",
+        "calls": 80,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 30.758646000000414,
+        "recognized_flops": 0
+      },
+      {
+        "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+        "calls": 256,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 26.013586000000434,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+        "calls": 1859,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 25.064465000000173,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::add_",
+        "calls": 3199,
+        "self_cpu_ms": 14.824588999994115,
+        "self_cuda_ms": 24.9740079999999,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::add",
+        "calls": 801,
+        "self_cpu_ms": 8.863368000001268,
+        "self_cuda_ms": 23.107446999999535,
+        "recognized_flops": 1740704494
+      },
+      {
+        "name": "aten::_efficient_attention_forward",
+        "calls": 224,
+        "self_cpu_ms": 3.2729980000020586,
+        "self_cuda_ms": 19.578412000000753,
+        "recognized_flops": 0
+      },
+      {
+        "name": "fmha_cutlassF_bf16_aligned_64x64_rf_sm80(PyTorchMemEffAttention::AttentionKernel<cutlass::bfloat16_t, cutlass::arch::Sm80, true, 64, 64, 64, true, true>::Params)",
+        "calls": 224,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 19.578412000000753,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::native_layer_norm_backward",
+        "calls": 246,
+        "self_cpu_ms": 3.648951000002795,
+        "self_cuda_ms": 18.017324000000837,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nn_align8::Params)",
+        "calls": 314,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 17.509981999998214,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nt_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_nt_align8::Params)",
+        "calls": 224,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 16.42622400000022,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::silu_backward",
+        "calls": 124,
+        "self_cpu_ms": 1.1365270000012824,
+        "self_cuda_ms": 15.760202000000048,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::silu_backward_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::silu_backward_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::silu_backward_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16, c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::silu_backward_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#4}::operator()() const::{lambda(c10::BFloat16, c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "calls": 112,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 15.740584999999847,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::silu",
+        "calls": 236,
+        "self_cpu_ms": 4.017144000000029,
+        "self_cuda_ms": 14.980347999999125,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "calls": 224,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 14.964826999999147,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::fill_",
+        "calls": 2645,
+        "self_cpu_ms": 8.847555000001968,
+        "self_cuda_ms": 14.26231399999895,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8>(cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_64x64_32x6_tn_align8::Params)",
+        "calls": 419,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 14.177168000000384,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "calls": 588,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 12.807570999999559,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::cat",
+        "calls": 150,
+        "self_cpu_ms": 2.475088000001328,
+        "self_cuda_ms": 12.464854000000589,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_vectorized<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 3, 128, 1, 16, 8>(char*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+        "calls": 112,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 12.169136000000696,
+        "recognized_flops": 0
+      }
+    ]
+  }
+}

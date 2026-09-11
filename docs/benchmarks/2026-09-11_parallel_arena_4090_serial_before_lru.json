@@ -1,0 +1,698 @@
+{
+  "purpose": "complete real games for throughput; no strength verdict",
+  "torch": "2.11.0+cu130",
+  "host_cpu_count": 24,
+  "torch_threads": 4,
+  "checkpoint": "runs_ppo_sequences_20260910/four_dark/with_dead_rules/checkpoints/best.pt",
+  "checkpoint_sha256": "f1efe536685c1e06140e2ea156cb25bd3533a0d9cd68c9786333384e9913fb99",
+  "opponent": "runs_ppo_sequences_20260910/four_dark/with_dead_rules/checkpoints/best.pt",
+  "opponent_sha256": null,
+  "seed": 20260911,
+  "groups": 4,
+  "max_game_plies": 2000,
+  "phases": [
+    {
+      "parallel_games": 1,
+      "settings": {
+        "pairs": 4,
+        "seed": 20260911,
+        "temperature": 1.0,
+        "layout_temperature": 0.7,
+        "max_plies": 2000,
+        "temporal_cache_entries": 8,
+        "smoke_test": true,
+        "mode": "four_dark",
+        "parallel_games": 1,
+        "inference_batch_size": 1,
+        "environment_workers": 4
+      },
+      "effective_temporal_cache_entries": 8,
+      "mode": "four_dark",
+      "device": "NVIDIA GeForce RTX 4090",
+      "checkpoint_update": 0,
+      "model_config": {
+        "board_dim": 256,
+        "board_layers": 8,
+        "board_heads": 8,
+        "board_ffn_dim": 1024,
+        "temporal_dim": 512,
+        "temporal_layers": 32,
+        "temporal_heads": 8,
+        "temporal_ffn_dim": 2048,
+        "layout_dim": 256,
+        "layout_layers": 16,
+        "layout_heads": 8,
+        "layout_ffn_dim": 1024,
+        "max_transitions": 1000,
+        "dropout": 0.0,
+        "board_chunk_size": 128,
+        "inference_board_cache_entries": 2048,
+        "inference_temporal_cache_entries": 8,
+        "incremental_inference": true,
+        "paged_kv_cache": true,
+        "paged_kv_length_bucket_tokens": 1001,
+        "activation_checkpointing": true,
+        "dead_rules_enabled": true
+      },
+      "checkpoint_load_seconds": 5.280321356000002,
+      "seconds": 551.700454333,
+      "parent_cpu_seconds": 551.7223637000001,
+      "games": 16,
+      "total_plies": 10045,
+      "seconds_per_game": 34.4812783958125,
+      "games_per_second": 0.02900124492256188,
+      "plies_per_second": 18.20734407794588,
+      "peak_allocated_gib": 1.565772533416748,
+      "peak_reserved_gib": 1.578125,
+      "game_plies": {
+        "count": 16,
+        "min": 71,
+        "p50": 635,
+        "p95": 794,
+        "max": 794,
+        "mean": 627.8125,
+        "above_1000": 0
+      },
+      "policy_history_tokens": {
+        "count": 10045,
+        "min": 1,
+        "p50": 331,
+        "p95": 678,
+        "max": 794,
+        "mean": 336.78825286212043,
+        "above_1000": 0
+      },
+      "actor_requested_batches": {
+        "count": 10045,
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1,
+        "mean": 1.0,
+        "above_1000": 0
+      },
+      "actor_batch_limits": {
+        "count": 10045,
+        "min": 1,
+        "p50": 1,
+        "p95": 1,
+        "max": 1,
+        "mean": 1.0,
+        "above_1000": 0
+      },
+      "actor_oom_reductions": [
+        0,
+        0
+      ],
+      "gpu_samples": {
+        "samples": 363,
+        "scope": "whole GPU, including other processes",
+        "utilization_mean_percent": 37.23415977961432,
+        "utilization_p50_percent": 38.0,
+        "utilization_max_percent": 43.0,
+        "memory_used_max_mib": 2938.0
+      },
+      "records": [
+        {
+          "mode": "four_dark",
+          "candidate_team": 0,
+          "candidate_seats": [
+            0,
+            2
+          ],
+          "action_seed": 20260913,
+          "candidate_reward": 1,
+          "candidate_score": 1.0,
+          "player_rewards": [
+            1.0,
+            -1.0,
+            1.0,
+            -1.0
+          ],
+          "active_players": [
+            true,
+            false,
+            false,
+            false
+          ],
+          "plies": 754,
+          "terminal_reason": "team_eliminated",
+          "winner_team": 0,
+          "group_index": 0,
+          "group_seed": 20260911,
+          "rotation": 0,
+          "layout_origin_seats": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "actions_sha256": "398b52bf35014205d3530693b9450fe1e8ca697d2e85efc5e6f60b3c7e709aa1"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 1,
+          "candidate_seats": [
+            1,
+            3
+          ],
+          "action_seed": 20260914,
+          "candidate_reward": -1,
+          "candidate_score": 0.0,
+          "player_rewards": [
+            1.0,
+            -1.0,
+            1.0,
+            -1.0
+          ],
+          "active_players": [
+            true,
+            false,
+            true,
+            false
+          ],
+          "plies": 635,
+          "terminal_reason": "team_eliminated",
+          "winner_team": 0,
+          "group_index": 0,
+          "group_seed": 20260911,
+          "rotation": 1,
+          "layout_origin_seats": [
+            3,
+            0,
+            1,
+            2
+          ],
+          "actions_sha256": "ae540149916e8620b3f835f700c039cc7e9995d774b3ed65cda05857e6b3d6e3"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 0,
+          "candidate_seats": [
+            0,
+            2
+          ],
+          "action_seed": 20260915,
+          "candidate_reward": 0,
+          "candidate_score": 0.5,
+          "player_rewards": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "active_players": [
+            false,
+            true,
+            true,
+            false
+          ],
+          "plies": 768,
+          "terminal_reason": "no_interaction_draw",
+          "winner_team": null,
+          "group_index": 0,
+          "group_seed": 20260911,
+          "rotation": 2,
+          "layout_origin_seats": [
+            2,
+            3,
+            0,
+            1
+          ],
+          "actions_sha256": "e37fb8229283584535a3c8f3c3d988fe557850248a5abe8cbbce1492481c532a"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 1,
+          "candidate_seats": [
+            1,
+            3
+          ],
+          "action_seed": 20260916,
+          "candidate_reward": 0,
+          "candidate_score": 0.5,
+          "player_rewards": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "active_players": [
+            true,
+            true,
+            true,
+            true
+          ],
+          "plies": 660,
+          "terminal_reason": "no_interaction_draw",
+          "winner_team": null,
+          "group_index": 0,
+          "group_seed": 20260911,
+          "rotation": 3,
+          "layout_origin_seats": [
+            1,
+            2,
+            3,
+            0
+          ],
+          "actions_sha256": "eaa2050cd7da660916aac23c72be73deb31b418ed31f0518a21affccdf725dde"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 0,
+          "candidate_seats": [
+            0,
+            2
+          ],
+          "action_seed": 20260919,
+          "candidate_reward": -1,
+          "candidate_score": 0.0,
+          "player_rewards": [
+            -1.0,
+            1.0,
+            -1.0,
+            1.0
+          ],
+          "active_players": [
+            false,
+            true,
+            false,
+            true
+          ],
+          "plies": 572,
+          "terminal_reason": "team_eliminated",
+          "winner_team": 1,
+          "group_index": 1,
+          "group_seed": 20260917,
+          "rotation": 0,
+          "layout_origin_seats": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "actions_sha256": "5e016c2c3baa18a27ce990c46f55c472890736e0f8099baf87128fea55b49658"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 1,
+          "candidate_seats": [
+            1,
+            3
+          ],
+          "action_seed": 20260920,
+          "candidate_reward": -1,
+          "candidate_score": 0.0,
+          "player_rewards": [
+            1.0,
+            -1.0,
+            1.0,
+            -1.0
+          ],
+          "active_players": [
+            true,
+            false,
+            true,
+            false
+          ],
+          "plies": 531,
+          "terminal_reason": "team_eliminated",
+          "winner_team": 0,
+          "group_index": 1,
+          "group_seed": 20260917,
+          "rotation": 1,
+          "layout_origin_seats": [
+            3,
+            0,
+            1,
+            2
+          ],
+          "actions_sha256": "a5418f14af9171913788f9d02415d7712349c26a971d476e52aef5886cd9d84b"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 0,
+          "candidate_seats": [
+            0,
+            2
+          ],
+          "action_seed": 20260921,
+          "candidate_reward": 1,
+          "candidate_score": 1.0,
+          "player_rewards": [
+            1.0,
+            -1.0,
+            1.0,
+            -1.0
+          ],
+          "active_players": [
+            true,
+            false,
+            false,
+            false
+          ],
+          "plies": 704,
+          "terminal_reason": "team_eliminated",
+          "winner_team": 0,
+          "group_index": 1,
+          "group_seed": 20260917,
+          "rotation": 2,
+          "layout_origin_seats": [
+            2,
+            3,
+            0,
+            1
+          ],
+          "actions_sha256": "52e376940c334d77aa99e90dcb7c57b52f83970c51eca48e3866b18c5668afdd"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 1,
+          "candidate_seats": [
+            1,
+            3
+          ],
+          "action_seed": 20260922,
+          "candidate_reward": 0,
+          "candidate_score": 0.5,
+          "player_rewards": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "active_players": [
+            true,
+            true,
+            true,
+            true
+          ],
+          "plies": 71,
+          "terminal_reason": "no_interaction_draw",
+          "winner_team": null,
+          "group_index": 1,
+          "group_seed": 20260917,
+          "rotation": 3,
+          "layout_origin_seats": [
+            1,
+            2,
+            3,
+            0
+          ],
+          "actions_sha256": "04691a97fa32f0401f6998c6aebfa277c0954130ef97edb55ee58f48f69f5dbf"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 0,
+          "candidate_seats": [
+            0,
+            2
+          ],
+          "action_seed": 20260925,
+          "candidate_reward": -1,
+          "candidate_score": 0.0,
+          "player_rewards": [
+            -1.0,
+            1.0,
+            -1.0,
+            1.0
+          ],
+          "active_players": [
+            false,
+            false,
+            false,
+            true
+          ],
+          "plies": 700,
+          "terminal_reason": "team_eliminated",
+          "winner_team": 1,
+          "group_index": 2,
+          "group_seed": 20260923,
+          "rotation": 0,
+          "layout_origin_seats": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "actions_sha256": "0f1ad39d9f7db805e48531bfaf1f6298d8a0b8b5c6c307f9d8aaa39d4f2437d4"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 1,
+          "candidate_seats": [
+            1,
+            3
+          ],
+          "action_seed": 20260926,
+          "candidate_reward": 0,
+          "candidate_score": 0.5,
+          "player_rewards": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "active_players": [
+            true,
+            true,
+            false,
+            false
+          ],
+          "plies": 794,
+          "terminal_reason": "no_interaction_draw",
+          "winner_team": null,
+          "group_index": 2,
+          "group_seed": 20260923,
+          "rotation": 1,
+          "layout_origin_seats": [
+            3,
+            0,
+            1,
+            2
+          ],
+          "actions_sha256": "00c82bdaf3c6f0864ac34fc0da92716193f7ae64a9aa34a3d1ff322d8e4bbb6d"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 0,
+          "candidate_seats": [
+            0,
+            2
+          ],
+          "action_seed": 20260927,
+          "candidate_reward": 1,
+          "candidate_score": 1.0,
+          "player_rewards": [
+            1.0,
+            -1.0,
+            1.0,
+            -1.0
+          ],
+          "active_players": [
+            true,
+            false,
+            true,
+            false
+          ],
+          "plies": 738,
+          "terminal_reason": "team_eliminated",
+          "winner_team": 0,
+          "group_index": 2,
+          "group_seed": 20260923,
+          "rotation": 2,
+          "layout_origin_seats": [
+            2,
+            3,
+            0,
+            1
+          ],
+          "actions_sha256": "3c1e5f01e4077d2652df7a14821c4212af32f9305ccc1ce7a8e4c332c1d29e24"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 1,
+          "candidate_seats": [
+            1,
+            3
+          ],
+          "action_seed": 20260928,
+          "candidate_reward": 0,
+          "candidate_score": 0.5,
+          "player_rewards": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "active_players": [
+            true,
+            false,
+            true,
+            true
+          ],
+          "plies": 581,
+          "terminal_reason": "no_interaction_draw",
+          "winner_team": null,
+          "group_index": 2,
+          "group_seed": 20260923,
+          "rotation": 3,
+          "layout_origin_seats": [
+            1,
+            2,
+            3,
+            0
+          ],
+          "actions_sha256": "c6c88e4575cbdffbe64b1ccf77de5e173eb5124d121b42d2a6b743842563d5c4"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 0,
+          "candidate_seats": [
+            0,
+            2
+          ],
+          "action_seed": 20260931,
+          "candidate_reward": 1,
+          "candidate_score": 1.0,
+          "player_rewards": [
+            1.0,
+            -1.0,
+            1.0,
+            -1.0
+          ],
+          "active_players": [
+            false,
+            false,
+            true,
+            false
+          ],
+          "plies": 787,
+          "terminal_reason": "team_eliminated",
+          "winner_team": 0,
+          "group_index": 3,
+          "group_seed": 20260929,
+          "rotation": 0,
+          "layout_origin_seats": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "actions_sha256": "6e521576b47ad5841c1403a88607e249a1a7f1d925b19c98979e550599b935ad"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 1,
+          "candidate_seats": [
+            1,
+            3
+          ],
+          "action_seed": 20260932,
+          "candidate_reward": -1,
+          "candidate_score": 0.0,
+          "player_rewards": [
+            1.0,
+            -1.0,
+            1.0,
+            -1.0
+          ],
+          "active_players": [
+            true,
+            false,
+            true,
+            false
+          ],
+          "plies": 597,
+          "terminal_reason": "team_eliminated",
+          "winner_team": 0,
+          "group_index": 3,
+          "group_seed": 20260929,
+          "rotation": 1,
+          "layout_origin_seats": [
+            3,
+            0,
+            1,
+            2
+          ],
+          "actions_sha256": "877f6356fe1dde4c23d0102c5d5c2c85f92df38007b4f4e5bed3710fed604ed3"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 0,
+          "candidate_seats": [
+            0,
+            2
+          ],
+          "action_seed": 20260933,
+          "candidate_reward": 1,
+          "candidate_score": 1.0,
+          "player_rewards": [
+            1.0,
+            -1.0,
+            1.0,
+            -1.0
+          ],
+          "active_players": [
+            true,
+            false,
+            true,
+            false
+          ],
+          "plies": 631,
+          "terminal_reason": "team_eliminated",
+          "winner_team": 0,
+          "group_index": 3,
+          "group_seed": 20260929,
+          "rotation": 2,
+          "layout_origin_seats": [
+            2,
+            3,
+            0,
+            1
+          ],
+          "actions_sha256": "036dca0496600f64bb4c4e3a823f239f7fa22f070a8a4b346edea21ccc8b7954"
+        },
+        {
+          "mode": "four_dark",
+          "candidate_team": 1,
+          "candidate_seats": [
+            1,
+            3
+          ],
+          "action_seed": 20260934,
+          "candidate_reward": 1,
+          "candidate_score": 1.0,
+          "player_rewards": [
+            -1.0,
+            1.0,
+            -1.0,
+            1.0
+          ],
+          "active_players": [
+            false,
+            true,
+            false,
+            true
+          ],
+          "plies": 522,
+          "terminal_reason": "team_eliminated",
+          "winner_team": 1,
+          "group_index": 3,
+          "group_seed": 20260929,
+          "rotation": 3,
+          "layout_origin_seats": [
+            1,
+            2,
+            3,
+            0
+          ],
+          "actions_sha256": "b18bce56fff7f21ac8cc38ccb5d395c5e16a2b57fb488915ddd2d6967f6d2642"
+        }
+      ],
+      "actions_sha256": "4c1be9e0434df13c4508eb80fe98a72c413be7f0cb393e514bfd50255b729ed5",
+      "results_sha256": "77735a6b310b5e2c2ed6f7ac2c1d02d6a8faf589d9d38868e0b4da1d5bf33d80"
+    }
+  ],
+  "comparisons": []
+}

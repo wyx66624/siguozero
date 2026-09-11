@@ -1,0 +1,67 @@
+{
+  "purpose": "synthetic full-window capacity; not game throughput or strength",
+  "started_at_utc": "2026-09-10T15:06:11.751727+00:00",
+  "arena_version": 3,
+  "source_sha256": {
+    "arena.py": "1a5dcef8d99a58991734454bd7f23dbaea6920eb4e9234b0f019771ad510e860",
+    "models.py": "ec555cc2904f7c36b456db98182ec9c76494244f822f1a8d26ea80dcfea8ef06",
+    "rollout.py": "00a74e6106e5c83379fb8e3b7051751bccac8a4d697720b4f1e60a40716593b7"
+  },
+  "torch": "2.11.0+cu130",
+  "host_cpu_count": 24,
+  "torch_threads": 4,
+  "checkpoint": "runs_ppo_sequences_20260910/four_dark/with_dead_rules/checkpoints/best.pt",
+  "checkpoint_sha256": "f1efe536685c1e06140e2ea156cb25bd3533a0d9cd68c9786333384e9913fb99",
+  "opponent": "runs_ppo_sequences_20260910/four_dark/with_dead_rules/checkpoints/best.pt",
+  "opponent_sha256": null,
+  "seed": 20260911,
+  "groups": 4,
+  "max_game_plies": 2000,
+  "phases": [],
+  "comparisons": [],
+  "capacity_phases": [
+    {
+      "purpose": "synthetic full-window capacity only; not legal trajectories or games/s",
+      "parallel_games": 32,
+      "states_per_step": 32,
+      "history_tokens": 1001,
+      "synthetic_extra_resident_gib": 3.5,
+      "extra_resident_note": "byte allocation approximates headroom; not actual training models/optimizers",
+      "effective_temporal_cache_entries": 192,
+      "board_cache_entries_per_model": 64064,
+      "device": "NVIDIA GeForce RTX 4090",
+      "steps": [
+        {
+          "step": 0,
+          "phase": "cold_full_window",
+          "seconds": 5.777583518000029,
+          "peak_allocated_gib": 15.998738288879395,
+          "peak_reserved_gib": 17.509765625,
+          "actor_oom_reductions": [
+            0,
+            0
+          ],
+          "actor_max_batch_sizes": [
+            32,
+            32
+          ]
+        },
+        {
+          "step": 1,
+          "phase": "shifted_full_window",
+          "seconds": 2.1340616950001277,
+          "peak_allocated_gib": 16.798268795013428,
+          "peak_reserved_gib": 17.23046875,
+          "actor_oom_reductions": [
+            0,
+            0
+          ],
+          "actor_max_batch_sizes": [
+            32,
+            32
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -150,6 +150,10 @@ class MetricLogger:
             in {
                 "loss/policy_total",
                 "loss/layout_total",
+                "loss/critic_total",
+                "critic/value_mse",
+                "policy/approx_kl_old",
+                "rollout/policy_samples",
                 "policy/kl_reference",
                 "policy/entropy",
                 "rollout/draws",
