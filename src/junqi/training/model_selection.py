@@ -1,4 +1,4 @@
-"""Progress-based, resumable candidate versus champion matches during training."""
+"""Resumable candidate versus champion matches at environment-step or progress thresholds."""
 
 from __future__ import annotations
 
@@ -35,22 +35,44 @@ class ModelSelection:
         self.directory = Path(run_directory).resolve() / "model_selection"
         self.best_path = self.directory.parent / "checkpoints" / "best.pt"
         self.state_path = self.directory / "state.json"
-        self.milestones = list(range(settings.arena_start_percent, 101,
-                                     settings.arena_interval_percent))
+        self.milestones = settings.arena_milestones
         self.state: dict[str, Any] = {}
+        self._pending_baseline: dict[str, Any] | None = None
+
+    @property
+    def environment_schedule(self) -> bool:
+        return self.settings.arena_interval_environment_plies is not None
+
+    @property
+    def milestone_key(self) -> str:
+        return "milestone_environment_plies" if self.environment_schedule else "milestone_percent"
+
+    @property
+    def completed_key(self) -> str:
+        return "last_completed_environment_plies" if self.environment_schedule else "last_completed_percent"
+
+    def milestone_label(self, milestone: int) -> str:
+        return f"{milestone} environment transitions" if self.environment_schedule else f"{milestone}%"
+
+    def _round_tag(self, milestone: int) -> str:
+        return f"env_{milestone:012d}" if self.environment_schedule else f"{milestone:03d}"
 
     def _contract(self) -> dict[str, Any]:
         settings = self.settings
-        return {
+        contract = {
             "mode": settings.mode.value, "algorithm": settings.algorithm,
             "dead_rules_enabled": settings.dead_rules_enabled,
             "total_updates": settings.total_updates,
             "step_budget_target": settings.step_budget_target,
             "step_budget_counter": settings.step_budget_counter,
-            "milestones": self.milestones, "games": settings.arena_games,
+            "milestones": None if self.environment_schedule else list(self.milestones),
+            "games": settings.arena_games,
             "max_plies": settings.arena_max_plies, "seed": settings.arena_seed,
             "temporal_cache_entries": settings.arena_temporal_cache_entries,
         }
+        if self.environment_schedule:
+            contract["interval_environment_plies"] = settings.arena_interval_environment_plies
+        return contract
 
     def progress_percent(self, *, update: int, cumulative: Mapping[str, int]) -> float:
         progress = update / self.settings.total_updates
@@ -61,6 +83,8 @@ class ModelSelection:
         return min(100.0, 100 * progress)
 
     def _reached(self, milestone: int, update: int, cumulative: Mapping[str, int]) -> bool:
+        if self.environment_schedule:
+            return cumulative.get("environment_plies", 0) >= milestone
         # Integer comparisons avoid losing a boundary such as 29 / 100 * 100.
         if 100 * update >= milestone * self.settings.total_updates:
             return True
@@ -71,8 +95,14 @@ class ModelSelection:
     def due_milestone(self, *, update: int, cumulative: Mapping[str, int]) -> int | None:
         if not self.settings.arena_enabled:
             return None
+        if self.environment_schedule:
+            interval = self.settings.arena_interval_environment_plies
+            reached = min(cumulative.get("environment_plies", 0),
+                          self.settings.target_environment_plies or 0)
+            latest = reached // interval * interval
+            return latest if latest > self.state.get(self.completed_key, 0) else None
         due = [p for p in self.milestones
-               if p > self.state.get("last_completed_percent", 0)
+               if p > self.state.get(self.completed_key, 0)
                and self._reached(p, update, cumulative)]
         # One update may cross several boundaries. Only its actual parameters
         # exist: evaluate once and explicitly record the unavailable milestones.
@@ -81,24 +111,54 @@ class ModelSelection:
     def state_dict(self) -> dict[str, Any]:
         return copy.deepcopy(self.state)
 
-    def _snapshot(self, policy: GamePolicyTransformer,
-                  layout: PieceConditionedLayoutPointerDecoder,
-                  *, update: int, name: str) -> Path:
-        path = self.directory / "snapshots" / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
+    def _snapshot_payload(self, policy: GamePolicyTransformer,
+                          layout: PieceConditionedLayoutPointerDecoder,
+                          *, update: int) -> dict[str, Any]:
+        return {
             "format_version": CHECKPOINT_FORMAT_VERSION, "update": update,
             "mode": self.settings.mode.value, "algorithm": self.settings.algorithm,
             "dead_rules_enabled": self.settings.dead_rules_enabled,
             "reason": "model_selection_inference_only",
             "config": self.settings.serializable(),
-            "policy": {k: v.detach().cpu() for k, v in policy.state_dict().items()},
-            "layout": {k: v.detach().cpu() for k, v in layout.state_dict().items()},
+            # A deferred baseline must not alias CPU training parameters.
+            "policy": {k: v.detach().to("cpu", copy=True) for k, v in policy.state_dict().items()},
+            "layout": {k: v.detach().to("cpu", copy=True) for k, v in layout.state_dict().items()},
         }
+
+    def _write_snapshot(self, payload: dict[str, Any], *, name: str) -> Path:
+        path = self.directory / "snapshots" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.tmp")
         torch.save(payload, temporary)
         temporary.replace(path)
         return path
+
+    def _snapshot(self, policy: GamePolicyTransformer,
+                  layout: PieceConditionedLayoutPointerDecoder,
+                  *, update: int, name: str) -> Path:
+        return self._write_snapshot(self._snapshot_payload(policy, layout, update=update), name=name)
+
+    def persist_baseline(self) -> None:
+        """Write the initial opponent only when the first evaluation/save is due."""
+        if not self.state or self.state["best_sha256"] is not None:
+            return
+        error = None
+        if self.context.primary:
+            try:
+                if self._pending_baseline is None:
+                    raise RuntimeError("initial model selection baseline is unavailable")
+                baseline = self._write_snapshot(
+                    self._pending_baseline, name=Path(self.state["best_snapshot"]).name,
+                )
+                next_state = {**self.state, "best_sha256": sha256_file(baseline)}
+                atomic_json(self.state_path, next_state)
+                self.state = next_state
+                self._repair_views()
+                self._pending_baseline = None
+            except Exception as exc:
+                error = f"model selection baseline save: {type(exc).__name__}: {exc}"
+        synchronized_error(self.context, error)
+        self.state = self.context.broadcast_object(self.state)
 
     def _repair_views(self) -> None:
         champion = self.directory / self.state["best_snapshot"]
@@ -137,30 +197,65 @@ class ModelSelection:
                             "environment_plies" if contract.get("algorithm") == "ppo"
                             else "continuation_plies"
                         )
-                    if self.state.get("version") != 1 or contract != self._contract():
-                        raise ValueError("model selection schedule/budget changed; restore its original settings or use a new run directory")
                     if self.state["last_evaluated_update"] > update:
                         raise ValueError("model selection is newer than the training checkpoint")
+                    version = 2 if self.environment_schedule else 1
+                    if self.state.get("version") == 1 and self.environment_schedule:
+                        # Upgrade the old percentage schedule while retaining the
+                        # champion and reports. The new match protocol is a separate
+                        # statistical family; never reuse its predecessors' seeds.
+                        excluded = {"milestones", "games", "interval_environment_plies"}
+                        stable = lambda value: {k: v for k, v in value.items() if k not in excluded}
+                        if ("interval_environment_plies" in contract
+                                or stable(contract) != stable(self._contract())):
+                            raise ValueError("model selection budget/protocol changed during schedule migration")
+                        self._repair_views()  # Validate old immutable artifacts first.
+                        group_size = 2 if self.settings.mode.value == "two_player" else 4
+                        old_span = (2 + group_size) * (contract["games"] // group_size)
+                        seed_base = contract["seed"] + (max(contract["milestones"]) + 1) * old_span
+                        new_span = (2 + group_size) * (self.settings.arena_games // group_size)
+                        if seed_base + (len(self.milestones) + 1) * new_span >= 2**63:
+                            raise ValueError("migrated model selection seed range exceeds int64")
+                        self.state["previous_schedule"] = {
+                            "contract": contract,
+                            "last_completed_percent": self.state["last_completed_percent"],
+                            "rounds": list(self.state["rounds"]),
+                            "migration_update": update,
+                            "migration_environment_plies": cumulative.get("environment_plies", 0),
+                        }
+                        self.state.pop("last_completed_percent")
+                        self.state.update(version=2, last_completed_environment_plies=0,
+                                          schedule_seed_base=seed_base,
+                                          statistical_family="environment_schedule_after_percentage")
+                        contract = self._contract()
+                    if self.state.get("version") != version or contract != self._contract():
+                        raise ValueError("model selection schedule/budget changed; restore its original settings or use a new run directory")
                     if self.state["contract"] != contract:
                         self.state["contract"] = contract
                         atomic_json(self.state_path, self.state)
                 else:
-                    baseline = self._snapshot(policy, layout, update=update,
-                                              name=f"baseline_{update:09d}.pt")
+                    baseline = self.directory / "snapshots" / f"baseline_{update:09d}.pt"
+                    if self.settings.checkpoint_policy == "evaluation":
+                        self._pending_baseline = self._snapshot_payload(policy, layout, update=update)
+                    else:
+                        self._snapshot(policy, layout, update=update, name=baseline.name)
                     skipped = [p for p in self.milestones if self._reached(p, update, cumulative)]
                     self.state = {
-                        "version": 1, "contract": self._contract(),
+                        "version": 2 if self.environment_schedule else 1, "contract": self._contract(),
                         "baseline_update": update,
                         "baseline_progress_percent": self.progress_percent(update=update, cumulative=cumulative),
                         "baseline_skipped_milestones": skipped,
-                        "last_completed_percent": max(skipped, default=0),
+                        self.completed_key: max(skipped, default=0),
                         "last_evaluated_update": update,
                         "best_update": update,
                         "best_snapshot": baseline.relative_to(self.directory).as_posix(),
-                        "best_sha256": sha256_file(baseline), "rounds": [],
+                        "best_sha256": None if self._pending_baseline is not None else sha256_file(baseline),
+                        "rounds": [],
                     }
-                    atomic_json(self.state_path, self.state)
-                self._repair_views()
+                    if self._pending_baseline is None:
+                        atomic_json(self.state_path, self.state)
+                if self._pending_baseline is None:
+                    self._repair_views()
             except Exception as exc:
                 error = f"model selection initialization: {type(exc).__name__}: {exc}"
         synchronized_error(self.context, error)
@@ -192,9 +287,11 @@ class ModelSelection:
         milestone = self.due_milestone(update=update, cumulative=cumulative)
         if milestone is None:
             return None
-        candidate = self.directory / "snapshots" / f"candidate_{milestone:03d}_{update:09d}.pt"
+        self.persist_baseline()
+        tag = self._round_tag(milestone)
+        candidate = self.directory / "snapshots" / f"candidate_{tag}_{update:09d}.pt"
         opponent = self.directory / self.state["best_snapshot"]
-        report_path = self.directory / f"round_{milestone:03d}.json"
+        report_path = self.directory / f"round_{tag}.json"
         error, candidate_hash, report = None, None, None
         if self.context.primary:
             try:
@@ -215,9 +312,12 @@ class ModelSelection:
         if report is None:
             group_size = 2 if self.settings.mode.value == "two_player" else 4
             groups = self.settings.arena_games // group_size
+            seed_index = (milestone // self.settings.arena_interval_environment_plies
+                          if self.environment_schedule else milestone)
             match = MatchSettings(
                 pairs=groups, mode=self.settings.mode.value,
-                seed=self.settings.arena_seed + milestone * (2 + group_size) * groups,
+                seed=self.state.get("schedule_seed_base", self.settings.arena_seed)
+                     + seed_index * (2 + group_size) * groups,
                 max_plies=self.settings.arena_max_plies,
                 temporal_cache_entries=self.settings.arena_temporal_cache_entries,
                 parallel_games=self.settings.arena_parallel_games,
@@ -243,7 +343,7 @@ class ModelSelection:
                 synchronized_error(self.context, error)
                 report = run_match(
                     candidate, opponent, match, self.context,
-                    self.directory / f"games_{milestone:03d}",
+                    self.directory / f"games_{tag}",
                     alpha=0.05 / len(self.milestones),
                     candidate_sha256=candidate_hash,
                     opponent_sha256=self.state["best_sha256"],
@@ -268,10 +368,13 @@ class ModelSelection:
                 self._validate_result(report)
                 promoted = report["score"] > 0.5
                 report.update({
-                    "milestone_percent": milestone,
+                    self.milestone_key: milestone,
+                    "schedule_unit": "environment_plies" if self.environment_schedule else "percent",
+                    "environment_plies": cumulative.get("environment_plies", 0),
+                    "statistical_family": self.state.get("statistical_family", "initial_schedule"),
                     "progress_percent": self.progress_percent(update=update, cumulative=cumulative),
                     "skipped_milestones": [p for p in self.milestones
-                                           if self.state["last_completed_percent"] < p < milestone],
+                                           if self.state[self.completed_key] < p < milestone],
                     "candidate_update": update, "opponent_update": self.state["best_update"],
                     "candidate_sha256": candidate_hash, "opponent_sha256": self.state["best_sha256"],
                     "promoted": promoted, "decision": "promote" if promoted else "retain_best",
@@ -283,7 +386,7 @@ class ModelSelection:
                 })
                 atomic_json(report_path, report)
                 next_state = copy.deepcopy(self.state)
-                next_state.update(last_completed_percent=milestone, last_evaluated_update=update)
+                next_state.update({self.completed_key: milestone, "last_evaluated_update": update})
                 next_state["rounds"].append(report_path.name)
                 if promoted:
                     next_state.update(best_update=update,

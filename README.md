@@ -3,8 +3,23 @@
 面向四国军棋与二人军棋神经网络训练的规则、棋盘拓扑和玩家主视角编码基础库。
 
 四国模式（四暗、双明）当前采用 **PPO + 独立 Critic**，用 GAE 取代每步 8 条
-蒙特卡洛终局续局。RTX 4090 的 main 规格已验证 `microbatch=8`，详见
-[四国 PPO、参数量与显存实测](docs/four_player_ppo_zh.md)。二人模式继续使用 Game-GRPO。
+蒙特卡洛终局续局。revision 20 已将棋盘编码改为**整盘向量经过一个线性层得到 256 维**，
+移除逐点 Embedding 和棋盘 Transformer，详见[整盘编码与验证](docs/whole_board_linear_zh.md)。
+revision 21 将动作改为**起点二维坐标、终点二维坐标、相对行动方 → Linear(5,256)**，
+不再使用动作字段 Embedding 和战斗结果特征，详见[五维动作编码](docs/action_linear_zh.md)。
+参数和训练流程见[四国 PPO](docs/four_player_ppo_zh.md)。二人模式继续使用 Game-GRPO。
+revision 22 将四暗、双明的棋盘和动作投影各缩为 **128 维**，拼接后 **256 维**，
+main 保留 32 层，FFN 改为 **1024**；Policy 为 **36,324,226** 参数。
+缩小模型阶段的参数、并行配置和历史硬件情景见[128＋128 并行训练核算](docs/compact128_parallel_training_eta_zh.md)。
+PPO 已默认启用数组历史、批量学习和固定席位 KV/CUDA Graph；2560 步诊断轮实测约 **2.93 倍加速**，见[数据路径优化与回归验证](docs/ppo_pipeline_optimization_zh.md)。
+四国 main 新增 **4 个常驻 CPU 环境进程、学习微批 32、直接因果 SDPA、关闭激活重算**，
+此前完整训练和环境并行对照见[并行环境与学习端优化](docs/ppo_parallel_optimization_zh.md)。
+最新一轮已加入**批量布阵、变长注意力、编译、融合 AdamW、延后批量 Critic 和分组在线流水**。
+48 局兼容配置的 12 轮测量外推 **33.5 天**；另提供 96 局大采样配置，8 轮测量外推 **27.3 天**，
+均为四暗 30 亿环境步连续训练，另计评测、保存、停机和后期长局变化。**20 天目标尚未达到**。
+分项实现、数值边界、配置与完整计时见[20 天目标优化报告](docs/ppo20_optimization_zh.md)。
+此前串行环境版本约 237 步/秒、147 天的测量保留在[上一轮训练时间](docs/four_dark_optimized_training_eta_zh.md)。
+此前 512 维结构的计时与费用保留在[revision 21 时间核算](docs/action_linear_training_eta_zh.md)和[性能及费用核对](docs/action_microbatch_rental_cost_zh.md)。
 
 当前仓库先固定两类标准棋盘：
 
@@ -15,7 +30,7 @@
 [docs/rules_zh.md](docs/rules_zh.md)，棋盘编码定义见
 [docs/board_encoding_zh.md](docs/board_encoding_zh.md)，静态动作列表与 Policy Head
 映射见 [docs/action_encoding_zh.md](docs/action_encoding_zh.md)，训练裁判接口见
-[docs/game_engine_zh.md](docs/game_engine_zh.md)，策略输入的棋盘整数码和 512 维转移 token 见
+[docs/game_engine_zh.md](docs/game_engine_zh.md)，策略输入的棋盘整数码和按模式确定宽度的转移 token 见
 [docs/state_token_encoding_zh.md](docs/state_token_encoding_zh.md)，仅依赖规则和终局结果的双模型自对弈方案见
 [docs/reinforcement_learning_plan_zh.md](docs/reinforcement_learning_plan_zh.md)，棋子条件自回归 Pointer 布阵模型、默认温度 `0.7` 的概率采样与终局反向传播约定见
 [docs/layout_decoder_training_zh.md](docs/layout_decoder_training_zh.md)，显存、batch、训练步数和总对局预算见
@@ -25,6 +40,11 @@
 语义和历史编码加速见 [docs/multi_gpu_and_performance_zh.md](docs/multi_gpu_and_performance_zh.md)。
 
 ## 快速使用
+
+本地训练监控与 CPU 对弈控制台见 [使用说明](docs/local_console_zh.md)。
+在 WSL 中运行 `/root/anaconda3/envs/siguozero/bin/python tools/local_console.py`，
+打开 <http://localhost:8765>；加 `--start-training` 明确启动新的 4090 四暗棋训练。
+对弈通过独立 CPU 进程加载冻结权重，监控进度和耗时来自实际训练日志与存活进程。
 
 ```python
 from junqi.board import ArmPoint, FourPlayerBoard, FourPlayerSeat
@@ -164,11 +184,12 @@ Layout reference；二人 GRPO 训练另常驻冻结 Policy/Layout reference。
 | 四人版（四暗） | `four_dark` | `junqi.training.train_four_dark` | 129 点、四家身份均隐藏 |
 | 四人版（双明） | `double_open` | `junqi.training.train_double_open` | 129 点、对家同盟信息公开 |
 
-正式训练使用 `--model-scale main`：带死规则的 Policy 为 `144,157,704` 参数，
-Layout 为 `17,292,288` 参数，部署模型对合计 `161,449,992` 参数。四国 PPO 的
-Critic 为 `143,698,441` 参数，三个可训练模型合计 `305,148,433` 参数。二人版与四人版
-使用同一 Transformer 结构，但棋盘拓扑、合法动作空间和玩家主视角编码不同，因此
+正式训练使用 `--model-scale main`：revision 21 带死规则的 Policy 为 `139,888,130` 参数，
+Layout 为 `17,292,288` 参数，部署模型对合计 `157,180,418` 参数。四国 PPO 的
+Critic 为 `139,526,657` 参数，三个可训练模型合计 `296,707,075` 参数。二人版与四人版
+使用同一整盘线性编码和时序 Transformer 结构，但棋盘拓扑、合法动作空间和玩家主视角编码不同，因此
 检查点不能跨模式加载。`bootstrap` 用于流水线验证，`extended` 用于后续放大实验。
+新架构使用格式 6 检查点，旧图编码器或旧动作字段 Embedding 权重不兼容；切换架构时选择新的训练目录。
 
 ### 单机与多机训练脚本
 
@@ -229,9 +250,13 @@ python tools/benchmark_rollout.py --device npu --mode two_player \
 
 ### 评测脚本与指标
 
-训练默认在进度 `30%、35%、…、100%` 时，让当前模型与此前最优模型对弈 1,000 局，
+四暗、双明从初始模型作为基准开始，每累计 **5000 万次训练环境交互**选拔一次，
+每次对阵此前最优模型 **100 局**（25 组四局轮转）；30 亿步共 60 次、6000 局。
+二人保留进度 `30%、35%、…、100%`、每轮 1000 局的日程。
 得分率超过 50% 时更新 `checkpoints/best.pt`。完整续训仍用 `latest.pt`；规则、配置与
 棋力变化记录见 [训练中的自动最优模型选择](docs/best_model_selection_zh.md)。
+四国默认只在评测时保存参数和完整续训状态，取消逐轮及退出保存；初始比较基线先留在
+CPU 内存，首次评测时再落盘。中途停止从最近评测保存点恢复，首次评测前的进度不可恢复。
 
 **验证新模型是否真的更强**：二人和四国使用独立的跨版本棋力评测入口、协议与成绩库：
 
@@ -273,6 +298,8 @@ NPROC_PER_NODE=8 GAMES=1000 EVAL_SUMMARY=eval/four_dark.json \
 | `policy/kl_reference` | 当前策略相对 reference 的精确 KL；配置目标 `0.015`，超过 `0.0225` 会提前停止本 epoch |
 | `policy/approx_kl_old` | 四国 PPO 相对采样时旧策略的近似 KL，用于提前停止 |
 | `loss/critic_total` / `critic/value_mse` | 四国 PPO 价值损失与价值预测误差 |
+| `ppo/raw_nonzero_advantage_fraction` / `ppo/no_advantage_signal` | 四国 PPO 标准化前是否存在非零优势，避免把全零 loss 当成学会 |
+| `critic/rollout_target_std` / `critic/rollout_explained_variance` | 采样时价值目标变化与 Critic 解释方差；目标方差近零时 EV 不输出，结合 `*_defined` 和 MSE 看 |
 | `policy/clip_fraction` | PPO/GRPO ratio 被裁剪比例；达到 `0.30` 会提前停止本 epoch |
 | `policy/entropy`、`layout/entropy` | 着法与布阵分布熵，用于发现过早塌缩 |
 | `rollout/plies_per_second`、`rollout/continuations_per_second` | 全局 rollout 吞吐；应以目标 910B 集群实测建立基线 |
@@ -287,6 +314,9 @@ TensorBoard 和每 rank 的 `resource_metrics.rankNNN.jsonl` 中记录状态。�
 改变节点数/卡数，未结束基础局会重新分片；同一 launch 内所有 rank 必须使用一致的
 模型、死规则开关和 batch 参数。
 
+训练中判断是否学会，需结合学习信号与固定历史对手成绩。早期检查时机、轻量评测参数、
+TensorBoard 查看方法及当前短测试的证据边界见[四国学习评估指南](docs/four_player_learning_evaluation_zh.md)。
+
 ## CUDA/NPU 自对弈训练与推理实现
 
 每个训练模式只创建一套当前玩家网络：一个 `Policy` 实例和一个 `Layout`
@@ -297,13 +327,14 @@ TensorBoard 和每 rank 的 `resource_metrics.rankNNN.jsonl` 中记录状态。�
 log-prob，不再深拷贝行为模型。
 
 四国 PPO 每次只执行一个真实动作，由 Critic 和 GAE 提供优势，再分别训练
-Policy/Critic；使用完全相同前缀的序列训练、microbatch=8，优化器小批仍为 512。
+Policy/Critic；使用完全相同前缀的序列训练、main microbatch=32，优化器小批仍为 512。
 四国默认预算为 **30 亿训练环境交互**：每次执行游戏动作、推进一次状态计 1 步，
 包含所有采样对局和实际执行的模拟分支；8 条分支各走 32 步计 256 步。
 网络前后向和多轮 PPO 优化不增加计数。见[统一计数定义](docs/environment_step_budget_zh.md)。
 当前 PPO 无额外蒙特卡洛分支，20 局并行、每轮采样 5120 步，对应预计 585,938 次更新；
 并行配置与计数见[性能报告](docs/four_player_ppo_optimization_zh.md)，
-两种四国模式的最新计时和单卡、多卡条件估算见[时间重估](docs/four_player_ppo_eta_budget_zh.md)。
+两种四国模式的最新计时和单卡、多卡条件估算见[revision 21 时间重估](docs/action_linear_training_eta_zh.md)。
+同一环境交互预算下蒙特卡洛与 PPO 的耗时比较见[算法成本口径](docs/four_player_mc_vs_ppo_zh.md)。
 二人 GRPO 从旧策略采样 `K=4` 个
 根动作，每个复制 `M=2` 次并运行到终局。`--dead-rules` 开启持久确定性身份标注
 与阵亡先验；`--no-dead-rules` 同时关闭这些标注，并从 Policy/Critic 中删除
@@ -345,4 +376,4 @@ python -m junqi.training.infer_double_open --checkpoint runs/double_open/with_de
 python -m junqi.training.infer_two_player --checkpoint runs/two_player/with_dead_rules/checkpoints/latest.pt
 ```
 
-单卡安装验收可为任一训练入口添加 `--smoke-test --device cuda`；双进程分布式验收可用 `torchrun --standalone --nproc-per-node=2 ... --smoke-test --device cpu --anchor-batch 2 --base-game-pool 2`。新运行会先保存 update 0，再进入 rollout；训练指标写入各变体目录内的追加式 `metrics.jsonl`、文本日志和可选 TensorBoard。独立资源心跳写入 `resource_metrics.jsonl` 并原子更新 `resource_latest.json`，其他 rank 使用带 `.rankNNN` 的独立日志。可用 `--resource-monitor-seconds` 调整间隔，`--checkpoint-every`、`--archive-every` 和 `--keep-checkpoint-archives` 调整保存策略。检查点包含模式/算法/变体标记、Policy/Layout（四国另含 Critic）、对应参考模型和优化器、训练计数、有效 microbatch、布局样本缓冲区、所有 rank 的未结束基础局、玩家历史窗口和 CPU/CUDA/环境随机状态；只有开启死规则时才保存持久确定身份与确定阵亡库存。
+单卡安装验收可为任一训练入口添加 `--smoke-test --device cuda`；双进程分布式验收可用 `torchrun --standalone --nproc-per-node=2 ... --smoke-test --device cpu --anchor-batch 2 --base-game-pool 2`。四国默认 `--checkpoint-policy evaluation`，只在评测时保存；二人及安装验收默认 `periodic`，先保存 update 0，再按周期及退出保存。训练指标写入各变体目录内的追加式 `metrics.jsonl`、文本日志和可选 TensorBoard。独立资源心跳写入 `resource_metrics.jsonl` 并原子更新 `resource_latest.json`，其他 rank 使用带 `.rankNNN` 的独立日志。可用 `--resource-monitor-seconds` 调整间隔；`--checkpoint-every`、`--archive-every` 和 `--keep-checkpoint-archives` 仅控制 `periodic` 策略的周期归档。检查点包含模式/算法/变体标记、Policy/Layout（四国另含 Critic）、对应参考模型和优化器、训练计数、有效 microbatch、布局样本缓冲区、所有 rank 的未结束基础局、玩家历史窗口和 CPU/CUDA/环境随机状态；只有开启死规则时才保存持久确定身份与确定阵亡库存。

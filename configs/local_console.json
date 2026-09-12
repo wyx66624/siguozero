@@ -1,0 +1,9 @@
+{
+  "cpu_threads": 2,
+  "max_games": 2,
+  "runs": [
+    {"id": "four-dark-local", "name": "四暗棋 · 本地训练", "mode": "four_dark", "path": "runs_local_4090/four_dark/with_dead_rules"},
+    {"id": "two-player-main", "name": "双人军棋 · 历史主模型", "mode": "two_player", "path": "runs_optimized_v14/two_player/with_dead_rules"},
+    {"id": "double-open-reference", "name": "双明棋 · 实验参考", "mode": "double_open", "experimental": true, "path": "runs/benchmarks/compact128_g48_double_open_20260911/double_open/with_dead_rules"}
+  ]
+}

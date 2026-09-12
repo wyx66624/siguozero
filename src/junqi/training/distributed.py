@@ -151,6 +151,19 @@ class DistributedContext:
             for key, value in values.items()
         }
 
+    def sum_metrics(self, values: Mapping[str, float]) -> dict[str, float]:
+        """Sum scalar moments in one collective; all ranks supply the same keys."""
+        if not self.enabled or not values:
+            return dict(values)
+        keys = sorted(values)
+        tensor = torch.tensor(
+            [values[key] for key in keys],
+            dtype=torch.float32 if self.backend in ("nccl", "hccl") else torch.float64,
+            device=self._collective_device(),
+        )
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        return dict(zip(keys, tensor.tolist(), strict=True))
+
     def any(self, value: bool) -> bool:
         return bool(self.reduce_int(int(value), operation="max"))
 

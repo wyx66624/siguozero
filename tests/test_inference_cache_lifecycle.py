@@ -61,7 +61,7 @@ class InferenceCacheLifecycleTests(unittest.TestCase):
             previous = policy._inference_board_cache[keys[0]]
             policy.encode([initial])
             self.assertEqual(list(policy._inference_board_cache), [keys[2], keys[0]])
-            self.assertIsNot(policy._inference_board_cache[keys[0]], previous)
+            self.assertIs(policy._inference_board_cache[keys[0]], previous)
             policy.encode([unrelated])
             self.assertEqual(list(policy._inference_board_cache), [keys[0], keys[1]])
             self.assertLessEqual(len(policy._inference_board_cache), 2)
@@ -78,7 +78,7 @@ class InferenceCacheLifecycleTests(unittest.TestCase):
         self.assertNotIn(self.board_key(initial), policy._inference_board_cache)
         self.assertIn(self.board_key(advanced), policy._inference_board_cache)
         torch.testing.assert_close(actual.context, expected.context)
-        torch.testing.assert_close(actual.current_points, expected.current_points)
+        torch.testing.assert_close(actual.point_mask, expected.point_mask)
 
     def test_enabled_gradients_bypass_detached_board_cache(self):
         policy, initial, advanced, _ = self.board_fixture()
@@ -126,7 +126,6 @@ class InferenceCacheLifecycleTests(unittest.TestCase):
             prefixes.append(prefix)
         policy._record_board_batch = lambda records, mode: (
             torch.zeros(len(records), 32, dtype=torch.float16),
-            torch.zeros(len(records), 60, 32, dtype=torch.float16),
             torch.ones(len(records), 60, dtype=torch.bool),
         )
         policy._record_temporal_tokens = lambda records, mode, globals_, positions: (

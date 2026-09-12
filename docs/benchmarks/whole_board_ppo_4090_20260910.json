@@ -1,0 +1,49 @@
+{
+  "device": "NVIDIA GeForce RTX 4090",
+  "torch": "2.11.0+cu130",
+  "mode": "four_dark",
+  "model_scale": "main",
+  "microbatch": 8,
+  "context_tokens": 1001,
+  "games": 20,
+  "actor_batch": 20,
+  "cache_entries_per_model": 240,
+  "parameters": {
+    "policy": 140036866,
+    "critic": 139675393,
+    "layout": 17292288
+  },
+  "resident_parameters": 314296835,
+  "all_optimizer_states_initialized": true,
+  "resident_allocated_gib": 3.446143627166748,
+  "phases": [
+    {
+      "phase": "policy_backward_1",
+      "seconds": 0.869652278999979,
+      "peak_allocated_gib": 5.066936016082764,
+      "peak_reserved_gib": 5.26953125,
+      "loss": -0.034807417541742325
+    },
+    {
+      "phase": "critic_backward_1",
+      "seconds": 0.7039668539999866,
+      "peak_allocated_gib": 5.076282024383545,
+      "peak_reserved_gib": 5.271484375,
+      "loss": 0.25
+    },
+    {
+      "phase": "policy_backward_2",
+      "seconds": 0.6894114020000188,
+      "peak_allocated_gib": 5.076282024383545,
+      "peak_reserved_gib": 5.2734375,
+      "loss": -0.23046380281448364
+    },
+    {
+      "phase": "critic_backward_2",
+      "seconds": 0.671317259000034,
+      "peak_allocated_gib": 5.076282024383545,
+      "peak_reserved_gib": 5.271484375,
+      "loss": 0.249042809009552
+    }
+  ]
+}

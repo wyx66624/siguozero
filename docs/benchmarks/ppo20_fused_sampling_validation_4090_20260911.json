@@ -1,0 +1,14 @@
+{
+  "complete": true,
+  "adamw_step_seconds": {
+    "original": 0.015685480600000013,
+    "fused": 0.0013622806499999918
+  },
+  "adamw_max_parameter_error": 1.9073486328125E-06,
+  "sampling_eager_ms": 0.31594710179737634,
+  "sampling_graph_ms": 0.12353575731504639,
+  "sampling_matches_eager": true,
+  "capture_does_not_consume_rng": true,
+  "parameter_update_clears_graphs": true,
+  "baseline_correction": "The original case explicitly disabled fused AdamW, also preventing default automatic foreach selection. Use ppo20_fused_sampling_verified_4090_20260911.json for the actual project baseline."
+}

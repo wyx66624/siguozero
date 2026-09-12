@@ -1,0 +1,328 @@
+{
+  "status": "bounded_fixed_synthetic_workload_not_training_throughput",
+  "device": "NVIDIA GeForce RTX 4090",
+  "torch": "2.11.0+cu130",
+  "config_revision": 21,
+  "amp": "bfloat16",
+  "old_action_source": "git HEAD PublicActionEncoder only; current whole-board and temporal model retained",
+  "old_action_class_sha256": "930451abd915dc1f885b838403af0c8a93924b3c64c32f34b34fe8bc7e069eec",
+  "old_event_features": "neutral combat/attack/reveal/elimination, no captured flag",
+  "non_action_weights": "same objects, no optimizer step in measurements",
+  "resident_models": "policy, critic, layout, frozen layout and initialized policy/critic/layout Adam states",
+  "current_optimizer_minibatch_samples": 512,
+  "rows": [
+    {
+      "label": "action_ab_512_pass1",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 512,
+      "seconds": [
+        0.6928341820000004,
+        0.7365839049999998,
+        0.6665253369999995
+      ],
+      "median_seconds": 0.6928341820000004,
+      "peak_allocated_gib": 4.3062005043029785,
+      "peak_reserved_gib": 4.396484375,
+      "learner_decisions_per_second": 738.9935619544818,
+      "status": "ok"
+    },
+    {
+      "label": "action_ab_512_pass1",
+      "variant": "old",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 512,
+      "seconds": [
+        0.7048475290000003,
+        0.789798974,
+        0.715410275
+      ],
+      "median_seconds": 0.715410275,
+      "peak_allocated_gib": 4.319259166717529,
+      "peak_reserved_gib": 4.416015625,
+      "learner_decisions_per_second": 715.6732547628003,
+      "status": "ok"
+    },
+    {
+      "label": "action_ab_512_pass2",
+      "variant": "old",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 512,
+      "seconds": [
+        0.7716062350000001,
+        0.7054635820000001,
+        0.680589672
+      ],
+      "median_seconds": 0.7054635820000001,
+      "peak_allocated_gib": 4.319259166717529,
+      "peak_reserved_gib": 4.416015625,
+      "learner_decisions_per_second": 725.7638991774346,
+      "status": "ok"
+    },
+    {
+      "label": "action_ab_512_pass2",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 512,
+      "seconds": [
+        0.7605538420000002,
+        0.6712859400000006,
+        0.690633302000002
+      ],
+      "median_seconds": 0.690633302000002,
+      "peak_allocated_gib": 4.3066887855529785,
+      "peak_reserved_gib": 4.396484375,
+      "learner_decisions_per_second": 741.3485543157294,
+      "status": "ok"
+    },
+    {
+      "label": "action_ab_1001_pass1",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        1.4408226309999996,
+        1.5995618580000013,
+        1.4300700370000001
+      ],
+      "median_seconds": 1.4408226309999996,
+      "peak_allocated_gib": 5.053935527801514,
+      "peak_reserved_gib": 5.19921875,
+      "learner_decisions_per_second": 355.3525527598408,
+      "status": "ok"
+    },
+    {
+      "label": "action_ab_1001_pass1",
+      "variant": "old",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        1.3993559139999974,
+        1.4589562289999947,
+        1.3909517230000006
+      ],
+      "median_seconds": 1.3993559139999974,
+      "peak_allocated_gib": 5.075395584106445,
+      "peak_reserved_gib": 5.240234375,
+      "learner_decisions_per_second": 365.88261419246123,
+      "status": "ok"
+    },
+    {
+      "label": "action_ab_1001_pass2",
+      "variant": "old",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        1.426937387999999,
+        1.4303571079999955,
+        1.4406869900000032
+      ],
+      "median_seconds": 1.4303571079999955,
+      "peak_allocated_gib": 5.075395584106445,
+      "peak_reserved_gib": 5.240234375,
+      "learner_decisions_per_second": 357.9525680240138,
+      "status": "ok"
+    },
+    {
+      "label": "action_ab_1001_pass2",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        1.459578846999996,
+        1.398866348999995,
+        1.4157961710000038
+      ],
+      "median_seconds": 1.4157961710000038,
+      "peak_allocated_gib": 5.054890155792236,
+      "peak_reserved_gib": 5.19921875,
+      "learner_decisions_per_second": 361.6339770423059,
+      "status": "ok"
+    },
+    {
+      "label": "512_decisions_8_full_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        1.4352265360000018,
+        1.4693059290000008,
+        1.4183457210000014
+      ],
+      "median_seconds": 1.4352265360000018,
+      "peak_allocated_gib": 5.052886009216309,
+      "peak_reserved_gib": 5.197265625,
+      "learner_decisions_per_second": 356.73810869394305,
+      "status": "ok"
+    },
+    {
+      "label": "512_decisions_8_full_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 16,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        1.4095599970000023,
+        1.4541841269999978,
+        1.372326018999999
+      ],
+      "median_seconds": 1.4095599970000023,
+      "peak_allocated_gib": 5.052886009216309,
+      "peak_reserved_gib": 5.197265625,
+      "learner_decisions_per_second": 363.2339177400756,
+      "status": "ok"
+    },
+    {
+      "label": "512_decisions_8_full_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 32,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        1.4461209919999973,
+        1.4396527259999985,
+        1.4007680850000028
+      ],
+      "median_seconds": 1.4396527259999985,
+      "peak_allocated_gib": 5.052886009216309,
+      "peak_reserved_gib": 5.197265625,
+      "learner_decisions_per_second": 355.64132290609126,
+      "status": "ok"
+    },
+    {
+      "label": "512_decisions_32_short_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 4,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.284219543000006,
+        5.435985474999995,
+        5.4348550610000075
+      ],
+      "median_seconds": 5.4348550610000075,
+      "peak_allocated_gib": 5.599855899810791,
+      "peak_reserved_gib": 5.701171875,
+      "learner_decisions_per_second": 94.20674410879184,
+      "status": "ok"
+    },
+    {
+      "label": "512_decisions_32_short_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 16,
+      "forward_backward_chunks_per_model": 2,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.560180826999996,
+        5.401895183999997,
+        5.374081266000005
+      ],
+      "median_seconds": 5.401895183999997,
+      "peak_allocated_gib": 6.910781383514404,
+      "peak_reserved_gib": 7.12890625,
+      "learner_decisions_per_second": 94.78155028192792,
+      "status": "ok"
+    },
+    {
+      "label": "512_decisions_32_short_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 32,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.545383872000002,
+        5.085214117999996,
+        5.103450973999983
+      ],
+      "median_seconds": 5.103450973999983,
+      "peak_allocated_gib": 9.008979797363281,
+      "peak_reserved_gib": 9.66015625,
+      "learner_decisions_per_second": 100.32427128396701,
+      "status": "ok"
+    },
+    {
+      "label": "2048_decisions_32_full_chains",
+      "variant": "new",
+      "samples": 2048,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 4,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.111822079000007,
+        5.162515389999982,
+        5.104638193000028
+      ],
+      "median_seconds": 5.111822079000007,
+      "peak_allocated_gib": 5.599855899810791,
+      "peak_reserved_gib": 5.703125,
+      "learner_decisions_per_second": 400.6399221939738,
+      "status": "ok"
+    },
+    {
+      "label": "2048_decisions_32_full_chains",
+      "variant": "new",
+      "samples": 2048,
+      "microbatch_sequences": 16,
+      "forward_backward_chunks_per_model": 2,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.328458670000003,
+        5.288529004999987,
+        5.205310792999995
+      ],
+      "median_seconds": 5.288529004999987,
+      "peak_allocated_gib": 6.910781383514404,
+      "peak_reserved_gib": 7.12890625,
+      "learner_decisions_per_second": 387.2532415088844,
+      "status": "ok"
+    },
+    {
+      "label": "2048_decisions_32_full_chains",
+      "variant": "new",
+      "samples": 2048,
+      "microbatch_sequences": 32,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.382381518000017,
+        5.339387011000014,
+        5.395183942999978
+      ],
+      "median_seconds": 5.382381518000017,
+      "peak_allocated_gib": 9.008979797363281,
+      "peak_reserved_gib": 9.66015625,
+      "learner_decisions_per_second": 380.5007120270053,
+      "status": "ok"
+    }
+  ],
+  "source_sha256": {
+    "src/junqi/training/models.py": "de75fe9eef124d002296305870318daee5b813bd1ff8fbc3a2b99c7eecf5c2d6",
+    "src/junqi/training/encoding.py": "389318decf6ccecdb1dedb2910ed9c852e00f20c3d26979a7ca1d54ac057a878",
+    "src/junqi/training/ppo.py": "9a84c3b4a50accefce01f79db1a427be892aa662c2fd5923ed229e3e40786f95",
+    "configs/bootstrap.yaml": "3786bcb2bd4c90a9849f13f17e60d91f9171cf74dc84e1efe3e8128c0719e701",
+    "tools/benchmark_action_microbatch.py": "862c832a35018b54cb16c88445059265656d233c698cb5e8c2199d9cc44cb8bf"
+  }
+}

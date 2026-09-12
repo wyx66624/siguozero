@@ -1,0 +1,2734 @@
+{
+  "device": "NVIDIA GeForce RTX 4090",
+  "torch": "2.11.0+cu130",
+  "checkpoint": "/mnt/e/agent/siguozero/runs/benchmarks/compact128_g40_exclusive_four_dark_20260911/four_dark/with_dead_rules/checkpoints/latest.pt",
+  "checkpoint_update": 4,
+  "config_revision": 22,
+  "model_config": {
+    "board_dim": 128,
+    "board_encoder_type": "whole_board_one_hot_linear",
+    "action_encoder_type": "coordinates_player_linear",
+    "temporal_dim": 256,
+    "temporal_layers": 32,
+    "temporal_heads": 8,
+    "temporal_ffn_dim": 1024,
+    "layout_dim": 256,
+    "layout_layers": 16,
+    "layout_heads": 8,
+    "layout_ffn_dim": 1024,
+    "max_transitions": 1000,
+    "dropout": 0.0,
+    "board_chunk_size": 128,
+    "inference_board_cache_entries": 65536,
+    "inference_temporal_cache_entries": 480,
+    "incremental_inference": true,
+    "paged_kv_cache": true,
+    "paged_kv_length_bucket_tokens": 1001,
+    "ppo_array_history": true,
+    "ppo_fixed_kv": true,
+    "ppo_cuda_graphs": true,
+    "activation_checkpointing": true,
+    "dead_rules_enabled": true
+  },
+  "games": 40,
+  "moves_per_game": 64,
+  "profile_waves": 1,
+  "parameters": {
+    "policy": 36324226,
+    "critic": 36208897,
+    "layout": 17292288
+  },
+  "source_sha256": {
+    "configs/bootstrap.yaml": "14b61ae7553ac6564afaac8f73e097c0738c50e3cb5fd021502bd21e7468a54f",
+    "src/junqi/training/models.py": "df13ded444ed5496395cc816fdd2450902aa385f0dbb8292ed6fabd9fc8e495a",
+    "src/junqi/training/trainer.py": "846a50010db6d69938f6e4d880e3598c23f9059f8cd3137ad510c1f5ae3264e3",
+    "src/junqi/training/ppo.py": "b58003843efcd01646ff78e1028dc90041d949cb3b5c7843e95d5d64a931246a",
+    "src/junqi/training/paged_kv.py": "39ab1c14b69eb761b75d85890b590324d659a8962e4d06b0bb847826e77b284f",
+    "src/junqi/training/encoding.py": "eed26c60cf5aec514211238a2ed697fa5f8c4c266e592db5f0b2edfba15c99f3"
+  },
+  "limitations": [
+    "Diagnostic from a short random-initialized checkpoint, no strength inference.",
+    "40-game saved pool differs from the current 48-game default.",
+    "No optimizer step or checkpoint save is timed here.",
+    "Profiler overhead is separately timed; CUDA service is not utilization."
+  ],
+  "phases": [
+    {
+      "phase": "real_rollout_unprofiled",
+      "seconds": 5.0406895469999995,
+      "peak_allocated_gib": 11.279533386230469,
+      "peak_reserved_gib": 11.400390625,
+      "metrics": {
+        "rollout/policy_samples": 2560,
+        "rollout/environment_plies": 2560,
+        "rollout/critic_inference_seconds": 0.8200318639999864,
+        "rollout/anchors": 0,
+        "rollout/root_candidates": 0,
+        "rollout/terminal_continuations": 0,
+        "rollout/continuation_plies": 0,
+        "rollout/base_plies": 2560,
+        "rollout/base_games_completed": 1,
+        "rollout/wins": 0,
+        "rollout/draws": 1,
+        "rollout/losses": 0,
+        "rollout/wall_seconds": 5.040103065000004,
+        "rollout/actor_inference_seconds": 1.8827517510000291,
+        "rollout/environment_step_work_seconds": 2.015749679999999,
+        "rollout/continuations_per_second": 0.0,
+        "rollout/plies_per_second": 507.92612114966704
+      },
+      "history_mean": 286.48046875,
+      "history_max": 751,
+      "actor_batch": 40,
+      "critic_batch": 40,
+      "encoding": {
+        "encoding/fixed_kv_enabled": 1.0,
+        "encoding/fixed_kv_slots": 159.0,
+        "encoding/fixed_kv_allocated_gib": 4.8876953125,
+        "encoding/fixed_kv_direct_attention": 1.0,
+        "encoding/cuda_graph_captures": 2.0,
+        "encoding/cuda_graph_replays": 61.0,
+        "encoding/history_input_states": 2560.0,
+        "encoding/history_unique_states": 2560.0,
+        "encoding/raw_board_tokens": 733390.0,
+        "encoding/board_input_tokens": 51460.0,
+        "encoding/board_unique_tokens": 51460.0,
+        "encoding/board_encoder_tokens": 57368.0,
+        "encoding/within_batch_history_saved_fraction": 0.0,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9217769535990401,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 2398.0,
+        "encoding/temporal_cold_states": 162.0,
+        "encoding/temporal_incremental_tokens": 9484.0,
+        "encoding/temporal_incremental_batches": 61.0,
+        "encoding/temporal_incremental_batch_mean": 39.31147540983606,
+        "encoding/temporal_incremental_batch_max": 40.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.9245711667481225
+      }
+    },
+    {
+      "phase": "warm_rollout_unprofiled",
+      "seconds": 0.04606067499999966,
+      "peak_allocated_gib": 10.901554107666016,
+      "peak_reserved_gib": 11.103515625,
+      "metrics": {
+        "rollout/policy_samples": 40,
+        "rollout/environment_plies": 40,
+        "rollout/critic_inference_seconds": 0.007726832000003014,
+        "rollout/anchors": 0,
+        "rollout/root_candidates": 0,
+        "rollout/terminal_continuations": 0,
+        "rollout/continuation_plies": 0,
+        "rollout/base_plies": 40,
+        "rollout/base_games_completed": 0,
+        "rollout/wins": 0,
+        "rollout/draws": 0,
+        "rollout/losses": 0,
+        "rollout/wall_seconds": 0.045907222000003856,
+        "rollout/actor_inference_seconds": 0.008965531999997722,
+        "rollout/environment_step_work_seconds": 0.028815002999998285,
+        "rollout/continuations_per_second": 0.0,
+        "rollout/plies_per_second": 871.3225993068506
+      },
+      "history_mean": 313.7,
+      "history_max": 652,
+      "actor_batch": 40,
+      "critic_batch": 40,
+      "encoding": {
+        "encoding/fixed_kv_enabled": 1.0,
+        "encoding/fixed_kv_slots": 159.0,
+        "encoding/fixed_kv_allocated_gib": 4.8876953125,
+        "encoding/fixed_kv_direct_attention": 1.0,
+        "encoding/cuda_graph_captures": 2.0,
+        "encoding/cuda_graph_replays": 62.0,
+        "encoding/history_input_states": 40.0,
+        "encoding/history_unique_states": 40.0,
+        "encoding/raw_board_tokens": 12548.0,
+        "encoding/board_input_tokens": 157.0,
+        "encoding/board_unique_tokens": 157.0,
+        "encoding/board_encoder_tokens": 256.0,
+        "encoding/within_batch_history_saved_fraction": 0.0,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9795983423653172,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 40.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 157.0,
+        "encoding/temporal_incremental_batches": 1.0,
+        "encoding/temporal_incremental_batch_mean": 40.0,
+        "encoding/temporal_incremental_batch_max": 40.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.9801128896342877
+      }
+    },
+    {
+      "phase": "warm_rollout_torch_profiled",
+      "seconds": 0.04575137300000165,
+      "peak_allocated_gib": 10.901554107666016,
+      "peak_reserved_gib": 11.103515625,
+      "metrics": {
+        "rollout/policy_samples": 40,
+        "rollout/environment_plies": 40,
+        "rollout/critic_inference_seconds": 0.00800059000000175,
+        "rollout/anchors": 0,
+        "rollout/root_candidates": 0,
+        "rollout/terminal_continuations": 0,
+        "rollout/continuation_plies": 0,
+        "rollout/base_plies": 40,
+        "rollout/base_games_completed": 0,
+        "rollout/wins": 0,
+        "rollout/draws": 0,
+        "rollout/losses": 0,
+        "rollout/wall_seconds": 0.04562377900000314,
+        "rollout/actor_inference_seconds": 0.009567261999997356,
+        "rollout/environment_step_work_seconds": 0.027744330000004425,
+        "rollout/continuations_per_second": 0.0,
+        "rollout/plies_per_second": 876.7357916580572
+      },
+      "history_mean": 314.7,
+      "history_max": 653,
+      "actor_batch": 40,
+      "critic_batch": 40,
+      "encoding": {
+        "encoding/fixed_kv_enabled": 1.0,
+        "encoding/fixed_kv_slots": 159.0,
+        "encoding/fixed_kv_allocated_gib": 4.8876953125,
+        "encoding/fixed_kv_direct_attention": 1.0,
+        "encoding/cuda_graph_captures": 2.0,
+        "encoding/cuda_graph_replays": 63.0,
+        "encoding/history_input_states": 40.0,
+        "encoding/history_unique_states": 40.0,
+        "encoding/raw_board_tokens": 12588.0,
+        "encoding/board_input_tokens": 157.0,
+        "encoding/board_unique_tokens": 157.0,
+        "encoding/board_encoder_tokens": 256.0,
+        "encoding/within_batch_history_saved_fraction": 0.0,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9796631712742294,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 40.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 157.0,
+        "encoding/temporal_incremental_batches": 1.0,
+        "encoding/temporal_incremental_batch_mean": 40.0,
+        "encoding/temporal_incremental_batch_max": 40.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.9801509676887697
+      }
+    },
+    {
+      "phase": "warm_rollout_python_profiled",
+      "seconds": 0.11390120300000461,
+      "peak_allocated_gib": 10.901554107666016,
+      "peak_reserved_gib": 11.103515625,
+      "metrics": {
+        "rollout/policy_samples": 40,
+        "rollout/environment_plies": 40,
+        "rollout/critic_inference_seconds": 0.008810283000002528,
+        "rollout/anchors": 0,
+        "rollout/root_candidates": 0,
+        "rollout/terminal_continuations": 0,
+        "rollout/continuation_plies": 0,
+        "rollout/base_plies": 40,
+        "rollout/base_games_completed": 0,
+        "rollout/wins": 0,
+        "rollout/draws": 0,
+        "rollout/losses": 0,
+        "rollout/wall_seconds": 0.11373776599999985,
+        "rollout/actor_inference_seconds": 0.009831436000006022,
+        "rollout/environment_step_work_seconds": 0.09449002600000256,
+        "rollout/continuations_per_second": 0.0,
+        "rollout/plies_per_second": 351.6861760762916
+      },
+      "history_mean": 315.7,
+      "history_max": 654,
+      "actor_batch": 40,
+      "critic_batch": 40,
+      "encoding": {
+        "encoding/fixed_kv_enabled": 1.0,
+        "encoding/fixed_kv_slots": 159.0,
+        "encoding/fixed_kv_allocated_gib": 4.8876953125,
+        "encoding/fixed_kv_direct_attention": 1.0,
+        "encoding/cuda_graph_captures": 2.0,
+        "encoding/cuda_graph_replays": 64.0,
+        "encoding/history_input_states": 40.0,
+        "encoding/history_unique_states": 40.0,
+        "encoding/raw_board_tokens": 12628.0,
+        "encoding/board_input_tokens": 157.0,
+        "encoding/board_unique_tokens": 157.0,
+        "encoding/board_encoder_tokens": 256.0,
+        "encoding/within_batch_history_saved_fraction": 0.0,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.979727589483687,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 40.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 157.0,
+        "encoding/temporal_incremental_batches": 1.0,
+        "encoding/temporal_incremental_batch_mean": 40.0,
+        "encoding/temporal_incremental_batch_max": 40.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.9801889782826362
+      }
+    },
+    {
+      "phase": "policy_backward_warmup",
+      "seconds": 0.6520789599999972,
+      "peak_allocated_gib": 1.7832789421081543,
+      "peak_reserved_gib": 1.935546875,
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.14734965148322254,
+        "optimizer/learner_sequences": 33.0,
+        "optimizer/learner_samples": 512.0,
+        "optimizer/history_token_reuse_fraction": 0.9319195200714456,
+        "loss/policy_ppo": 0.1458743311231956,
+        "loss/policy_total": 0.10993163415696472,
+        "policy/approx_kl_old": 9.650830288254753e-07,
+        "policy/entropy": 3.594269878230989,
+        "policy/clip_fraction": 0.0,
+        "policy/importance_ratio_mean": 1.000064074061811,
+        "policy/nonzero_advantage_fraction": 1.0
+      },
+      "encoding": {
+        "encoding/fixed_kv_enabled": 0.0,
+        "encoding/fixed_kv_slots": 0.0,
+        "encoding/fixed_kv_allocated_gib": 0.0,
+        "encoding/fixed_kv_direct_attention": 0.0,
+        "encoding/cuda_graph_captures": 0.0,
+        "encoding/cuda_graph_replays": 0.0,
+        "encoding/history_input_states": 512.0,
+        "encoding/history_unique_states": 33.0,
+        "encoding/raw_board_tokens": 154523.0,
+        "encoding/board_input_tokens": 10520.0,
+        "encoding/board_unique_tokens": 10520.0,
+        "encoding/board_encoder_tokens": 10520.0,
+        "encoding/within_batch_history_saved_fraction": 0.935546875,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9319195200714456,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "policy_backward_unprofiled",
+      "seconds": 0.5415046690000054,
+      "peak_allocated_gib": 1.7850065231323242,
+      "peak_reserved_gib": 1.9375,
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.14734965148322254,
+        "optimizer/learner_sequences": 33.0,
+        "optimizer/learner_samples": 512.0,
+        "optimizer/history_token_reuse_fraction": 0.9319195200714456,
+        "loss/policy_ppo": 0.1458743311231956,
+        "loss/policy_total": 0.10993163415696472,
+        "policy/approx_kl_old": 9.650830288254753e-07,
+        "policy/entropy": 3.594269870314747,
+        "policy/clip_fraction": 0.0,
+        "policy/importance_ratio_mean": 1.000064074061811,
+        "policy/nonzero_advantage_fraction": 1.0
+      },
+      "encoding": {
+        "encoding/fixed_kv_enabled": 0.0,
+        "encoding/fixed_kv_slots": 0.0,
+        "encoding/fixed_kv_allocated_gib": 0.0,
+        "encoding/fixed_kv_direct_attention": 0.0,
+        "encoding/cuda_graph_captures": 0.0,
+        "encoding/cuda_graph_replays": 0.0,
+        "encoding/history_input_states": 512.0,
+        "encoding/history_unique_states": 33.0,
+        "encoding/raw_board_tokens": 154523.0,
+        "encoding/board_input_tokens": 10520.0,
+        "encoding/board_unique_tokens": 10520.0,
+        "encoding/board_encoder_tokens": 10520.0,
+        "encoding/within_batch_history_saved_fraction": 0.935546875,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9319195200714456,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "policy_backward_block_counted",
+      "seconds": 0.7212038200000066,
+      "peak_allocated_gib": 1.7850065231323242,
+      "peak_reserved_gib": 1.9375,
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.14734965148322254,
+        "optimizer/learner_sequences": 33.0,
+        "optimizer/learner_samples": 512.0,
+        "optimizer/history_token_reuse_fraction": 0.9319195200714456,
+        "loss/policy_ppo": 0.1458743311231956,
+        "loss/policy_total": 0.10993163415696472,
+        "policy/approx_kl_old": 9.650830288254753e-07,
+        "policy/entropy": 3.594269870314747,
+        "policy/clip_fraction": 0.0,
+        "policy/importance_ratio_mean": 1.000064074061811,
+        "policy/nonzero_advantage_fraction": 1.0
+      },
+      "encoding": {
+        "encoding/fixed_kv_enabled": 0.0,
+        "encoding/fixed_kv_slots": 0.0,
+        "encoding/fixed_kv_allocated_gib": 0.0,
+        "encoding/fixed_kv_direct_attention": 0.0,
+        "encoding/cuda_graph_captures": 0.0,
+        "encoding/cuda_graph_replays": 0.0,
+        "encoding/history_input_states": 512.0,
+        "encoding/history_unique_states": 33.0,
+        "encoding/raw_board_tokens": 154523.0,
+        "encoding/board_input_tokens": 10520.0,
+        "encoding/board_unique_tokens": 10520.0,
+        "encoding/board_encoder_tokens": 10520.0,
+        "encoding/within_batch_history_saved_fraction": 0.935546875,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9319195200714456,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "critic_backward_warmup",
+      "seconds": 0.5298857780000006,
+      "peak_allocated_gib": 1.784576416015625,
+      "peak_reserved_gib": 1.9375,
+      "metrics": {
+        "loss/critic_total": 2.5312188761672516e-07,
+        "critic/value_mse": 1.0124875504669006e-06,
+        "critic/value_mean": 0.0007451707688233,
+        "critic/target_mean": -0.00012805461463472056
+      },
+      "encoding": {
+        "encoding/fixed_kv_enabled": 0.0,
+        "encoding/fixed_kv_slots": 0.0,
+        "encoding/fixed_kv_allocated_gib": 0.0,
+        "encoding/fixed_kv_direct_attention": 0.0,
+        "encoding/cuda_graph_captures": 0.0,
+        "encoding/cuda_graph_replays": 0.0,
+        "encoding/history_input_states": 512.0,
+        "encoding/history_unique_states": 33.0,
+        "encoding/raw_board_tokens": 154523.0,
+        "encoding/board_input_tokens": 10520.0,
+        "encoding/board_unique_tokens": 10520.0,
+        "encoding/board_encoder_tokens": 10520.0,
+        "encoding/within_batch_history_saved_fraction": 0.935546875,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9319195200714456,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "critic_backward_unprofiled",
+      "seconds": 0.5115887039999976,
+      "peak_allocated_gib": 1.784576416015625,
+      "peak_reserved_gib": 1.9375,
+      "metrics": {
+        "loss/critic_total": 2.5312188761672516e-07,
+        "critic/value_mse": 1.0124875504669006e-06,
+        "critic/value_mean": 0.0007451707688233,
+        "critic/target_mean": -0.00012805461463472056
+      },
+      "encoding": {
+        "encoding/fixed_kv_enabled": 0.0,
+        "encoding/fixed_kv_slots": 0.0,
+        "encoding/fixed_kv_allocated_gib": 0.0,
+        "encoding/fixed_kv_direct_attention": 0.0,
+        "encoding/cuda_graph_captures": 0.0,
+        "encoding/cuda_graph_replays": 0.0,
+        "encoding/history_input_states": 512.0,
+        "encoding/history_unique_states": 33.0,
+        "encoding/raw_board_tokens": 154523.0,
+        "encoding/board_input_tokens": 10520.0,
+        "encoding/board_unique_tokens": 10520.0,
+        "encoding/board_encoder_tokens": 10520.0,
+        "encoding/within_batch_history_saved_fraction": 0.935546875,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9319195200714456,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "critic_backward_block_counted",
+      "seconds": 0.5351420149999981,
+      "peak_allocated_gib": 1.784576416015625,
+      "peak_reserved_gib": 1.9375,
+      "metrics": {
+        "loss/critic_total": 2.5312188761672516e-07,
+        "critic/value_mse": 1.0124875504669006e-06,
+        "critic/value_mean": 0.0007451707688233,
+        "critic/target_mean": -0.00012805461463472056
+      },
+      "encoding": {
+        "encoding/fixed_kv_enabled": 0.0,
+        "encoding/fixed_kv_slots": 0.0,
+        "encoding/fixed_kv_allocated_gib": 0.0,
+        "encoding/fixed_kv_direct_attention": 0.0,
+        "encoding/cuda_graph_captures": 0.0,
+        "encoding/cuda_graph_replays": 0.0,
+        "encoding/history_input_states": 512.0,
+        "encoding/history_unique_states": 33.0,
+        "encoding/raw_board_tokens": 154523.0,
+        "encoding/board_input_tokens": 10520.0,
+        "encoding/board_unique_tokens": 10520.0,
+        "encoding/board_encoder_tokens": 10520.0,
+        "encoding/within_batch_history_saved_fraction": 0.935546875,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9319195200714456,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "policy_profile_subset_unprofiled",
+      "seconds": 0.10508214299999707,
+      "peak_allocated_gib": 1.5598907470703125,
+      "peak_reserved_gib": 1.9375,
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.325735294117647,
+        "optimizer/learner_sequences": 8.0,
+        "optimizer/learner_samples": 128.0,
+        "optimizer/history_token_reuse_fraction": 0.931526284348865,
+        "loss/policy_ppo": -0.08893625438213348,
+        "loss/policy_total": -0.12403988093137741,
+        "policy/approx_kl_old": 1.000240445137024e-06,
+        "policy/entropy": 3.5103626251220703,
+        "policy/clip_fraction": 0.0,
+        "policy/importance_ratio_mean": 1.000196933746338,
+        "policy/nonzero_advantage_fraction": 1.0
+      },
+      "encoding": {
+        "encoding/fixed_kv_enabled": 0.0,
+        "encoding/fixed_kv_slots": 0.0,
+        "encoding/fixed_kv_allocated_gib": 0.0,
+        "encoding/fixed_kv_direct_attention": 0.0,
+        "encoding/cuda_graph_captures": 0.0,
+        "encoding/cuda_graph_replays": 0.0,
+        "encoding/history_input_states": 128.0,
+        "encoding/history_unique_states": 8.0,
+        "encoding/raw_board_tokens": 40176.0,
+        "encoding/board_input_tokens": 2751.0,
+        "encoding/board_unique_tokens": 2751.0,
+        "encoding/board_encoder_tokens": 2751.0,
+        "encoding/within_batch_history_saved_fraction": 0.9375,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.931526284348865,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "policy_backward_torch_profiled",
+      "seconds": 0.17347199499999988,
+      "peak_allocated_gib": 1.5598907470703125,
+      "peak_reserved_gib": 1.9375,
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.325735294117647,
+        "optimizer/learner_sequences": 8.0,
+        "optimizer/learner_samples": 128.0,
+        "optimizer/history_token_reuse_fraction": 0.931526284348865,
+        "loss/policy_ppo": -0.08893625438213348,
+        "loss/policy_total": -0.12403988093137741,
+        "policy/approx_kl_old": 1.000240445137024e-06,
+        "policy/entropy": 3.5103626251220703,
+        "policy/clip_fraction": 0.0,
+        "policy/importance_ratio_mean": 1.000196933746338,
+        "policy/nonzero_advantage_fraction": 1.0
+      },
+      "encoding": {
+        "encoding/fixed_kv_enabled": 0.0,
+        "encoding/fixed_kv_slots": 0.0,
+        "encoding/fixed_kv_allocated_gib": 0.0,
+        "encoding/fixed_kv_direct_attention": 0.0,
+        "encoding/cuda_graph_captures": 0.0,
+        "encoding/cuda_graph_replays": 0.0,
+        "encoding/history_input_states": 128.0,
+        "encoding/history_unique_states": 8.0,
+        "encoding/raw_board_tokens": 40176.0,
+        "encoding/board_input_tokens": 2751.0,
+        "encoding/board_unique_tokens": 2751.0,
+        "encoding/board_encoder_tokens": 2751.0,
+        "encoding/within_batch_history_saved_fraction": 0.9375,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.931526284348865,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "policy_backward_python_profiled",
+      "seconds": 0.7136302469999976,
+      "peak_allocated_gib": 1.7850065231323242,
+      "peak_reserved_gib": 1.9375,
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.14734965148322254,
+        "optimizer/learner_sequences": 33.0,
+        "optimizer/learner_samples": 512.0,
+        "optimizer/history_token_reuse_fraction": 0.9319195200714456,
+        "loss/policy_ppo": 0.1458743311231956,
+        "loss/policy_total": 0.10993163415696472,
+        "policy/approx_kl_old": 9.650830288254753e-07,
+        "policy/entropy": 3.594269870314747,
+        "policy/clip_fraction": 0.0,
+        "policy/importance_ratio_mean": 1.000064074061811,
+        "policy/nonzero_advantage_fraction": 1.0
+      },
+      "encoding": {
+        "encoding/fixed_kv_enabled": 0.0,
+        "encoding/fixed_kv_slots": 0.0,
+        "encoding/fixed_kv_allocated_gib": 0.0,
+        "encoding/fixed_kv_direct_attention": 0.0,
+        "encoding/cuda_graph_captures": 0.0,
+        "encoding/cuda_graph_replays": 0.0,
+        "encoding/history_input_states": 512.0,
+        "encoding/history_unique_states": 33.0,
+        "encoding/raw_board_tokens": 154523.0,
+        "encoding/board_input_tokens": 10520.0,
+        "encoding/board_unique_tokens": 10520.0,
+        "encoding/board_encoder_tokens": 10520.0,
+        "encoding/within_batch_history_saved_fraction": 0.935546875,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9319195200714456,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "policy_backward_checkpoint_off_warmup",
+      "seconds": 0.4231599980000027,
+      "peak_allocated_gib": 4.608294486999512,
+      "peak_reserved_gib": 4.98046875,
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.14734965148322254,
+        "optimizer/learner_sequences": 33.0,
+        "optimizer/learner_samples": 512.0,
+        "optimizer/history_token_reuse_fraction": 0.9319195200714456,
+        "loss/policy_ppo": 0.1458743311231956,
+        "loss/policy_total": 0.10993163415696472,
+        "policy/approx_kl_old": 9.650830288254753e-07,
+        "policy/entropy": 3.5942699196748435,
+        "policy/clip_fraction": 0.0,
+        "policy/importance_ratio_mean": 1.000064074061811,
+        "policy/nonzero_advantage_fraction": 1.0
+      },
+      "encoding": {
+        "encoding/fixed_kv_enabled": 0.0,
+        "encoding/fixed_kv_slots": 0.0,
+        "encoding/fixed_kv_allocated_gib": 0.0,
+        "encoding/fixed_kv_direct_attention": 0.0,
+        "encoding/cuda_graph_captures": 0.0,
+        "encoding/cuda_graph_replays": 0.0,
+        "encoding/history_input_states": 512.0,
+        "encoding/history_unique_states": 33.0,
+        "encoding/raw_board_tokens": 154523.0,
+        "encoding/board_input_tokens": 10520.0,
+        "encoding/board_unique_tokens": 10520.0,
+        "encoding/board_encoder_tokens": 10520.0,
+        "encoding/within_batch_history_saved_fraction": 0.935546875,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9319195200714456,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    },
+    {
+      "phase": "policy_backward_checkpoint_off_unprofiled",
+      "seconds": 0.3421544970000028,
+      "peak_allocated_gib": 4.605465412139893,
+      "peak_reserved_gib": 4.98046875,
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.14734965148322254,
+        "optimizer/learner_sequences": 33.0,
+        "optimizer/learner_samples": 512.0,
+        "optimizer/history_token_reuse_fraction": 0.9319195200714456,
+        "loss/policy_ppo": 0.1458743311231956,
+        "loss/policy_total": 0.10993163415696472,
+        "policy/approx_kl_old": 9.650830288254753e-07,
+        "policy/entropy": 3.5942699196748435,
+        "policy/clip_fraction": 0.0,
+        "policy/importance_ratio_mean": 1.000064074061811,
+        "policy/nonzero_advantage_fraction": 1.0
+      },
+      "encoding": {
+        "encoding/fixed_kv_enabled": 0.0,
+        "encoding/fixed_kv_slots": 0.0,
+        "encoding/fixed_kv_allocated_gib": 0.0,
+        "encoding/fixed_kv_direct_attention": 0.0,
+        "encoding/cuda_graph_captures": 0.0,
+        "encoding/cuda_graph_replays": 0.0,
+        "encoding/history_input_states": 512.0,
+        "encoding/history_unique_states": 33.0,
+        "encoding/raw_board_tokens": 154523.0,
+        "encoding/board_input_tokens": 10520.0,
+        "encoding/board_unique_tokens": 10520.0,
+        "encoding/board_encoder_tokens": 10520.0,
+        "encoding/within_batch_history_saved_fraction": 0.935546875,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9319195200714456,
+        "encoding/board_cache_entries": 0.0,
+        "encoding/temporal_cache_entries": 0.0,
+        "encoding/paged_kv_enabled": 0.0,
+        "encoding/paged_kv_pages": 0.0,
+        "encoding/paged_kv_peak_pages": 0.0,
+        "encoding/paged_kv_capacity_pages": 0.0,
+        "encoding/paged_kv_allocated_gib": 0.0,
+        "encoding/temporal_cache_hits": 0.0,
+        "encoding/temporal_cold_states": 0.0,
+        "encoding/temporal_incremental_tokens": 0.0,
+        "encoding/temporal_incremental_batches": 0.0,
+        "encoding/temporal_incremental_batch_mean": 0.0,
+        "encoding/temporal_incremental_batch_max": 0.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0
+      }
+    }
+  ],
+  "critic_rollout_encoding": {
+    "encoding/fixed_kv_enabled": 1.0,
+    "encoding/fixed_kv_slots": 159.0,
+    "encoding/fixed_kv_allocated_gib": 4.8876953125,
+    "encoding/fixed_kv_direct_attention": 1.0,
+    "encoding/cuda_graph_captures": 2.0,
+    "encoding/cuda_graph_replays": 62.0,
+    "encoding/history_input_states": 2600.0,
+    "encoding/history_unique_states": 2600.0,
+    "encoding/raw_board_tokens": 745938.0,
+    "encoding/board_input_tokens": 51617.0,
+    "encoding/board_unique_tokens": 51617.0,
+    "encoding/board_encoder_tokens": 57624.0,
+    "encoding/within_batch_history_saved_fraction": 0.0,
+    "encoding/within_batch_dedup_saved_fraction": 0.0,
+    "encoding/cross_step_cache_hit_fraction": 0.0,
+    "encoding/board_encoder_saved_fraction": 0.9227496118980398,
+    "encoding/board_cache_entries": 0.0,
+    "encoding/temporal_cache_entries": 0.0,
+    "encoding/paged_kv_enabled": 0.0,
+    "encoding/paged_kv_pages": 0.0,
+    "encoding/paged_kv_peak_pages": 0.0,
+    "encoding/paged_kv_capacity_pages": 0.0,
+    "encoding/paged_kv_allocated_gib": 0.0,
+    "encoding/temporal_cache_hits": 2438.0,
+    "encoding/temporal_cold_states": 162.0,
+    "encoding/temporal_incremental_tokens": 9641.0,
+    "encoding/temporal_incremental_batches": 62.0,
+    "encoding/temporal_incremental_batch_mean": 39.32258064516129,
+    "encoding/temporal_incremental_batch_max": 40.0,
+    "encoding/paged_kv_padding_fraction": 0.0,
+    "encoding/temporal_attention_saved_fraction": 0.925544710661263
+  },
+  "rollout_torch_profile": {
+    "recognized_flops_lower_bound": 0,
+    "cuda_kernel_copy_events": 1666,
+    "cuda_event_service_seconds": 0.011661483000000054,
+    "cuda_event_union_seconds": 0.011661483000000054,
+    "top_cpu": [
+      {
+        "name": "cudaStreamSynchronize",
+        "calls": 11,
+        "self_cpu_ms": 11.976185,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "cudaGraphLaunch",
+        "calls": 2,
+        "self_cpu_ms": 0.8422539999999958,
+        "self_cuda_ms": 0.04086099999999897,
+        "recognized_flops": 0
+      },
+      {
+        "name": "cudaMemcpyAsync",
+        "calls": 24,
+        "self_cpu_ms": 0.5076159999999968,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "cudaLaunchKernel",
+        "calls": 87,
+        "self_cpu_ms": 0.4592040000000043,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "Activity Buffer Request",
+        "calls": 1,
+        "self_cpu_ms": 0.20547100000000004,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "cudaEventQuery",
+        "calls": 6,
+        "self_cpu_ms": 0.18802599999999609,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "cudaDeviceSynchronize",
+        "calls": 3,
+        "self_cpu_ms": 0.18611599999999914,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::addmm",
+        "calls": 6,
+        "self_cpu_ms": 0.18522199999999794,
+        "self_cuda_ms": 0.05057499999999345,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::copy_",
+        "calls": 45,
+        "self_cpu_ms": 0.17051599999997824,
+        "self_cuda_ms": 0.1382689999999941,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::fill_",
+        "calls": 8,
+        "self_cpu_ms": 0.14444000000000165,
+        "self_cuda_ms": 0.007060999999994238,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::empty_strided",
+        "calls": 40,
+        "self_cpu_ms": 0.10845999999999026,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::empty",
+        "calls": 31,
+        "self_cpu_ms": 0.10488000000000625,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::any",
+        "calls": 3,
+        "self_cpu_ms": 0.09683200000000215,
+        "self_cuda_ms": 0.00869000000000051,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::select",
+        "calls": 40,
+        "self_cpu_ms": 0.07317999999999847,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::_to_copy",
+        "calls": 38,
+        "self_cpu_ms": 0.06568400000003408,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::index_copy_",
+        "calls": 6,
+        "self_cpu_ms": 0.05748600000000624,
+        "self_cuda_ms": 0.022267000000005283,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::multinomial",
+        "calls": 2,
+        "self_cpu_ms": 0.05305099999999584,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::index",
+        "calls": 4,
+        "self_cpu_ms": 0.04446099999999933,
+        "self_cuda_ms": 0.01706199999999808,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::div",
+        "calls": 4,
+        "self_cpu_ms": 0.04397299999999996,
+        "self_cuda_ms": 0.011118000000000393,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::linear",
+        "calls": 12,
+        "self_cpu_ms": 0.0427130000000052,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::as_strided",
+        "calls": 127,
+        "self_cpu_ms": 0.03865699999999288,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::to",
+        "calls": 43,
+        "self_cpu_ms": 0.028578999999985172,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::slice",
+        "calls": 42,
+        "self_cpu_ms": 0.02800600000000827,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::item",
+        "calls": 40,
+        "self_cpu_ms": 0.027191000000028,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::zeros",
+        "calls": 6,
+        "self_cpu_ms": 0.020912000000000718,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      }
+    ],
+    "top_cuda": [
+      {
+        "name": "attend_kv",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 5.172574999999988,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+        "calls": 540,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 1.631109000000003,
+        "recognized_flops": 0
+      },
+      {
+        "name": "ampere_bf16_s16816gemm_bf16_64x64_ldg8_f2f_stages_64x5_tn",
+        "calls": 129,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.9581590000000201,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float const*, float const*, float const*, float*, float*, float*)",
+        "calls": 130,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.6074360000000393,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::CUDAFunctor_add<float>, std::array<char*, 3ul>, 4, TrivialOffsetCalculator<2, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<2>, at::native::memory::StoreWithCast<1> >(int, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul>, TrivialOffsetCalculator<2, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<2>, at::native::memory::StoreWithCast<1>)",
+        "calls": 130,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.5704390000000054,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x2_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x2_tn_align8::Params)",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.4143649999999993,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_64x1_tn_align8::Params)",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.36835799999997926,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_75_tensorop_bf16_s1688gemm_bf16_128x64_tn_align1>(cutlass_75_tensorop_bf16_s1688gemm_bf16_128x64_tn_align1::Params)",
+        "calls": 2,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.27989699999999995,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.232679000000001,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1})",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.20856400000001668,
+        "recognized_flops": 0
+      },
+      {
+        "name": "write_kv",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.2083349999999914,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "calls": 66,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.2052670000000171,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void cublasLt::splitKreduce_kernel<32, 16, int, __nv_bfloat16, __nv_bfloat16, float, __nv_bfloat16, false, __nv_bfloat16, __nv_bfloat16, __nv_bfloat16, true, false, false, false>(cublasLt::cublasSplitKParams<float>, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, __nv_bfloat16*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16 const*, __nv_bfloat16*, void*, long, float*, int*, float*, float*, float const*, float const*, float const*, float const*, float const*)",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.16501100000001087,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::copy_",
+        "calls": 45,
+        "self_cpu_ms": 0.17051599999997824,
+        "self_cuda_ms": 0.1382689999999941,
+        "recognized_flops": 0
+      },
+      {
+        "name": "Memcpy HtoD (Pinned -> Device)",
+        "calls": 5,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.06306599999999594,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::addmm",
+        "calls": 6,
+        "self_cpu_ms": 0.18522199999999794,
+        "self_cuda_ms": 0.05057499999999345,
+        "recognized_flops": 0
+      },
+      {
+        "name": "cudaGraphLaunch",
+        "calls": 2,
+        "self_cpu_ms": 0.8422539999999958,
+        "self_cuda_ms": 0.04086099999999897,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::vectorized_gather_kernel<16, long>(char*, char*, long*, int, long, long, long, long, bool)",
+        "calls": 14,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.03345200000000477,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_75_tensorop_bf16_s1688gemm_bf16_64x64_tn_align1>(cutlass_75_tensorop_bf16_s1688gemm_bf16_64x64_tn_align1::Params)",
+        "calls": 5,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.02904199999999855,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#4}::operator()() const::{lambda(long)#1} const&)::{lambda(int)#1})",
+        "calls": 10,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.02885000000000059,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1> >(int, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}, std::array<char*, 2ul>, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, at::native::memory::LoadWithCast<1>, at::native::memory::StoreWithCast<1>)",
+        "calls": 7,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.025271999999998344,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+        "calls": 2,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.023673999999993384,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::index_copy_",
+        "calls": 6,
+        "self_cpu_ms": 0.05748600000000624,
+        "self_cuda_ms": 0.022267000000005283,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::index_elementwise_kernel<128, 4, at::native::index_copy_kernel_impl<at::native::OpaqueType<4> >(at::TensorIterator&, long, long, long)::{lambda(int)#1}>(long, at::native::index_copy_kernel_impl<at::native::OpaqueType<4> >(at::TensorIterator&, long, long, long)::{lambda(int)#1})",
+        "calls": 6,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.022267000000005283,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul> >(int, at::native::bitwise_not_kernel_cuda(at::TensorIteratorBase&)::{lambda(bool)#1}, std::array<char*, 2ul>)",
+        "calls": 10,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.020540999999998803,
+        "recognized_flops": 0
+      }
+    ]
+  },
+  "rollout_python_profile": {
+    "top_self": [
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method torch.tensor>",
+        "calls": 7,
+        "primitive_calls": 7,
+        "self_seconds": 0.012200211,
+        "cumulative_seconds": 0.012200211
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1166,
+        "function": "observe",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.00975468,
+        "cumulative_seconds": 0.044287335000000004
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 913,
+        "function": "_known_piece_kind",
+        "calls": 20496,
+        "primitive_calls": 20496,
+        "self_seconds": 0.008984829,
+        "cumulative_seconds": 0.02118942
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/board.py",
+        "line": 678,
+        "function": "encode",
+        "calls": 15562,
+        "primitive_calls": 15562,
+        "self_seconds": 0.006093675000000001,
+        "cumulative_seconds": 0.011947373
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 862,
+        "function": "_casualty_bits",
+        "calls": 480,
+        "primitive_calls": 480,
+        "self_seconds": 0.004485553000000001,
+        "cumulative_seconds": 0.007339262
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'get' of 'dict' objects>",
+        "calls": 33585,
+        "primitive_calls": 33585,
+        "self_seconds": 0.004439281000000001,
+        "cumulative_seconds": 0.007183699000000001
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method builtins.hash>",
+        "calls": 53649,
+        "primitive_calls": 53649,
+        "self_seconds": 0.0035471640000000002,
+        "cumulative_seconds": 0.0035471640000000002
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/encoding.py",
+        "line": 70,
+        "function": "encode_visible_board",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.002852606,
+        "cumulative_seconds": 0.008823564
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 903,
+        "function": "_identity_visible_by_mode",
+        "calls": 20536,
+        "primitive_calls": 20536,
+        "self_seconds": 0.002706167,
+        "cumulative_seconds": 0.002706167
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'append' of 'list' objects>",
+        "calls": 35647,
+        "primitive_calls": 35647,
+        "self_seconds": 0.002492072,
+        "cumulative_seconds": 0.002492072
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 949,
+        "function": "_known_live_counts",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.0022403270000000003,
+        "cumulative_seconds": 0.012562425
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method _io.open>",
+        "calls": 1,
+        "primitive_calls": 1,
+        "self_seconds": 0.001914111,
+        "cumulative_seconds": 0.0019167070000000001
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method builtins.isinstance>",
+        "calls": 28826,
+        "primitive_calls": 28730,
+        "self_seconds": 0.0018954970000000001,
+        "cumulative_seconds": 0.0019484040000000002
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1299,
+        "function": "_railway_reachable_targets",
+        "calls": 461,
+        "primitive_calls": 461,
+        "self_seconds": 0.0018410310000000001,
+        "cumulative_seconds": 0.006418446
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/encoding.py",
+        "line": 41,
+        "function": "exact_piece_code",
+        "calls": 2771,
+        "primitive_calls": 2771,
+        "self_seconds": 0.0017382010000000002,
+        "cumulative_seconds": 0.004181584
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/board.py",
+        "line": 582,
+        "function": "_validate_code",
+        "calls": 8708,
+        "primitive_calls": 8708,
+        "self_seconds": 0.001649078,
+        "cumulative_seconds": 0.0026705640000000003
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1381,
+        "function": "_legal_actions_for",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.001579558,
+        "cumulative_seconds": 0.01223247
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method builtins.getattr>",
+        "calls": 16396,
+        "primitive_calls": 16396,
+        "self_seconds": 0.0013741830000000002,
+        "cumulative_seconds": 0.0013741830000000002
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method builtins.len>",
+        "calls": 18766,
+        "primitive_calls": 18766,
+        "self_seconds": 0.00133708,
+        "cumulative_seconds": 0.001386798
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/enum.py",
+        "line": 720,
+        "function": "__call__",
+        "calls": 6669,
+        "primitive_calls": 6669,
+        "self_seconds": 0.001218935,
+        "cumulative_seconds": 0.0018890450000000002
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1676,
+        "function": "step",
+        "calls": 40,
+        "primitive_calls": 40,
+        "self_seconds": 0.001170231,
+        "cumulative_seconds": 0.032125264
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/history_arrays.py",
+        "line": 35,
+        "function": "record_array",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.0011276790000000001,
+        "cumulative_seconds": 0.0037005280000000002
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/encoding.py",
+        "line": 147,
+        "function": "<genexpr>",
+        "calls": 12480,
+        "primitive_calls": 12480,
+        "self_seconds": 0.001053238,
+        "cumulative_seconds": 0.001053238
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/collections/__init__.py",
+        "line": 595,
+        "function": "__init__",
+        "calls": 1120,
+        "primitive_calls": 1120,
+        "self_seconds": 0.001009057,
+        "cumulative_seconds": 0.001115583
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/json/encoder.py",
+        "line": 334,
+        "function": "_iterencode_dict",
+        "calls": 6984,
+        "primitive_calls": 2522,
+        "self_seconds": 0.000999251,
+        "cumulative_seconds": 0.0015663900000000002
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/board.py",
+        "line": 622,
+        "function": "railway_directions",
+        "calls": 2711,
+        "primitive_calls": 2711,
+        "self_seconds": 0.000995178,
+        "cumulative_seconds": 0.002983274
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'extend' of 'list' objects>",
+        "calls": 564,
+        "primitive_calls": 564,
+        "self_seconds": 0.000859183,
+        "cumulative_seconds": 0.001912421
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/modes.py",
+        "line": 57,
+        "function": "normalize_mode",
+        "calls": 3576,
+        "primitive_calls": 3576,
+        "self_seconds": 0.0008520600000000001,
+        "cumulative_seconds": 0.0018701980000000002
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/cuda/graphs.py",
+        "line": 137,
+        "function": "replay",
+        "calls": 2,
+        "primitive_calls": 2,
+        "self_seconds": 0.000726326,
+        "cumulative_seconds": 0.0007912230000000001
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/enum.py",
+        "line": 1128,
+        "function": "__new__",
+        "calls": 6669,
+        "primitive_calls": 6669,
+        "self_seconds": 0.00067011,
+        "cumulative_seconds": 0.00067011
+      }
+    ],
+    "top_cumulative": [
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/encoding.py",
+        "line": 524,
+        "function": "append_after_step",
+        "calls": 40,
+        "primitive_calls": 40,
+        "self_seconds": 0.0006610370000000001,
+        "cumulative_seconds": 0.061585724
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1166,
+        "function": "observe",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.00975468,
+        "cumulative_seconds": 0.044287335000000004
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1676,
+        "function": "step",
+        "calls": 40,
+        "primitive_calls": 40,
+        "self_seconds": 0.001170231,
+        "cumulative_seconds": 0.032125264
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/autograd/grad_mode.py",
+        "line": 293,
+        "function": "__exit__",
+        "calls": 2,
+        "primitive_calls": 2,
+        "self_seconds": 4.1432000000000006e-05,
+        "cumulative_seconds": 0.021723145000000003
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 913,
+        "function": "_known_piece_kind",
+        "calls": 20496,
+        "primitive_calls": 20496,
+        "self_seconds": 0.008984829,
+        "cumulative_seconds": 0.02118942
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/encoding.py",
+        "line": 386,
+        "function": "append_post_action",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.000207266,
+        "cumulative_seconds": 0.016637352
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 1308,
+        "function": "encode",
+        "calls": 3,
+        "primitive_calls": 3,
+        "self_seconds": 3.6941000000000004e-05,
+        "cumulative_seconds": 0.014767571
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/fixed_kv.py",
+        "line": 171,
+        "function": "encode",
+        "calls": 3,
+        "primitive_calls": 3,
+        "self_seconds": 0.000183406,
+        "cumulative_seconds": 0.014721346000000001
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1712,
+        "function": "<genexpr>",
+        "calls": 200,
+        "primitive_calls": 200,
+        "self_seconds": 5.6514e-05,
+        "cumulative_seconds": 0.012618939000000001
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 949,
+        "function": "_known_live_counts",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.0022403270000000003,
+        "cumulative_seconds": 0.012562425
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1644,
+        "function": "_resolve_current_turn",
+        "calls": 40,
+        "primitive_calls": 40,
+        "self_seconds": 0.000104426,
+        "cumulative_seconds": 0.01251201
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1381,
+        "function": "_legal_actions_for",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.001579558,
+        "cumulative_seconds": 0.01223247
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method torch.tensor>",
+        "calls": 7,
+        "primitive_calls": 7,
+        "self_seconds": 0.012200211,
+        "cumulative_seconds": 0.012200211
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/encoding.py",
+        "line": 233,
+        "function": "_record_from_observation",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.000390266,
+        "cumulative_seconds": 0.012142606
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/board.py",
+        "line": 678,
+        "function": "encode",
+        "calls": 15562,
+        "primitive_calls": 15562,
+        "self_seconds": 0.006093675000000001,
+        "cumulative_seconds": 0.011947373
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/rollout.py",
+        "line": 155,
+        "function": "sample",
+        "calls": 1,
+        "primitive_calls": 1,
+        "self_seconds": 3.096e-06,
+        "cumulative_seconds": 0.010334025
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/utils/_contextlib.py",
+        "line": 120,
+        "function": "decorate_context",
+        "calls": 1,
+        "primitive_calls": 1,
+        "self_seconds": 6.1806e-05,
+        "cumulative_seconds": 0.010305970000000001
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 1842,
+        "function": "sample_action_groups",
+        "calls": 1,
+        "primitive_calls": 1,
+        "self_seconds": 0.000320481,
+        "cumulative_seconds": 0.009659114
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/encoding.py",
+        "line": 70,
+        "function": "encode_visible_board",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.002852606,
+        "cumulative_seconds": 0.008823564
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/modules/module.py",
+        "line": 1783,
+        "function": "_call_impl",
+        "calls": 12,
+        "primitive_calls": 4,
+        "self_seconds": 3.1249000000000005e-05,
+        "cumulative_seconds": 0.008221433
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 1990,
+        "function": "forward",
+        "calls": 2,
+        "primitive_calls": 2,
+        "self_seconds": 1.128e-05,
+        "cumulative_seconds": 0.007860516
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1276,
+        "function": "<genexpr>",
+        "calls": 640,
+        "primitive_calls": 640,
+        "self_seconds": 0.000240797,
+        "cumulative_seconds": 0.007580059
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 862,
+        "function": "_casualty_bits",
+        "calls": 480,
+        "primitive_calls": 480,
+        "self_seconds": 0.004485553000000001,
+        "cumulative_seconds": 0.007339262
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'get' of 'dict' objects>",
+        "calls": 33585,
+        "primitive_calls": 33585,
+        "self_seconds": 0.004439281000000001,
+        "cumulative_seconds": 0.007183699000000001
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1350,
+        "function": "_geometric_targets",
+        "calls": 452,
+        "primitive_calls": 452,
+        "self_seconds": 0.00041590800000000004,
+        "cumulative_seconds": 0.0067466
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/game.py",
+        "line": 1299,
+        "function": "_railway_reachable_targets",
+        "calls": 461,
+        "primitive_calls": 461,
+        "self_seconds": 0.0018410310000000001,
+        "cumulative_seconds": 0.006418446
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/tools/profile_compact_ppo_bottlenecks.py",
+        "line": 103,
+        "function": "persist",
+        "calls": 1,
+        "primitive_calls": 1,
+        "self_seconds": 6.688e-06,
+        "cumulative_seconds": 0.004561639
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/encoding.py",
+        "line": 41,
+        "function": "exact_piece_code",
+        "calls": 2771,
+        "primitive_calls": 2771,
+        "self_seconds": 0.0017382010000000002,
+        "cumulative_seconds": 0.004181584
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/history_arrays.py",
+        "line": 165,
+        "function": "append",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.000356925,
+        "cumulative_seconds": 0.004107869
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/history_arrays.py",
+        "line": 35,
+        "function": "record_array",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.0011276790000000001,
+        "cumulative_seconds": 0.0037005280000000002
+      }
+    ]
+  },
+  "learner_batch": {
+    "samples": 512,
+    "history_mean": 301.802734375,
+    "history_min": 1,
+    "history_max": 650
+  },
+  "policy_blocks_including_recompute": {
+    "board": {
+      "calls": 84,
+      "batch_tokens": 10520,
+      "estimated_forward_flops": 48500398080
+    },
+    "temporal": {
+      "calls": 320,
+      "batch_tokens": 789632,
+      "estimated_forward_flops": 2008053186560
+    }
+  },
+  "critic_blocks_including_recompute": {
+    "board": {
+      "calls": 84,
+      "batch_tokens": 10520,
+      "estimated_forward_flops": 48500398080
+    },
+    "temporal": {
+      "calls": 320,
+      "batch_tokens": 789632,
+      "estimated_forward_flops": 2008053186560
+    }
+  },
+  "learner_profile_samples": 128,
+  "learner_torch_profile": {
+    "recognized_flops_lower_bound": 1121724447245,
+    "cuda_kernel_copy_events": 5167,
+    "cuda_event_service_seconds": 0.0481339409999994,
+    "cuda_event_union_seconds": 0.0481339409999994,
+    "top_cpu": [
+      {
+        "name": "cudaLaunchKernel",
+        "calls": 4344,
+        "self_cpu_ms": 16.586299999999483,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "MaskedFillBackward0",
+        "calls": 35,
+        "self_cpu_ms": 14.960597000000009,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::mm",
+        "calls": 479,
+        "self_cpu_ms": 9.455295000000097,
+        "self_cuda_ms": 8.686611999999826,
+        "recognized_flops": 1073970865920
+      },
+      {
+        "name": "aten::copy_",
+        "calls": 1979,
+        "self_cpu_ms": 6.572836000000434,
+        "self_cuda_ms": 12.903142999999524,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::empty",
+        "calls": 2323,
+        "self_cpu_ms": 5.85249099999986,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::native_layer_norm",
+        "calls": 129,
+        "self_cpu_ms": 5.247138000000181,
+        "self_cuda_ms": 1.0190249999999978,
+        "recognized_flops": 0
+      },
+      {
+        "name": "cudaStreamSynchronize",
+        "calls": 35,
+        "self_cpu_ms": 4.965363999999983,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::empty_strided",
+        "calls": 1014,
+        "self_cpu_ms": 3.3829629999996405,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::_to_copy",
+        "calls": 1013,
+        "self_cpu_ms": 3.3418890000000636,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::transpose",
+        "calls": 1968,
+        "self_cpu_ms": 3.3326540000001468,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::addmm",
+        "calls": 91,
+        "self_cpu_ms": 2.9949560000000472,
+        "self_cuda_ms": 3.3556950000000723,
+        "recognized_flops": 47059468032
+      },
+      {
+        "name": "cudaMemcpyAsync",
+        "calls": 337,
+        "self_cpu_ms": 2.7196309999999513,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::_scaled_dot_product_efficient_attention",
+        "calls": 64,
+        "self_cpu_ms": 2.2646200000002317,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::add",
+        "calls": 246,
+        "self_cpu_ms": 1.9698169999999673,
+        "self_cuda_ms": 4.473786000000056,
+        "recognized_flops": 159281660
+      },
+      {
+        "name": "aten::clone",
+        "calls": 782,
+        "self_cpu_ms": 1.95361800000004,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::linear",
+        "calls": 566,
+        "self_cpu_ms": 1.9331460000003309,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::as_strided",
+        "calls": 3785,
+        "self_cpu_ms": 1.9152570000001732,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::masked_fill",
+        "calls": 234,
+        "self_cpu_ms": 1.8087730000001006,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::view",
+        "calls": 1533,
+        "self_cpu_ms": 1.7822000000001395,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "MmBackward0",
+        "calls": 96,
+        "self_cpu_ms": 1.7513959999999207,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::mul",
+        "calls": 170,
+        "self_cpu_ms": 1.6534279999997274,
+        "self_cuda_ms": 1.8299459999999186,
+        "recognized_flops": 534831633
+      },
+      {
+        "name": "aten::reshape",
+        "calls": 754,
+        "self_cpu_ms": 1.5326580000003382,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::t",
+        "calls": 880,
+        "self_cpu_ms": 1.461060999999715,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::matmul",
+        "calls": 192,
+        "self_cpu_ms": 1.2960809999999947,
+        "self_cuda_ms": 0.0,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::fill_",
+        "calls": 304,
+        "self_cpu_ms": 1.1954999999996678,
+        "self_cuda_ms": 1.6759699999999935,
+        "recognized_flops": 0
+      }
+    ],
+    "top_cuda": [
+      {
+        "name": "aten::copy_",
+        "calls": 1979,
+        "self_cpu_ms": 6.572836000000434,
+        "self_cuda_ms": 12.903142999999524,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::mm",
+        "calls": 479,
+        "self_cpu_ms": 9.455295000000097,
+        "self_cuda_ms": 8.686611999999826,
+        "recognized_flops": 1073970865920
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+        "calls": 680,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 5.7321210000001,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#12}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "calls": 545,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 5.4199939999995985,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::_efficient_attention_backward",
+        "calls": 32,
+        "self_cpu_ms": 0.587831000000413,
+        "self_cuda_ms": 4.496583999999988,
+        "recognized_flops": 0
+      },
+      {
+        "name": "fmha_cutlassB_bf16_aligned_64x64_k32_sm80(PyTorchMemEffAttention::AttentionBackwardKernel<cutlass::arch::Sm80, cutlass::bfloat16_t, true, false, true, 64, 64, 32, false>::Params)",
+        "calls": 32,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 4.496583999999988,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::add",
+        "calls": 246,
+        "self_cpu_ms": 1.9698169999999673,
+        "self_cuda_ms": 4.473786000000056,
+        "recognized_flops": 159281660
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<float> const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<float> >(at::TensorIteratorBase&, at::native::CUDAFunctor_add<float> const&)::{lambda(int)#1})",
+        "calls": 65,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 3.4603560000000106,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::addmm",
+        "calls": 91,
+        "self_cpu_ms": 2.9949560000000472,
+        "self_cuda_ms": 3.3556950000000723,
+        "recognized_flops": 47059468032
+      },
+      {
+        "name": "void cutlass::Kernel2<cutlass_75_tensorop_bf16_s1688gemm_bf16_128x64_tn_align1>(cutlass_75_tensorop_bf16_s1688gemm_bf16_128x64_tn_align1::Params)",
+        "calls": 21,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 2.8667599999999966,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::_efficient_attention_forward",
+        "calls": 64,
+        "self_cpu_ms": 0.6473780000000151,
+        "self_cuda_ms": 2.7792040000000418,
+        "recognized_flops": 0
+      },
+      {
+        "name": "fmha_cutlassF_bf16_aligned_64x64_rf_sm80(PyTorchMemEffAttention::AttentionKernel<cutlass::bfloat16_t, cutlass::arch::Sm80, true, 64, 64, 64, true, true>::Params)",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 2.7792040000000418,
+        "recognized_flops": 0
+      },
+      {
+        "name": "ampere_bf16_s1688gemm_bf16_128x128_ldg8_f2f_stages_32x1_tn",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 2.0044560000000566,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::mul",
+        "calls": 170,
+        "self_cpu_ms": 1.6534279999997274,
+        "self_cuda_ms": 1.8299459999999186,
+        "recognized_flops": 534831633
+      },
+      {
+        "name": "aten::fill_",
+        "calls": 304,
+        "self_cpu_ms": 1.1954999999996678,
+        "self_cuda_ms": 1.6759699999999935,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1})",
+        "calls": 96,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 1.5553869999999297,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::native_layer_norm_backward",
+        "calls": 65,
+        "self_cpu_ms": 0.6854919999998383,
+        "self_cuda_ms": 1.445547000000035,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul> >(int, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1ul>)",
+        "calls": 162,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 1.3725599999999176,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::silu",
+        "calls": 66,
+        "self_cpu_ms": 0.8849569999999986,
+        "self_cuda_ms": 1.337207999999886,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1}>(at::TensorIteratorBase&, at::native::(anonymous namespace)::silu_kernel(at::TensorIteratorBase&)::{lambda()#1}::operator()() const::{lambda()#6}::operator()() const::{lambda(c10::BFloat16)#1} const&)::{lambda(int)#1})",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 1.3344689999998844,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::add_",
+        "calls": 239,
+        "self_cpu_ms": 1.1383379999999634,
+        "self_cuda_ms": 1.107269000000091,
+        "recognized_flops": 0
+      },
+      {
+        "name": "ampere_bf16_s16816gemm_bf16_128x64_ldg8_f2f_stages_32x6_tn",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 1.0194340000000266,
+        "recognized_flops": 0
+      },
+      {
+        "name": "aten::native_layer_norm",
+        "calls": 129,
+        "self_cpu_ms": 5.247138000000181,
+        "self_cuda_ms": 1.0190249999999978,
+        "recognized_flops": 0
+      },
+      {
+        "name": "void at::native::(anonymous namespace)::vectorized_layer_norm_kernel<float, float, false>(int, float, float const*, float const*, float const*, float*, float*, float*)",
+        "calls": 129,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 1.0190249999999978,
+        "recognized_flops": 0
+      },
+      {
+        "name": "ampere_bf16_s1688gemm_bf16_128x64_sliced1x2_ldg8_f2f_tn",
+        "calls": 64,
+        "self_cpu_ms": 0.0,
+        "self_cuda_ms": 0.982763999999861,
+        "recognized_flops": 0
+      }
+    ]
+  },
+  "learner_python_profile": {
+    "top_self": [
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'run_backward' of 'torch._C._EngineBase' objects>",
+        "calls": 5,
+        "primitive_calls": 5,
+        "self_seconds": 0.18768789100000002,
+        "cumulative_seconds": 0.399068552
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method torch._C._nn.linear>",
+        "calls": 1389,
+        "primitive_calls": 1389,
+        "self_seconds": 0.079314412,
+        "cumulative_seconds": 0.09342872
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method torch.tensor>",
+        "calls": 104,
+        "primitive_calls": 104,
+        "self_seconds": 0.050268128,
+        "cumulative_seconds": 0.050268128
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method torch._C._nn.scaled_dot_product_attention>",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.023745203000000003,
+        "cumulative_seconds": 0.036951573
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'masked_fill' of 'torch._C.TensorBase' objects>",
+        "calls": 917,
+        "primitive_calls": 917,
+        "self_seconds": 0.022205434000000003,
+        "cumulative_seconds": 0.024369172
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 249,
+        "function": "forward",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.021113343,
+        "cumulative_seconds": 0.30081573300000003
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method torch.layer_norm>",
+        "calls": 645,
+        "primitive_calls": 645,
+        "self_seconds": 0.018530773,
+        "cumulative_seconds": 0.034950403000000005
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/utils/checkpoint.py",
+        "line": 1154,
+        "function": "unpack_hook",
+        "calls": 4800,
+        "primitive_calls": 4800,
+        "self_seconds": 0.016285413000000002,
+        "cumulative_seconds": 0.21138066100000003
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/utils/checkpoint.py",
+        "line": 1144,
+        "function": "pack_hook",
+        "calls": 4800,
+        "primitive_calls": 4800,
+        "self_seconds": 0.011663733,
+        "cumulative_seconds": 0.033175121
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/utils/checkpoint.py",
+        "line": 1083,
+        "function": "pack_hook",
+        "calls": 4800,
+        "primitive_calls": 4800,
+        "self_seconds": 0.010423441,
+        "cumulative_seconds": 0.016879124000000002
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/functional.py",
+        "line": 6244,
+        "function": "multi_head_attention_forward",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.009911595,
+        "cumulative_seconds": 0.134126158
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 382,
+        "function": "encode_vector",
+        "calls": 84,
+        "primitive_calls": 84,
+        "self_seconds": 0.009496433,
+        "cumulative_seconds": 0.019625203
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 1323,
+        "function": "_encode_full",
+        "calls": 5,
+        "primitive_calls": 5,
+        "self_seconds": 0.008236525,
+        "cumulative_seconds": 0.289892645
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method torch.zeros>",
+        "calls": 434,
+        "primitive_calls": 434,
+        "self_seconds": 0.007785056,
+        "cumulative_seconds": 0.007785056
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/modules/module.py",
+        "line": 1783,
+        "function": "_call_impl",
+        "calls": 3458,
+        "primitive_calls": 165,
+        "self_seconds": 0.0073254570000000005,
+        "cumulative_seconds": 0.45008403500000005
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'contiguous' of 'torch._C.TensorBase' objects>",
+        "calls": 640,
+        "primitive_calls": 640,
+        "self_seconds": 0.007092372,
+        "cumulative_seconds": 0.007092372
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/utils/checkpoint.py",
+        "line": 858,
+        "function": "check_recomputed_tensors_match",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.006340279000000001,
+        "cumulative_seconds": 0.010335225
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 224,
+        "function": "forward",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.005759152,
+        "cumulative_seconds": 0.059302685
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'index_select' of 'torch._C.TensorBase' objects>",
+        "calls": 356,
+        "primitive_calls": 356,
+        "self_seconds": 0.0054789370000000006,
+        "cumulative_seconds": 0.0054789370000000006
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'view' of 'torch._C.TensorBase' objects>",
+        "calls": 3220,
+        "primitive_calls": 3220,
+        "self_seconds": 0.005347458,
+        "cumulative_seconds": 0.005347458
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method torch._C._nn.silu>",
+        "calls": 330,
+        "primitive_calls": 330,
+        "self_seconds": 0.004922419,
+        "cumulative_seconds": 0.006535050000000001
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/modules/activation.py",
+        "line": 1255,
+        "function": "forward",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.004726368,
+        "cumulative_seconds": 0.14387960400000002
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'transpose' of 'torch._C.TensorBase' objects>",
+        "calls": 1920,
+        "primitive_calls": 1920,
+        "self_seconds": 0.0046568220000000006,
+        "cumulative_seconds": 0.0046568220000000006
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/modules/module.py",
+        "line": 1775,
+        "function": "_wrapped_call_impl",
+        "calls": 3458,
+        "primitive_calls": 165,
+        "self_seconds": 0.004299029,
+        "cumulative_seconds": 0.45045826400000005
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/ppo.py",
+        "line": 244,
+        "function": "policy_ppo_loss",
+        "calls": 5,
+        "primitive_calls": 5,
+        "self_seconds": 0.004228237,
+        "cumulative_seconds": 0.30690183800000004
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'get_state' of 'torch._C.Generator' objects>",
+        "calls": 640,
+        "primitive_calls": 640,
+        "self_seconds": 0.004182585,
+        "cumulative_seconds": 0.004182585
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/functional.py",
+        "line": 5798,
+        "function": "_in_projection_packed",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.004008275,
+        "cumulative_seconds": 0.046235752000000005
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/utils/checkpoint.py",
+        "line": 1063,
+        "function": "_default_meta_extractor",
+        "calls": 9600,
+        "primitive_calls": 9600,
+        "self_seconds": 0.0039925640000000005,
+        "cumulative_seconds": 0.0039925640000000005
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'reshape' of 'torch._C.TensorBase' objects>",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.0038054380000000004,
+        "cumulative_seconds": 0.0038054380000000004
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'append' of 'list' objects>",
+        "calls": 44983,
+        "primitive_calls": 44983,
+        "self_seconds": 0.0036180300000000004,
+        "cumulative_seconds": 0.0036180300000000004
+      }
+    ],
+    "top_cumulative": [
+      {
+        "file": "/mnt/e/agent/siguozero/tools/profile_compact_ppo_bottlenecks.py",
+        "line": 106,
+        "function": "measure",
+        "calls": 1,
+        "primitive_calls": 1,
+        "self_seconds": 3.7373e-05,
+        "cumulative_seconds": 0.723392883
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/tools/profile_compact_ppo_bottlenecks.py",
+        "line": 190,
+        "function": "<lambda>",
+        "calls": 1,
+        "primitive_calls": 1,
+        "self_seconds": 0.000744561,
+        "cumulative_seconds": 0.71344748
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/trainer.py",
+        "line": 677,
+        "function": "_backward_policy_epoch",
+        "calls": 1,
+        "primitive_calls": 1,
+        "self_seconds": 0.002215191,
+        "cumulative_seconds": 0.712702919
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/modules/module.py",
+        "line": 1775,
+        "function": "_wrapped_call_impl",
+        "calls": 3458,
+        "primitive_calls": 165,
+        "self_seconds": 0.004299029,
+        "cumulative_seconds": 0.45045826400000005
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/modules/module.py",
+        "line": 1783,
+        "function": "_call_impl",
+        "calls": 3458,
+        "primitive_calls": 165,
+        "self_seconds": 0.0073254570000000005,
+        "cumulative_seconds": 0.45008403500000005
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/_tensor.py",
+        "line": 576,
+        "function": "backward",
+        "calls": 5,
+        "primitive_calls": 5,
+        "self_seconds": 4.2271e-05,
+        "cumulative_seconds": 0.39952862
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/autograd/__init__.py",
+        "line": 253,
+        "function": "backward",
+        "calls": 5,
+        "primitive_calls": 5,
+        "self_seconds": 9.4832e-05,
+        "cumulative_seconds": 0.39948534900000005
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/autograd/graph.py",
+        "line": 860,
+        "function": "_engine_run_backward",
+        "calls": 5,
+        "primitive_calls": 5,
+        "self_seconds": 3.3277e-05,
+        "cumulative_seconds": 0.399108222
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<method 'run_backward' of 'torch._C._EngineBase' objects>",
+        "calls": 5,
+        "primitive_calls": 5,
+        "self_seconds": 0.18768789100000002,
+        "cumulative_seconds": 0.399068552
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/_compile.py",
+        "line": 42,
+        "function": "inner",
+        "calls": 321,
+        "primitive_calls": 321,
+        "self_seconds": 0.000430191,
+        "cumulative_seconds": 0.362247207
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py",
+        "line": 1240,
+        "function": "_fn",
+        "calls": 321,
+        "primitive_calls": 321,
+        "self_seconds": 0.001704358,
+        "cumulative_seconds": 0.36171437100000003
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/ppo.py",
+        "line": 244,
+        "function": "policy_ppo_loss",
+        "calls": 5,
+        "primitive_calls": 5,
+        "self_seconds": 0.004228237,
+        "cumulative_seconds": 0.30690183800000004
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 1553,
+        "function": "<lambda>",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.00052981,
+        "cumulative_seconds": 0.30374671000000003
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 1638,
+        "function": "forward",
+        "calls": 5,
+        "primitive_calls": 5,
+        "self_seconds": 3.4975e-05,
+        "cumulative_seconds": 0.30099841
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 1772,
+        "function": "ppo_statistics",
+        "calls": 5,
+        "primitive_calls": 5,
+        "self_seconds": 0.001589532,
+        "cumulative_seconds": 0.300963435
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 249,
+        "function": "forward",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.021113343,
+        "cumulative_seconds": 0.30081573300000003
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 1323,
+        "function": "_encode_full",
+        "calls": 5,
+        "primitive_calls": 5,
+        "self_seconds": 0.008236525,
+        "cumulative_seconds": 0.289892645
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/utils/checkpoint.py",
+        "line": 1154,
+        "function": "unpack_hook",
+        "calls": 4800,
+        "primitive_calls": 4800,
+        "self_seconds": 0.016285413000000002,
+        "cumulative_seconds": 0.21138066100000003
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/utils/checkpoint.py",
+        "line": 348,
+        "function": "checkpoint",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.000614671,
+        "cumulative_seconds": 0.18521288500000002
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/utils/checkpoint.py",
+        "line": 1137,
+        "function": "_run_fn_with_dynamo_disabled",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.000163578,
+        "cumulative_seconds": 0.173374352
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/utils/checkpoint.py",
+        "line": 1588,
+        "function": "recompute_fn",
+        "calls": 160,
+        "primitive_calls": 160,
+        "self_seconds": 0.002570525,
+        "cumulative_seconds": 0.173210774
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/modules/activation.py",
+        "line": 1255,
+        "function": "forward",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.004726368,
+        "cumulative_seconds": 0.14387960400000002
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/functional.py",
+        "line": 6244,
+        "function": "multi_head_attention_forward",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.009911595,
+        "cumulative_seconds": 0.134126158
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method torch._C._nn.linear>",
+        "calls": 1389,
+        "primitive_calls": 1389,
+        "self_seconds": 0.079314412,
+        "cumulative_seconds": 0.09342872
+      },
+      {
+        "file": "/mnt/e/agent/siguozero/src/junqi/training/models.py",
+        "line": 224,
+        "function": "forward",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.005759152,
+        "cumulative_seconds": 0.059302685
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method torch.tensor>",
+        "calls": 104,
+        "primitive_calls": 104,
+        "self_seconds": 0.050268128,
+        "cumulative_seconds": 0.050268128
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/functional.py",
+        "line": 5798,
+        "function": "_in_projection_packed",
+        "calls": 320,
+        "primitive_calls": 320,
+        "self_seconds": 0.004008275,
+        "cumulative_seconds": 0.046235752000000005
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/modules/linear.py",
+        "line": 130,
+        "function": "forward",
+        "calls": 749,
+        "primitive_calls": 749,
+        "self_seconds": 0.000607347,
+        "cumulative_seconds": 0.042252034
+      },
+      {
+        "file": "/root/anaconda3/envs/siguozero/lib/python3.12/site-packages/torch/nn/modules/normalization.py",
+        "line": 228,
+        "function": "forward",
+        "calls": 645,
+        "primitive_calls": 645,
+        "self_seconds": 0.0008245850000000001,
+        "cumulative_seconds": 0.03788637
+      },
+      {
+        "file": "~",
+        "line": 0,
+        "function": "<built-in method builtins.next>",
+        "calls": 1114,
+        "primitive_calls": 634,
+        "self_seconds": 0.000585461,
+        "cumulative_seconds": 0.037748479
+      }
+    ]
+  },
+  "source_checkpoint_stat_unchanged": true,
+  "complete": true
+}

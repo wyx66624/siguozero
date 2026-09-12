@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
-from ..game import CombatOutcome, JunqiGame, Observation, ObservedEvent
+import numpy as np
+
+from ..game import JunqiGame, Observation, ObservedEvent
 from ..pieces import PieceType
 from .modes import TrainingMode, mode_spec, normalize_mode
 
@@ -14,9 +16,9 @@ MAX_BOARD_POINTS = 129
 EXACT_PIECE_CODE_STRIDE = 32
 BOARD_PAD_CODE = 138
 BOARD_CODE_VOCAB_SIZE = 139
-ACTION_POINT_PAD = 129
 ACTION_PLAYER_PAD = 4
-ACTION_COMBAT_PAD = 4
+ACTION_FEATURE_DIM = 5
+ACTION_ENCODER_TYPE = "coordinates_player_linear"
 CASUALTY_SLOTS_PER_PLAYER = 25
 MAX_CASUALTY_BITS = 75
 
@@ -64,14 +66,6 @@ def exact_piece_code(
             raise ValueError("four-player relative owner must be in 0..3")
         block = relative_owner
     return base + EXACT_PIECE_CODE_STRIDE * block
-
-COMBAT_INDICES: dict[CombatOutcome, int] = {
-    CombatOutcome.MOVE: 0,
-    CombatOutcome.ATTACKER_WINS: 1,
-    CombatOutcome.DEFENDER_WINS: 2,
-    CombatOutcome.BOTH_REMOVED: 3,
-}
-
 
 def encode_visible_board(observation: Observation) -> tuple[int, ...]:
     """Encode exactly what ``observation.viewer`` may see, never referee state."""
@@ -156,44 +150,54 @@ def encode_known_casualties(observation: Observation) -> tuple[int, ...]:
 
 @dataclass(frozen=True, slots=True)
 class ActionFeatures:
+    """Only the public endpoints and relative actor; no event outcome fields."""
+
     source: int
     destination: int
     actor: int
-    combat: int
-    was_attack: int
-    flag_captured_owner: int
-    newly_revealed_count: int
-    eliminated_count: int
 
     @classmethod
     def from_event(cls, event: ObservedEvent) -> ActionFeatures:
         source, destination = event.action
-        return cls(
-            source=source,
-            destination=destination,
-            actor=event.actor,
-            combat=COMBAT_INDICES[event.combat],
-            was_attack=int(event.was_attack),
-            flag_captured_owner=(
-                ACTION_PLAYER_PAD
-                if event.flag_captured_owner is None
-                else event.flag_captured_owner
-            ),
-            newly_revealed_count=min(len(event.newly_revealed_flags), 4),
-            eliminated_count=min(len(event.eliminated_players), 4),
-        )
+        return cls(source=source, destination=destination, actor=event.actor)
 
     def as_tuple(self) -> tuple[int, ...]:
-        return (
-            self.source,
-            self.destination,
-            self.actor,
-            self.combat,
-            self.was_attack,
-            self.flag_captured_owner,
-            self.newly_revealed_count,
-            self.eliminated_count,
-        )
+        """Compact replay representation; point IDs retain the existing rules."""
+        return (self.source, self.destination, self.actor)
+
+    def as_vector(self, mode: TrainingMode | str) -> tuple[float, ...]:
+        """Five numeric inputs: source x/y, destination x/y, relative actor."""
+        spec = mode_spec(mode)
+        if (isinstance(self.actor, bool) or not isinstance(self.actor, int)
+                or not 0 <= self.actor < spec.player_count):
+            raise ValueError("action actor does not belong to its training mode")
+        source = action_point_coordinates(self.source, spec.mode)
+        destination = action_point_coordinates(self.destination, spec.mode)
+        return (*map(float, source), *map(float, destination), float(self.actor))
+
+
+def action_point_coordinates(code: int, mode: TrainingMode | str) -> tuple[int, int]:
+    """Convert an existing viewer-relative point ID to unique board-wide x/y.
+
+    +x is right and +y is away from the viewer. Four-player arm fronts lie
+    three units from the origin, with the central nine at {-2, 0, 2} squared.
+    Two-player fronts lie at y=-1/+1. Coordinates are raw integers, with no
+    learned lookup or normalization. Local row/column alone would alias arms.
+    """
+    spec = mode_spec(mode)
+    if (isinstance(code, bool) or not isinstance(code, int)
+            or not 0 <= code < spec.point_count):
+        raise ValueError("action point does not belong to its training mode")
+    if code >= 120:
+        row, column = divmod(code - 120, 3)
+        return (2 * (column - 1), 2 * (row - 1))
+    arm, offset = divmod(code, 30)
+    row, column = divmod(offset, 5)
+    x = column - 2
+    y = -(row + (1 if spec.mode is TrainingMode.TWO_PLAYER else 3))
+    if spec.mode is TrainingMode.TWO_PLAYER:
+        return (x, y) if arm == 0 else (-x, -y)
+    return ((x, y), (y, -x), (-x, -y), (-y, x))[arm]
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,12 +256,26 @@ def _record_from_observation(
 @dataclass(frozen=True, slots=True)
 class PolicyState:
     mode: TrainingMode
-    records: tuple[StateTokenRecord, ...]
+    records: Sequence[StateTokenRecord]
     legal_actions: tuple[tuple[int, int], ...]
+    _legal_array: np.ndarray | None = field(default=None, init=False, repr=False, compare=False, hash=False)
 
     @property
     def current_board(self) -> tuple[int, ...]:
         return self.records[-1].board_codes
+
+    @property
+    def legal_array(self) -> np.ndarray:
+        if self._legal_array is None:
+            array = np.asarray(self.legal_actions, dtype=np.int64).reshape(-1, 2)
+            array.setflags(write=False)
+            object.__setattr__(self, "_legal_array", array)
+        return self._legal_array
+
+
+def policy_history_key(state: PolicyState) -> object:
+    """PPO arrays use immutable instance/seat/window indices, never content hashes."""
+    return state.mode, getattr(state.records, "cache_key", state.records)
 
 
 def history_prefix_groups(states: Sequence[PolicyState]) -> list[list[int]]:
@@ -268,6 +286,19 @@ def history_prefix_groups(states: Sequence[PolicyState]) -> list[list[int]]:
     also checks actions, public counters and casualties, not just board codes.
     """
     groups: list[list[int]] = []
+    if all(hasattr(state.records, "cache_key") for state in states):
+        windows: dict[object, int] = {}
+        for index in sorted(range(len(states)), key=lambda i: len(states[i].records), reverse=True):
+            state = states[index]
+            identity, start, _length = state.records.cache_key
+            key = state.mode, identity, start
+            group = windows.get(key)
+            if group is None:
+                windows[key] = len(groups)
+                groups.append([index])
+            else:
+                groups[group].append(index)
+        return groups
     roots: dict[object, list[int]] = {}
     windows: dict[object, list[int]] = {}
     for index in sorted(range(len(states)), key=lambda i: len(states[i].records), reverse=True):
@@ -301,6 +332,7 @@ class PlayerHistory:
         "_initial",
         "_transition_tail",
         "_records_cache",
+        "_array_history",
     )
 
     def __init__(
@@ -320,6 +352,7 @@ class PlayerHistory:
         self._initial = initial
         self._transition_tail: _HistoryNode | None = None
         self._records_cache: tuple[StateTokenRecord, ...] | None = (initial,)
+        self._array_history = None
 
     @classmethod
     def from_initial_observation(
@@ -336,7 +369,9 @@ class PlayerHistory:
         )
 
     @property
-    def records(self) -> tuple[StateTokenRecord, ...]:
+    def records(self) -> Sequence[StateTokenRecord]:
+        if self._array_history is not None:
+            return self._array_history.view()
         if self._records_cache is not None:
             return self._records_cache
         recent: list[StateTokenRecord] = []
@@ -355,6 +390,9 @@ class PlayerHistory:
             raise ValueError("dead-rule feature mode changed inside one history")
         action = ActionFeatures.from_event(observation.history[-1])
         record = _record_from_observation(observation, action)
+        if self._array_history is not None:
+            self._array_history.append(record)
+            return
         previous = self._transition_tail
         self._transition_tail = _HistoryNode(
             record=record,
@@ -372,6 +410,10 @@ class PlayerHistory:
         return PolicyState(self.mode, self.records, actions)
 
     def clone(self) -> PlayerHistory:
+        if self._array_history is not None:
+            # A search branch needs independent future writes. PPO itself does
+            # not clone; preserve the ordinary replay contract for other callers.
+            return self.from_state_dict(self.state_dict())
         copied = self.__class__(
             self.mode,
             self._initial,
@@ -387,6 +429,7 @@ class PlayerHistory:
     def state_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode.value,
+            "action_encoding": ACTION_ENCODER_TYPE,
             "max_transitions": self.max_transitions,
             "dead_rules_enabled": self.dead_rules_enabled,
             "records": [_record_state_dict(record) for record in self.records],
@@ -394,6 +437,8 @@ class PlayerHistory:
 
     @classmethod
     def from_state_dict(cls, state: Mapping[str, Any]) -> PlayerHistory:
+        if state.get("action_encoding") != ACTION_ENCODER_TYPE:
+            raise ValueError("unsupported player-history action encoding")
         records = tuple(
             _record_from_state_dict(record) for record in state["records"]
         )
@@ -440,6 +485,18 @@ class GameHistory:
             raise ValueError("game history cannot mix dead-rule variants")
         self.players = players
 
+    def enable_array_storage(self) -> None:
+        from .history_arrays import ArrayHistory, new_history_identity
+        if all(player._array_history is not None for player in self.players):
+            return
+        identity = new_history_identity()
+        for seat, player in enumerate(self.players):
+            player._array_history = ArrayHistory(
+                self.mode, player.records, player.max_transitions, (identity, seat),
+            )
+            player._transition_tail = None
+            player._records_cache = None
+
     @classmethod
     def initialize(
         cls,
@@ -474,6 +531,22 @@ class GameHistory:
                     include_candidate_masks=False,
                 )
             )
+
+    def append_encoded_rows(self, rows: np.ndarray) -> None:
+        """Append only the new player views returned by CPU environment workers."""
+        from .history_arrays import HistoryArrayView
+        if len(rows) != len(self.players):
+            raise ValueError('environment response has the wrong number of seats')
+        for seat, history in enumerate(self.players):
+            if history._array_history is not None:
+                history._array_history.append_row(rows[seat])
+            else:
+                record = HistoryArrayView(self.mode, history.dead_rules_enabled,
+                                          (0, seat), 0, (rows[seat:seat + 1],))[0]
+                previous = history._transition_tail
+                history._transition_tail = _HistoryNode(
+                    record, previous, 1 if previous is None else previous.length + 1)
+                history._records_cache = None
 
     def state_for(self, game: JunqiGame, player: int | None = None) -> PolicyState:
         actor = game.current_player if player is None else player
@@ -530,8 +603,8 @@ def _record_from_state_dict(state: Mapping[str, Any]) -> StateTokenRecord:
     raw_action = state["action"]
     action = None
     if raw_action is not None:
-        if len(raw_action) != 8:
-            raise ValueError("serialized action requires exactly eight fields")
+        if len(raw_action) != 3:
+            raise ValueError("serialized action requires source, destination and actor only")
         action = ActionFeatures(*(int(value) for value in raw_action))
     raw_casualties = state["known_casualty_bits"]
     return StateTokenRecord(

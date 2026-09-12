@@ -1,0 +1,28 @@
+{
+  "date": "2026-09-11",
+  "config_revision": 22,
+  "wsl_full_suite": {
+    "command": "env PYTHONPATH=src CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 /root/anaconda3/envs/siguozero/bin/python -m pytest -q",
+    "passed": 228,
+    "skipped": 3,
+    "subtests_passed": 265,
+    "seconds": 39.74
+  },
+  "launcher_argument_tests": {"passed": 3, "single_host_card_counts_checked": [1, 2, 8], "real_multi_gpu_execution": false},
+  "windows_full_suite": {
+    "passed": 216,
+    "skipped": 10,
+    "failed": 5,
+    "subtests_passed": 262,
+    "seconds": 31.18,
+    "failure_causes": ["four arena test temporary-directory cleanups hit Windows read-only checkpoint files", "one arena test reads a UTF-8 report using Windows default GBK"],
+    "same_tests_in_wsl": "passed"
+  },
+  "strict_checkpoint_validation": "compact128_checkpoint_validation_20260911.json",
+  "shell_syntax": "bash -n passed for start_four_player_ppo.sh and train_npu_cluster.sh",
+  "git_diff_check": "passed",
+  "gpu_capacity": {
+    "40_games": {"histories": 160, "tokens_per_history": 1001, "peak_reserved_gib": 18.1328125, "effective_actor_batch": 40, "effective_critic_batch": 40},
+    "48_games": {"histories": 192, "tokens_per_history": 1001, "peak_reserved_gib": 21.544921875, "effective_actor_batch": 48, "effective_critic_batch": 48}
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "config_revision": 21,
+  "probes": [
+    {
+      "mode": "four_dark",
+      "verified_environment_steps": 20480,
+      "selected_window_steps": 10240,
+      "effective_microbatch_all_updates": 8,
+      "runtime_and_config_hashes_match_current": true,
+      "layout_backward_observed": false,
+      "independent_formula_days": 1121.596253722865
+    },
+    {
+      "mode": "double_open",
+      "verified_environment_steps": 20480,
+      "selected_window_steps": 10240,
+      "effective_microbatch_all_updates": 8,
+      "runtime_and_config_hashes_match_current": true,
+      "layout_backward_observed": false,
+      "independent_formula_days": 1209.6732175349287
+    }
+  ],
+  "hardware_rows_independently_recomputed": 12,
+  "target_gpu_measurements": false,
+  "formal_training_launched": false
+}

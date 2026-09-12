@@ -1,0 +1,186 @@
+{
+  "complete": true,
+  "dtype": "bfloat16",
+  "cases": [
+    {
+      "batch": 8,
+      "queries": 1,
+      "extent": 64,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.001953125,
+      "sdpa_max_absolute_error": 0.0
+    },
+    {
+      "batch": 8,
+      "queries": 1,
+      "extent": 512,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.0009765625,
+      "sdpa_max_absolute_error": 0.0001220703125
+    },
+    {
+      "batch": 8,
+      "queries": 1,
+      "extent": 1024,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.0009765625,
+      "sdpa_max_absolute_error": 6.103515625e-05
+    },
+    {
+      "batch": 8,
+      "queries": 4,
+      "extent": 64,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.00390625,
+      "sdpa_max_absolute_error": 0.0
+    },
+    {
+      "batch": 8,
+      "queries": 4,
+      "extent": 512,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.0009765625,
+      "sdpa_max_absolute_error": 0.000244140625
+    },
+    {
+      "batch": 8,
+      "queries": 4,
+      "extent": 1024,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.0009765625,
+      "sdpa_max_absolute_error": 1.52587890625e-05
+    },
+    {
+      "batch": 8,
+      "queries": 8,
+      "extent": 64,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.00390625,
+      "sdpa_max_absolute_error": 0.0
+    },
+    {
+      "batch": 8,
+      "queries": 8,
+      "extent": 512,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.001953125,
+      "sdpa_max_absolute_error": 0.000244140625
+    },
+    {
+      "batch": 8,
+      "queries": 8,
+      "extent": 1024,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.0009765625,
+      "sdpa_max_absolute_error": 3.814697265625e-06
+    },
+    {
+      "batch": 48,
+      "queries": 1,
+      "extent": 64,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.00390625,
+      "sdpa_max_absolute_error": 0.001953125
+    },
+    {
+      "batch": 48,
+      "queries": 1,
+      "extent": 512,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.001953125,
+      "sdpa_max_absolute_error": 0.00048828125
+    },
+    {
+      "batch": 48,
+      "queries": 1,
+      "extent": 1024,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.0009765625,
+      "sdpa_max_absolute_error": 0.000244140625
+    },
+    {
+      "batch": 48,
+      "queries": 4,
+      "extent": 64,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.00390625,
+      "sdpa_max_absolute_error": 0.0009765625
+    },
+    {
+      "batch": 48,
+      "queries": 4,
+      "extent": 512,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.001953125,
+      "sdpa_max_absolute_error": 0.000244140625
+    },
+    {
+      "batch": 48,
+      "queries": 4,
+      "extent": 1024,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.0009765625,
+      "sdpa_max_absolute_error": 0.00048828125
+    },
+    {
+      "batch": 48,
+      "queries": 8,
+      "extent": 64,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.00390625,
+      "sdpa_max_absolute_error": 0.001953125
+    },
+    {
+      "batch": 48,
+      "queries": 8,
+      "extent": 512,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.00390625,
+      "sdpa_max_absolute_error": 0.00048828125
+    },
+    {
+      "batch": 48,
+      "queries": 8,
+      "extent": 1024,
+      "old_ms": null,
+      "grouped_ms": null,
+      "speedup": null,
+      "max_absolute_error": 0.0009765625,
+      "sdpa_max_absolute_error": 0.00048828125
+    }
+  ]
+}

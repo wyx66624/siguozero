@@ -223,7 +223,7 @@ assert space.destination_at(0, target_slot) == 127
 
 ## 6. 策略网络状态输入
 
-策略网络对每个时刻保存一个按 `point_code=0..N-1` 排列的整数棋盘链，再由内部 BoardEncoder 生成 256 维全棋盘嵌入。整数码、双明盟友码、512 维“动作 + 动作后棋盘”转移 token 和 1,000 步上下文的完整规范见 [策略状态、棋盘快照与转移 Token 编码规范](state_token_encoding_zh.md)。
+策略网络对每个时刻保存一个按 `point_code=0..N-1` 排列的整数棋盘链，再将整盘类别向量通过一个线性层生成 256 维全棋盘嵌入（不创建逐点 256 维 token）。整数码、双明盟友码、512 维“动作 + 动作后棋盘”转移 token 和 1,000 步上下文的完整规范见 [策略状态、棋盘快照与转移 Token 编码规范](state_token_encoding_zh.md)。
 
 整数占位码是类别 ID，不与点编码相加。BoardEncoder 内部仍应把它与下列静态点特征分别 embedding 后融合：
 

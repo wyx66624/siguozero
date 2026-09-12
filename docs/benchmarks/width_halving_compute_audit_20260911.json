@@ -1,0 +1,85 @@
+{
+  "model": "rev22 main 128+128->256,32 layers",
+  "stepBudget": 3000000000,
+  "samplePresentationsIf3EpochsBoth": 18000000000,
+  "optimizerStepsPerModelIf512BatchAnd3Epochs": 17578125,
+  "benchmarkSummaries": {
+    "action_linear_real_four_dark_4090_20260910": {
+      "games": 20,
+      "steps": 10240,
+      "meanHistory": 395.006640625,
+      "per1000": {
+        "inference": 14.752921019921805,
+        "learning": 7.659393672753906,
+        "other": 1.1641153664063182,
+        "save": 2.2651418279296953,
+        "total": 25.841571887011728
+      },
+      "rate": 38.6973363838835,
+      "days": 1121.5960020404395
+    },
+    "parallel_games_48_four_dark_rev22_4090_20260911": {
+      "games": 48,
+      "steps": 24576,
+      "meanHistory": 364.6300862630208,
+      "per1000": {
+        "inference": 10.629800238159126,
+        "learning": 7.579638158894856,
+        "other": 1.29035309517421,
+        "save": 0.4602463746744741,
+        "total": 19.960037866902663
+      },
+      "rate": 50.100105353917186,
+      "days": 866.321087973206
+    },
+    "compact128_g40_exclusive_four_dark_4090_20260911": {
+      "games": 40,
+      "steps": 20480,
+      "meanHistory": 418.620361328125,
+      "per1000": {
+        "inference": 12.187174540673807,
+        "learning": 7.475799142480466,
+        "other": 1.2063876070312674,
+        "save": 0.5621916166015817,
+        "total": 21.43155290678712
+      },
+      "rate": 46.66017457294528,
+      "days": 930.1889282459689
+    }
+  },
+  "analyticalExamples": [
+    {
+      "tokens": 500,
+      "oldTemporalForwardGflops": 150.601728,
+      "newTemporalForwardGflops": 41.746432,
+      "remainingFraction": 0.27719756309834637,
+      "uncheckpointedForwardPer64SupervisedDecisionsGflops": 44.051584,
+      "illustrativeLearningGflopsPerEnvironmentStep": 16.519344,
+      "illustrativeTrainingFlopsFor3B": 49558032000000000000
+    },
+    {
+      "tokens": 1001,
+      "oldTemporalForwardGflops": 334.371028992,
+      "newTemporalForwardGflops": 100.009541632,
+      "remainingFraction": 0.29909750833823817,
+      "uncheckpointedForwardPer64SupervisedDecisionsGflops": 104.624455936,
+      "illustrativeLearningGflopsPerEnvironmentStep": 39.234170976,
+      "illustrativeTrainingFlopsFor3B": 117702512928000000000
+    }
+  ],
+  "exampleAssumptions": {
+    "fixed64SupervisedDecisionsPerHistory": true,
+    "forwardPlusBackwardAndActivationReplayFactor": 4,
+    "policyCriticCount": 2,
+    "epochs": 3,
+    "fullDenseAttentionMatmulCounting": true,
+    "multiplyAddFlops": 2,
+    "notAnActualProfileOrMeasuredWholeTrainingBudget": true
+  },
+  "auditLimitations": [
+    "No current GPU profiling or same-input width A/B was run in this audit; the GPU was occupied.",
+    "Recorded timing phases include CPU preparation and GPU work, not pure matrix execution.",
+    "Historical per-point encoder profiler is obsolete for current FLOPs and is not reused.",
+    "The 980-day process-start-based exclusion is withdrawn after checking actual trainer logs and provenance."
+  ]
+}

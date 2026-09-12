@@ -1,0 +1,13 @@
+{
+  "complete": true,
+  "adamw_step_seconds": {
+    "original": 0.004000096949999943,
+    "fused": 0.0014425385500004494
+  },
+  "adamw_max_parameter_error": 1.9073486328125e-06,
+  "sampling_eager_ms": 0.2662463000044227,
+  "sampling_graph_ms": 0.12514591229669117,
+  "sampling_matches_eager": true,
+  "capture_does_not_consume_rng": true,
+  "parameter_update_clears_graphs": true
+}

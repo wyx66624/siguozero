@@ -1,0 +1,100 @@
+{
+  "device": "NVIDIA GeForce RTX 4090",
+  "torch": "2.11.0+cu130",
+  "config_revision": 22,
+  "model_config": {
+    "board_dim": 128,
+    "board_encoder_type": "whole_board_one_hot_linear",
+    "action_encoder_type": "coordinates_player_linear",
+    "temporal_dim": 256,
+    "temporal_layers": 32,
+    "temporal_heads": 8,
+    "temporal_ffn_dim": 1024,
+    "layout_dim": 256,
+    "layout_layers": 16,
+    "layout_heads": 8,
+    "layout_ffn_dim": 1024,
+    "max_transitions": 1000,
+    "dropout": 0.0,
+    "board_chunk_size": 128,
+    "inference_board_cache_entries": 65536,
+    "inference_temporal_cache_entries": 576,
+    "incremental_inference": true,
+    "paged_kv_cache": true,
+    "paged_kv_length_bucket_tokens": 1001,
+    "activation_checkpointing": true,
+    "dead_rules_enabled": true
+  },
+  "amp": "bfloat16",
+  "requested_updates": 1,
+  "source_sha256": {
+    "src/junqi/training/models.py": "de75fe9eef124d002296305870318daee5b813bd1ff8fbc3a2b99c7eecf5c2d6",
+    "src/junqi/training/encoding.py": "389318decf6ccecdb1dedb2910ed9c852e00f20c3d26979a7ca1d54ac057a878",
+    "src/junqi/training/trainer.py": "96e184f3a5e775bae3c252916423ff9b61825b594216f7b3d0f07892ef1c4c64",
+    "configs/bootstrap.yaml": "eb8fcb3d0dba1ae7ec29c55d445d1f79b5f7d89c1b198ea987d8d8c0406944c5",
+    "tools/benchmark_ppo_sequences.py": "89fe9fc47681e6491967e7dfa4e0f5ccc4f9c9ea4b8d7fe6eb1b03e091cab029"
+  },
+  "mode": "four_dark",
+  "model_scale": "main",
+  "sequence_microbatch": 8,
+  "memory_fraction": 0.9,
+  "process_id": 8431,
+  "exclusive_probe_lock": "/tmp/siguozero-cuda-probe.lock",
+  "samples_per_sequence_limit": 64,
+  "optimizer_minibatch_samples": 512,
+  "transitions_per_update": 12288,
+  "games": 48,
+  "actor_batch": 48,
+  "cache_entries_per_model": 576,
+  "weights": "isolated fresh random weights; not a strength benchmark",
+  "phases": [
+    {
+      "phase": "long_history_packed_policy",
+      "seconds": 0.9508863529999871,
+      "peak_allocated_gib": 2.187030792236328,
+      "peak_reserved_gib": 2.3828125,
+      "metrics": {
+        "optimizer/temporal_padding_fraction": 0.0,
+        "optimizer/learner_sequences": 8.0,
+        "optimizer/learner_samples": 512.0,
+        "optimizer/history_token_reuse_fraction": 0.982125,
+        "loss/policy_ppo": 0.0618605762720108,
+        "loss/policy_total": 0.027599625289440155,
+        "policy/approx_kl_old": 0.1495918333530426,
+        "policy/entropy": 3.4260950088500977,
+        "policy/clip_fraction": 1.0,
+        "policy/importance_ratio_mean": 0.5534728765487671,
+        "policy/nonzero_advantage_fraction": 1.0
+      },
+      "samples": 512,
+      "sequences": 8,
+      "context_tokens": 1001
+    },
+    {
+      "phase": "long_history_packed_critic",
+      "seconds": 0.6083955200001583,
+      "peak_allocated_gib": 2.1983437538146973,
+      "peak_reserved_gib": 2.392578125,
+      "metrics": {
+        "loss/critic_total": 0.0625,
+        "critic/value_mse": 0.25,
+        "critic/value_mean": 0.0,
+        "critic/target_mean": 0.0
+      },
+      "samples": 512,
+      "sequences": 8,
+      "context_tokens": 1001
+    },
+    {
+      "phase": "long_history_dual_model_rollout",
+      "seconds": 29.039240586000005,
+      "peak_allocated_gib": 20.603249549865723,
+      "peak_reserved_gib": 21.544921875,
+      "cached_player_histories": 192,
+      "context_tokens": 1001,
+      "effective_actor_batch": 48,
+      "effective_critic_batch": 48
+    }
+  ],
+  "capacity_only": true
+}

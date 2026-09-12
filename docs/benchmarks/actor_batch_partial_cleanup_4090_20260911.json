@@ -1,0 +1,45 @@
+{
+  "device": "NVIDIA GeForce RTX 4090",
+  "config_revision": 21,
+  "cached_streams": 80,
+  "measured_context_range": [
+    985,
+    1000
+  ],
+  "actual_environment_steps": 0,
+  "all_training_models_and_adam_states_resident": true,
+  "post_prefill_cleanup": "release unused allocator blocks, run four warm incremental waves, release unused blocks again",
+  "source_sha256": {
+    "/mnt/e/agent/siguozero/tools/benchmark_actor_batch.py": "b1a1dbcccb641d887203f2b18a747cbe3f69b2b4877f8882c97422d889fef993",
+    "src/junqi/training/models.py": "de75fe9eef124d002296305870318daee5b813bd1ff8fbc3a2b99c7eecf5c2d6"
+  },
+  "rows": [
+    {
+      "inference_batch": 20,
+      "model_decisions": 1280,
+      "seconds": 9.681755004999996,
+      "median_80_stream_wave_seconds": 0.604466673000001,
+      "model_decisions_per_second": 132.2074354638145,
+      "peak_allocated_gib": 15.312358856201172,
+      "peak_reserved_gib": 15.46875,
+      "individual_wave_seconds": [
+        0.604458305999998,
+        0.6041540109999985,
+        0.6235520119999975,
+        0.595944584999998,
+        0.5714190279999976,
+        0.5949847599999991,
+        0.5976312900000025,
+        0.5901910180000023,
+        0.5947952260000022,
+        0.6177581319999987,
+        0.6223627879999967,
+        0.6230784810000003,
+        0.6194434599999994,
+        0.6101728049999977,
+        0.6073340630000033,
+        0.6044750400000041
+      ]
+    }
+  ]
+}

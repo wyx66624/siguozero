@@ -1,5 +1,7 @@
 # 四国军棋与二人军棋：仅规则驱动的自对弈强化学习方案
 
+> revision 20 已改为[整盘向量单层投影](whole_board_linear_zh.md)。本文的逐点图编码器、旧参数量和已有性能数字属于修改前版本，不能作为新架构的计时或显存结论。
+
 > 2026-09-10 更新：四暗、双明行棋训练现已切换为 PPO + 独立 Critic，详见
 > [四国 PPO 实现与容量验证](four_player_ppo_zh.md)。下文 v1.4 的 Game-GRPO
 > 算法、无 Critic 假设和四国模拟预算属于历史基线；二人模式仍采用 GRPO。
@@ -155,10 +157,11 @@ BoardEncoder 同时保留最新棋盘的逐点 256 维表示，供起点/终点 
 
 ### 4.3 动作嵌入与 concat
 
-动作仍以 `(from_code,to_code)` 为核心，加上行动座位和玩家可见的战斗结果，映射为：
+revision 21 动作只使用端点与行动方。主视角点编号转换为全盘二维坐标后，五维
+`[x_from,y_from,x_to,y_to,relative_actor]` 直接经过一个线性层，不包含战斗结果字段：
 
 $$
-q_t=\operatorname{ActionEncoder}(a_t,\text{public result})\in\mathbb R^{256}.
+q_t=\operatorname{Linear}_{5\to256}([x_{from},y_{from},x_{to},y_{to},actor])\in\mathbb R^{256}.
 $$
 
 布阵完成后的初始 token 为：

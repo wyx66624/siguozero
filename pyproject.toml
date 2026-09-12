@@ -18,6 +18,11 @@ training = [
     "PyYAML>=6.0",
     "tensorboard>=2.18",
 ]
+training-cuda = [
+    "torch==2.11.0",
+    "PyYAML>=6.0",
+    "tensorboard>=2.18",
+]
 test = [
     "torch==2.7.1",
     "PyYAML>=6.0",
@@ -41,6 +46,10 @@ siguozero-eval = "junqi.training.evaluate:main"
 siguozero-eval-history = "junqi.training.evaluate_history:main"
 siguozero-eval-two-player = "junqi.training.evaluate_two_player:main"
 siguozero-eval-four-player = "junqi.training.evaluate_four_player:main"
+siguozero-console = "junqi.web.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"junqi.web" = ["static/*.html", "static/*.css", "static/*.js"]

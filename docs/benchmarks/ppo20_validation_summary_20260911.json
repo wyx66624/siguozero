@@ -1,0 +1,114 @@
+{
+  "complete": true,
+  "tests": {
+    "total": 261,
+    "passed": 256,
+    "skipped": 5,
+    "seconds": 52.409,
+    "log": "output/ppo20_full_tests_final_20260911.log",
+    "sha256": "acf73bbc16b4c2454ba523ba3b5d1cddd5f6422ab2b2de035355e56a823c75d2"
+  },
+  "artifacts": [
+    {
+      "path": "docs/benchmarks/ppo20_varlen_validation_4090_20260911.json",
+      "sha256": "1bc2744a4ee1ac02fcac6fc50baac17f40850dc8c34f90440f967a482dda033d",
+      "complete": true
+    },
+    {
+      "path": "docs/benchmarks/ppo20_bf16_residual_validation_4090_20260911.json",
+      "sha256": "cf5fb693fd166013dc1d84290eedf6ba48b145b93550bf9166d05e05a8014272",
+      "complete": true
+    },
+    {
+      "path": "docs/benchmarks/ppo20_fused_sampling_verified_4090_20260911.json",
+      "sha256": "ae6c36770a91b8c661ed717d19b89ca3320fcabec6d2c242f20f2cc7bfbcef83",
+      "complete": true
+    },
+    {
+      "path": "docs/benchmarks/ppo20_kv_fp16_sdpa_20260911.json",
+      "sha256": "e5d44ee97de66833e3541eeb2eac407375cbbc1723ca7bcddc2cf98206122b01",
+      "complete": true
+    },
+    {
+      "path": "docs/benchmarks/ppo20_kv_bf16_sdpa_20260911.json",
+      "sha256": "532b3a13461e945bdb0dd05f0daf7eaefe68fa8458e130644078dc44bc84b0e9",
+      "complete": true
+    },
+    {
+      "path": "docs/benchmarks/ppo20_capacity_4090_20260911.json",
+      "sha256": "7117b730d541d982514081a395aaa82caf126811957613c797fb57382db4f02e",
+      "complete": true
+    },
+    {
+      "path": "docs/benchmarks/ppo20_ddp_resume_20260911.json",
+      "sha256": "b45c0675036129d0a13941ccfd4eb62182791c56e15d7b3e9bd9bbc7fc9f57cb",
+      "complete": true
+    },
+    {
+      "path": "docs/benchmarks/ppo20_default48_final_4090_20260911.json",
+      "sha256": "5bc74ed8b2887ed871069048bd3f19b1cba0b5857386bbf82a7e06b58d39bc22",
+      "complete": true
+    },
+    {
+      "path": "docs/benchmarks/ppo20_batch1024_4090_20260911.json",
+      "sha256": "6c1dd04d2d4cd6103b63e4a5ab5ef6d1bc89612d35e10c1b436f92b0eeae0c56",
+      "complete": true
+    },
+    {
+      "path": "docs/benchmarks/ppo20_final_eta_20260911.json",
+      "sha256": "614a10c2085bcb5907abb1f05b1e407b1272540d6f92527f574ae516ee0e4e80",
+      "complete": true
+    }
+  ],
+  "validation_source_sha256": {
+    "src/junqi/__init__.py": "1c4553e3a4d34513d9a26ae8735da4c2ac4c566176f1dfc1358da37aa8dffded",
+    "src/junqi/board.py": "6644e57a92aa93ed62a03ec1ce8c7d5e596c4b225c0e3c478d924a9a306a1004",
+    "src/junqi/game.py": "f5ea0670b469f26d02b35b17141aa3c6706247b2987529424d0fa0cb8fa2d3fb",
+    "src/junqi/pieces.py": "be80d30563d3900a25d9ceeb6595317a1de5d002d65ccda63a0be70845f13673",
+    "src/junqi/training/__init__.py": "c9a3aebbfbd83462776ee09624880d47edb5ecbe656a938cdfc950a7a2b4fd7d",
+    "src/junqi/training/accelerator.py": "19f9ef81b93819b7c4eca5fadd07110e44f9b34de5595adf8739fa70e0d136c0",
+    "src/junqi/training/arena.py": "088f72f9d80ba3bf22f699001d5d69f2cca9a19a6d742cba1169703fef280954",
+    "src/junqi/training/arena_four_player.py": "6bff0186d717ff696572bf1d324b1b7660315b3820f37ccacaac51f6aa2a8485",
+    "src/junqi/training/arena_two_player.py": "d34d9e8441bbee9735751705c31fc68d28e03427bfca65ddfc605d9183b27929",
+    "src/junqi/training/checkpoint.py": "109943ddc0492de97a847d8914f280fddf80373ece3670c4393c7ac55c67d91e",
+    "src/junqi/training/cli.py": "ef8b71a0ff9a30a902fd0b03868940886d5235d530ffee9fd43b2cac363299c0",
+    "src/junqi/training/distributed.py": "7e73eeae913b4ee343f44a9a8547a2700ac9c282e4241e893004bf6a4eb151cd",
+    "src/junqi/training/encoding.py": "563e47143d9ccb7f4abd5a4a0b2363b352fd6e7724f0c22af54dcabd0371d10b",
+    "src/junqi/training/evaluate.py": "6fb0c6d84e017eae2dfb7ab07fdb7ffab0dd9981ff9db925d3d8f3f1d3e6444f",
+    "src/junqi/training/evaluate_four_player.py": "48a292febb662d631703f1fed1bcce94ab8ab52a3c5f1f61488b50ab315faeab",
+    "src/junqi/training/evaluate_history.py": "e297707de7d5beaf0b705b605c13eceba66989dff0c423bac06321e480af8276",
+    "src/junqi/training/evaluate_two_player.py": "e1a1c1492ccd6cfaa7496094521498e3756350046b3b46e33f4d8c0df88a5f03",
+    "src/junqi/training/fixed_kv.py": "9799283dadc9b3257a5ca27773a943a627e3fb0fae84e830e13e181f2a0d32a0",
+    "src/junqi/training/fixed_kv_kernels.py": "d406ebdad9a3b01736e49056b5e6c5b2126c8250203edce3afb3230210d9881c",
+    "src/junqi/training/grouped_kv_kernel.py": "ac9788a6226dea0a2db0310af329b2a359efa2829c09cd97c6672203484ec8c5",
+    "src/junqi/training/history_arrays.py": "1575fcf08bda06cb08a83efcb95f568d57d4a32fee8a1d32c5788ec6dbf2ce98",
+    "src/junqi/training/infer_double_open.py": "6ca965d79aff2862442507dd1e1f97836dd58104bf7468de63db260831a4ccc7",
+    "src/junqi/training/infer_four_dark.py": "e6a3bc876f72afaee71a183c05897ebf67c85b05093cff70bf173ecc2a5a1fdc",
+    "src/junqi/training/infer_two_player.py": "f3f1601cd729bd82b7f4232078e15a800d3dd88123e9a89d80b012b87dd21bf3",
+    "src/junqi/training/inference.py": "00148f70dc67ffbc08f5302ac1e4ecc631582e298f24eade28efa409ff1e1c1d",
+    "src/junqi/training/learning_metrics.py": "16a53d2eb2ea4ddf27e765a40b795b3f1cb9c29fd769c0011b1cb04d98704554",
+    "src/junqi/training/losses.py": "53681c6259a725727363f97e844bcfeec66787dd7f2d89703908fb62a466bbc0",
+    "src/junqi/training/metrics.py": "bb22be98159be5531f0241c9943f6ec312c8a677ec21e8f2eae867c1494dc8fb",
+    "src/junqi/training/model_selection.py": "44eb07b994082c4e020b42ba43fe30855c25f4b85ae35b0a8bbcdeebbea3a661",
+    "src/junqi/training/models.py": "2034214bee1a830fde2920d28e7941b945a050428c485e1a60396f36b4d1d1ad",
+    "src/junqi/training/modes.py": "b74fefabccaf3f22406aad1d14443a6bb6931bfba6589c6f80706a3feab348cf",
+    "src/junqi/training/packed_attention.py": "d7a996bf804bc0eec568a6d61e0fffcc6738f9f12d86dfaca99d1c4892278e84",
+    "src/junqi/training/packed_observation.py": "c171e6fb044718d76fc69bae00cba4a1fbd46cff281a3a4d3dfcf930860c97c9",
+    "src/junqi/training/paged_kv.py": "39ab1c14b69eb761b75d85890b590324d659a8962e4d06b0bb847826e77b284f",
+    "src/junqi/training/ppo.py": "fa95b68e056cf08b2ba4fdd289214fe992732b8fa5814b31840551c6bcd8944e",
+    "src/junqi/training/ppo_environment.py": "8c17efd013f89d412e732eb8dbc29a0b8643b62d12c8d22edd6cd46ced17e23f",
+    "src/junqi/training/ppo_pipeline.py": "34e9773480b4617baab2043ae155d850ab5f4708e62624df9c1eeade932b33c9",
+    "src/junqi/training/ppo_sampling.py": "9d0f794753528584ccfb9cd275657692be6383865e2efc2532414d52ae4f273a",
+    "src/junqi/training/rollout.py": "eaa7a79ec0d3bb409b0add04b70868c1d5d7270a83839c228ae13cac24ff9185",
+    "src/junqi/training/settings.py": "09f744de96622b0589274faccd189159d16ba6e3642b8bdb736adf94e47ab6ad",
+    "src/junqi/training/train_double_open.py": "8c31d29a20c8f8ba58a2c7b7a8e8e404614bd41cdbd4a4dc1e81710419300943",
+    "src/junqi/training/train_four_dark.py": "c76e100e4e49257c1a316be508e6f4bf2cdb244c8fe55f1f4b35aa72b5e2dbe5",
+    "src/junqi/training/train_two_player.py": "e38284e58ad33bc41088df868cae72f4cf918ba54305612668e7b63dbf2cad85",
+    "src/junqi/training/trainer.py": "d9de04114ebd077b0e423c9f418bd15b4a33a3c3b084b8fede4f8d18c997b08c"
+  },
+  "limitations": [
+    "CPU/Gloo verifies distributed behavior; multi-GPU CUDA throughput was not measured.",
+    "GPU numerical tests complement the CPU suite; this is not a long-run strength evaluation.",
+    "The twenty-day time target remains unmet."
+  ]
+}

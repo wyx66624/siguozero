@@ -94,6 +94,13 @@ runs_*/
 eval_history/
 *.pt.tmp
 events.out.tfevents.*
+*.pt
+*.pth
+*.safetensors
+
+# Local runtime metadata, generated reports and profiling workspaces.
+# Curated benchmark evidence is maintained under docs/benchmarks/.
+/output/
 
 # IDE / editor files
 .idea/

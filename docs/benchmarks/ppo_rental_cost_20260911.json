@@ -1,0 +1,1079 @@
+{
+  "status": "conditional_budget_not_a_full_memory_tuned_runtime_or_a_provider_quote",
+  "as_of": "2026-09-11",
+  "target_environment_steps_per_mode": 3000000000,
+  "availability": 0.8,
+  "default_billing": "rent retained during non-training hours",
+  "fx": {
+    "date": "2026-09-10",
+    "eur_usd": 1.1616,
+    "eur_cny": 7.79,
+    "usd_cny": 6.706267217630854,
+    "url": "https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/html/index.en.html"
+  },
+  "quotes": [
+    {
+      "hardware": "RTX 4090 24GB",
+      "provider": "AutoDL public homepage",
+      "rmb_per_gpu_hour": 1.88,
+      "quote_status": "public indexed hourly rate; not a checked stock or multi-GPU order",
+      "url": "https://www.autodl.com/home"
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "provider": "AutoDL public homepage",
+      "rmb_per_gpu_hour": 6.98,
+      "quote_status": "public indexed hourly rate; not a checked stock or multi-GPU order",
+      "url": "https://www.autodl.com/home"
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "provider": "Runpod Secure Cloud Pods",
+      "usd_per_gpu_hour": 3.49,
+      "rmb_per_gpu_hour": 23.40487258953168,
+      "quote_status": "public pricing page; not a deployment-console stock or cluster order",
+      "url": "https://www.runpod.io/pricing"
+    }
+  ],
+  "same_provider_alternatives_rmb_per_gpu_hour": {
+    "Runpod Secure RTX 4090": 4.962637741046832,
+    "Runpod Secure RTX Pro 6000": 14.016098484848484
+  },
+  "action_parameter_reduction_policy_and_critic": 297472,
+  "fraction_of_previous_trainable_parameters": 0.0010015738917290044,
+  "old_opening_vs_new_opening_and_later": [
+    {
+      "mode": "four_dark",
+      "steps_each": 10240,
+      "old_first_two_seconds": 151.899214987,
+      "new_first_two_seconds": 145.84149729799998,
+      "new_later_two_seconds": 241.42264380499998,
+      "same_step_count_but_not_same_trajectories": true
+    },
+    {
+      "mode": "double_open",
+      "steps_each": 10240,
+      "old_first_two_seconds": 147.68670842,
+      "new_first_two_seconds": 141.54689836300003,
+      "new_later_two_seconds": 263.52628393099997,
+      "same_step_count_but_not_same_trajectories": true
+    }
+  ],
+  "controlled_action_ab": [
+    {
+      "context_tokens": 512,
+      "same_decisions": 512,
+      "old_seconds_median": 0.7104369285000001,
+      "new_seconds_median": 0.6917337420000012,
+      "new_change_fraction": -0.02632631518675188,
+      "repeats_per_variant": 6
+    },
+    {
+      "context_tokens": 1001,
+      "same_decisions": 512,
+      "old_seconds_median": 1.4286472479999972,
+      "new_seconds_median": 1.4354463339999999,
+      "new_change_fraction": 0.004759107617027913,
+      "repeats_per_variant": 6
+    }
+  ],
+  "learner_share_and_amdahl": [
+    {
+      "mode": "four_dark",
+      "measured_learner_fraction_including_save": 0.2963981334511468,
+      "whole_pipeline_speedup_if_learner_twice_as_fast": 1.1739832171301787,
+      "whole_pipeline_speedup_if_learner_were_free": 1.4212583103353194
+    },
+    {
+      "mode": "double_open",
+      "measured_learner_fraction_including_save": 0.33296533034830267,
+      "whole_pipeline_speedup_if_learner_twice_as_fast": 1.1997350963419802,
+      "whole_pipeline_speedup_if_learner_were_free": 1.499172450094934
+    }
+  ],
+  "microbatch_measurements": [
+    {
+      "label": "512_decisions_8_full_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        1.4352265360000018,
+        1.4693059290000008,
+        1.4183457210000014
+      ],
+      "median_seconds": 1.4352265360000018,
+      "peak_allocated_gib": 5.052886009216309,
+      "peak_reserved_gib": 5.197265625,
+      "learner_decisions_per_second": 356.73810869394305,
+      "status": "ok"
+    },
+    {
+      "label": "512_decisions_8_full_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 16,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        1.4095599970000023,
+        1.4541841269999978,
+        1.372326018999999
+      ],
+      "median_seconds": 1.4095599970000023,
+      "peak_allocated_gib": 5.052886009216309,
+      "peak_reserved_gib": 5.197265625,
+      "learner_decisions_per_second": 363.2339177400756,
+      "status": "ok"
+    },
+    {
+      "label": "512_decisions_8_full_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 32,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        1.4461209919999973,
+        1.4396527259999985,
+        1.4007680850000028
+      ],
+      "median_seconds": 1.4396527259999985,
+      "peak_allocated_gib": 5.052886009216309,
+      "peak_reserved_gib": 5.197265625,
+      "learner_decisions_per_second": 355.64132290609126,
+      "status": "ok"
+    },
+    {
+      "label": "512_decisions_32_short_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 4,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.284219543000006,
+        5.435985474999995,
+        5.4348550610000075
+      ],
+      "median_seconds": 5.4348550610000075,
+      "peak_allocated_gib": 5.599855899810791,
+      "peak_reserved_gib": 5.701171875,
+      "learner_decisions_per_second": 94.20674410879184,
+      "status": "ok"
+    },
+    {
+      "label": "512_decisions_32_short_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 16,
+      "forward_backward_chunks_per_model": 2,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.560180826999996,
+        5.401895183999997,
+        5.374081266000005
+      ],
+      "median_seconds": 5.401895183999997,
+      "peak_allocated_gib": 6.910781383514404,
+      "peak_reserved_gib": 7.12890625,
+      "learner_decisions_per_second": 94.78155028192792,
+      "status": "ok"
+    },
+    {
+      "label": "512_decisions_32_short_chains",
+      "variant": "new",
+      "samples": 512,
+      "microbatch_sequences": 32,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.545383872000002,
+        5.085214117999996,
+        5.103450973999983
+      ],
+      "median_seconds": 5.103450973999983,
+      "peak_allocated_gib": 9.008979797363281,
+      "peak_reserved_gib": 9.66015625,
+      "learner_decisions_per_second": 100.32427128396701,
+      "status": "ok"
+    },
+    {
+      "label": "2048_decisions_32_full_chains",
+      "variant": "new",
+      "samples": 2048,
+      "microbatch_sequences": 8,
+      "forward_backward_chunks_per_model": 4,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.111822079000007,
+        5.162515389999982,
+        5.104638193000028
+      ],
+      "median_seconds": 5.111822079000007,
+      "peak_allocated_gib": 5.599855899810791,
+      "peak_reserved_gib": 5.703125,
+      "learner_decisions_per_second": 400.6399221939738,
+      "status": "ok"
+    },
+    {
+      "label": "2048_decisions_32_full_chains",
+      "variant": "new",
+      "samples": 2048,
+      "microbatch_sequences": 16,
+      "forward_backward_chunks_per_model": 2,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.328458670000003,
+        5.288529004999987,
+        5.205310792999995
+      ],
+      "median_seconds": 5.288529004999987,
+      "peak_allocated_gib": 6.910781383514404,
+      "peak_reserved_gib": 7.12890625,
+      "learner_decisions_per_second": 387.2532415088844,
+      "status": "ok"
+    },
+    {
+      "label": "2048_decisions_32_full_chains",
+      "variant": "new",
+      "samples": 2048,
+      "microbatch_sequences": 32,
+      "forward_backward_chunks_per_model": 1,
+      "maximum_history_tokens": 1001,
+      "seconds": [
+        5.382381518000017,
+        5.339387011000014,
+        5.395183942999978
+      ],
+      "median_seconds": 5.382381518000017,
+      "peak_allocated_gib": 9.008979797363281,
+      "peak_reserved_gib": 9.66015625,
+      "learner_decisions_per_second": 380.5007120270053,
+      "status": "ok"
+    }
+  ],
+  "actor_batch_probe": {
+    "device": "NVIDIA GeForce RTX 4090",
+    "config_revision": 21,
+    "cached_streams": 80,
+    "prefill_batch": 20,
+    "measured_context_range": [
+      985,
+      1000
+    ],
+    "actual_environment_steps": 0,
+    "all_training_models_and_adam_states_resident": true,
+    "post_prefill_cleanup": "release unused allocator blocks, run four warm incremental waves, release unused blocks again",
+    "source_sha256": {
+      "/mnt/e/agent/siguozero/tools/benchmark_actor_batch.py": "2bcd391867e7c158e69ef8802428b13294831e4cc730e2a4a47a5a06ceb934ee",
+      "src/junqi/training/models.py": "de75fe9eef124d002296305870318daee5b813bd1ff8fbc3a2b99c7eecf5c2d6"
+    },
+    "rows": [
+      {
+        "inference_batch": 20,
+        "model_decisions": 1280,
+        "seconds": 9.901653725999893,
+        "median_80_stream_wave_seconds": 0.61856882699999,
+        "model_decisions_per_second": 129.27133541733127,
+        "peak_allocated_gib": 15.312358856201172,
+        "peak_reserved_gib": 15.46875,
+        "individual_wave_seconds": [
+          0.619271910000009,
+          0.6131225959999824,
+          0.5999784799999475,
+          0.6247134730000425,
+          0.6232337349999852,
+          0.6253075440000089,
+          0.6178657439999711,
+          0.6358461479999846,
+          0.6092292369999655,
+          0.6109318709999911,
+          0.6161533500000473,
+          0.632998133000001,
+          0.6235904929999947,
+          0.6382852059999777,
+          0.6128304339999886,
+          0.5982953719999955
+        ]
+      },
+      {
+        "inference_batch": 40,
+        "model_decisions": 1280,
+        "seconds": 8.826273963999995,
+        "median_80_stream_wave_seconds": 0.5547836354999731,
+        "model_decisions_per_second": 145.02155781938978,
+        "peak_allocated_gib": 15.389297008514404,
+        "peak_reserved_gib": 15.623046875,
+        "individual_wave_seconds": [
+          0.5428736129999834,
+          0.5369850939999878,
+          0.5401522220000174,
+          0.545260920999965,
+          0.5406713099999934,
+          0.5675131180000221,
+          0.5611184059999914,
+          0.5524900350000053,
+          0.5361339890000067,
+          0.5592654990000483,
+          0.556219265999971,
+          0.5587627450000241,
+          0.5564499160000196,
+          0.5603001439999957,
+          0.5533480049999753,
+          0.5587296809999884
+        ]
+      },
+      {
+        "inference_batch": 80,
+        "model_decisions": 1280,
+        "seconds": 8.346376529999986,
+        "median_80_stream_wave_seconds": 0.5205110680000189,
+        "model_decisions_per_second": 153.35996350023308,
+        "peak_allocated_gib": 15.542751789093018,
+        "peak_reserved_gib": 15.853515625,
+        "individual_wave_seconds": [
+          0.5192617659999996,
+          0.51860016400002,
+          0.5185900860000174,
+          0.523034736999989,
+          0.5177272479999715,
+          0.5312956900000358,
+          0.532093107000037,
+          0.5243744889999675,
+          0.5237176919999911,
+          0.5266728209999769,
+          0.5192629969999984,
+          0.511940195999955,
+          0.5217591390000393,
+          0.5236893350000287,
+          0.5152377889999684,
+          0.5191192739999906
+        ]
+      }
+    ]
+  },
+  "cost_scenarios": [
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 1,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            1121.596253722865,
+            1121.596253722865
+          ],
+          "keep_allocated_rmb": [
+            50606.42296797566,
+            50606.42296797566
+          ],
+          "release_during_nontraining_rmb": [
+            40485.138374380535,
+            40485.138374380535
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            1209.6732175349289,
+            1209.6732175349289
+          ],
+          "keep_allocated_rmb": [
+            54580.45557517599,
+            54580.45557517599
+          ],
+          "release_during_nontraining_rmb": [
+            43664.364460140794,
+            43664.364460140794
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        50606.42296797566,
+        54580.45557517599
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 2,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            617.647241569333,
+            780.073043894358
+          ],
+          "keep_allocated_rmb": [
+            55736.48707921661,
+            70393.79148102686
+          ],
+          "release_during_nontraining_rmb": [
+            44589.18966337329,
+            56315.03318482149
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            666.8905764377103,
+            844.187400905418
+          ],
+          "keep_allocated_rmb": [
+            60180.20561773897,
+            76179.47105770491
+          ],
+          "release_during_nontraining_rmb": [
+            48144.16449419117,
+            60943.57684616394
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        55736.48707921661,
+        76179.47105770491
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 4,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            308.82378857295004,
+            390.0366897354625
+          ],
+          "keep_allocated_rmb": [
+            55736.51736164602,
+            70393.82176345628
+          ],
+          "release_during_nontraining_rmb": [
+            44589.213889316816,
+            56315.057410765025
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            333.4454464319513,
+            422.0938586658052
+          ],
+          "keep_allocated_rmb": [
+            60180.234172038574,
+            76179.49961200451
+          ],
+          "release_during_nontraining_rmb": [
+            48144.187337630865,
+            60943.599689603616
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        55736.51736164602,
+        76179.49961200451
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 8,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            154.41206207475858,
+            195.01851265601482
+          ],
+          "keep_allocated_rmb": [
+            55736.577926504855,
+            70393.88232831511
+          ],
+          "release_during_nontraining_rmb": [
+            44589.26234120388,
+            56315.10586265209
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            166.7228814290719,
+            211.04708754599883
+          ],
+          "keep_allocated_rmb": [
+            60180.291280637786,
+            76179.55672060374
+          ],
+          "release_during_nontraining_rmb": [
+            48144.23302451022,
+            60943.645376482986
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        55736.577926504855,
+        76179.55672060374
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 1,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            537.0171507988031,
+            852.9845831278548
+          ],
+          "keep_allocated_rmb": [
+            89961.1131018155,
+            142891.97736557823
+          ],
+          "release_during_nontraining_rmb": [
+            71968.8904814524,
+            114313.5818924626
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            571.5725148447322,
+            916.4685940714571
+          ],
+          "keep_allocated_rmb": [
+            95749.82768678953,
+            153526.8188788505
+          ],
+          "release_during_nontraining_rmb": [
+            76599.86214943163,
+            122821.4551030804
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        89961.1131018155,
+        153526.8188788505
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 2,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            292.88107327818744,
+            588.2075648979221
+          ],
+          "keep_allocated_rmb": [
+            98126.87479112393,
+            197073.06254339984
+          ],
+          "release_during_nontraining_rmb": [
+            78501.49983289915,
+            157658.4500347199
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            312.3901860542676,
+            634.7555270029383
+          ],
+          "keep_allocated_rmb": [
+            104663.20793562182,
+            212668.49176706444
+          ],
+          "release_during_nontraining_rmb": [
+            83730.56634849746,
+            170134.79341365158
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        98126.87479112393,
+        212668.49176706444
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 4,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            146.44070442737728,
+            294.10395023724465
+          ],
+          "keep_allocated_rmb": [
+            98126.98722269697,
+            197073.1749749729
+          ],
+          "release_during_nontraining_rmb": [
+            78501.58977815758,
+            157658.53997997835
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            156.19525124023,
+            317.3779217145654
+          ],
+          "keep_allocated_rmb": [
+            104663.31395105332,
+            212668.59778249598
+          ],
+          "release_during_nontraining_rmb": [
+            83730.65116084265,
+            170134.8782259968
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        98126.98722269697,
+        212668.59778249598
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 8,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            73.22052000197218,
+            147.05214290690586
+          ],
+          "keep_allocated_rmb": [
+            98127.21208584304,
+            197073.399838119
+          ],
+          "release_during_nontraining_rmb": [
+            78501.76966867443,
+            157658.71987049517
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            78.09778383321122,
+            158.6891190703789
+          ],
+          "keep_allocated_rmb": [
+            104663.52598191636,
+            212668.809813359
+          ],
+          "release_during_nontraining_rmb": [
+            83730.82078553308,
+            170135.0478506872
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        98127.21208584304,
+        212668.809813359
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 1,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            397.0201664801619,
+            692.3674042330474
+          ],
+          "keep_allocated_rmb": [
+            223012.95388662833,
+            388914.501149262
+          ],
+          "release_during_nontraining_rmb": [
+            178410.36310930265,
+            311131.6009194096
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            418.7579964649367,
+            741.1459829753035
+          ],
+          "keep_allocated_rmb": [
+            235223.46127462565,
+            416314.25524272467
+          ],
+          "release_during_nontraining_rmb": [
+            188178.76901970053,
+            333051.40419417975
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        223012.95388662833,
+        416314.25524272467
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 2,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            215.10497087894242,
+            473.48100854448836
+          ],
+          "keep_allocated_rmb": [
+            241656.21296623538,
+            531924.6085702422
+          ],
+          "release_during_nontraining_rmb": [
+            193324.97037298832,
+            425539.68685619376
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            227.4932313988257,
+            509.5250905056857
+          ],
+          "keep_allocated_rmb": [
+            255573.60460177745,
+            572417.7515738482
+          ],
+          "release_during_nontraining_rmb": [
+            204458.88368142198,
+            457934.20125907863
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        241656.21296623538,
+        572417.7515738482
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 4,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            107.55265322775476,
+            236.74067206052774
+          ],
+          "keep_allocated_rmb": [
+            241656.5899643216,
+            531924.9855683285
+          ],
+          "release_during_nontraining_rmb": [
+            193325.2719714573,
+            425539.9884546628
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            113.74677391250908,
+            254.76270346593907
+          ],
+          "keep_allocated_rmb": [
+            255573.96008568397,
+            572418.1070577548
+          ],
+          "release_during_nontraining_rmb": [
+            204459.16806854715,
+            457934.4856462038
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        241656.5899643216,
+        572418.1070577548
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 8,
+      "modes": {
+        "four_dark": {
+          "calendar_days": [
+            53.776494402160935,
+            118.3705038185474
+          ],
+          "keep_allocated_rmb": [
+            241657.34396049412,
+            531925.7395645009
+          ],
+          "release_during_nontraining_rmb": [
+            193325.87516839535,
+            425540.5916516008
+          ]
+        },
+        "double_open": {
+          "calendar_days": [
+            56.87354516935077,
+            127.38150994606576
+          ],
+          "keep_allocated_rmb": [
+            255574.67105349695,
+            572418.8180255677
+          ],
+          "release_during_nontraining_rmb": [
+            204459.73684279755,
+            457935.0544204542
+          ]
+        }
+      },
+      "one_mode_keep_allocated_rmb_envelope": [
+        241657.34396049412,
+        572418.8180255677
+      ]
+    }
+  ],
+  "unmeasured_additional_throughput_sensitivities": [
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 1,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        35216.25334607488,
+        37781.22686321174
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 1,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        27521.168535124496,
+        29381.612507229616
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 2,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        38636.29861043796,
+        52180.572897756
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 2,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        30086.20437604864,
+        40181.12381778154
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 4,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        38636.32889286737,
+        52180.60145205561
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 4,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        30086.23465847806,
+        40181.152372081146
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 8,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        38636.389457726196,
+        52180.658560654825
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 8,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        30086.29522333689,
+        40181.20948068036
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 1,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        65463.91235756988,
+        107527.76057990691
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 1,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        53215.311985447086,
+        84528.23143043512
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 2,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        70907.76285307326,
+        146955.55134000216
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 2,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        57298.20688404794,
+        114099.08112647104
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 4,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        70907.8752846463,
+        146955.6573554337
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 4,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        57298.31931562098,
+        114099.18714190254
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 8,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        70908.1001477924,
+        146955.86938629672
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 8,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        57298.54417876707,
+        114099.39917276558
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 1,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        167083.45939637176,
+        294900.49388483266
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 1,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        139118.71215124353,
+        234193.61320588665
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 2,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        179512.33019928366,
+        398969.5210625739
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 2,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        148440.38881580782,
+        312245.4058069368
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 4,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        179512.70719736992,
+        398969.8765464804
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 4,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        148440.7658138941,
+        312245.76129084325
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 8,
+      "additional_non_save_pipeline_speedup_assumption": 1.5,
+      "keep_allocated_rmb_envelope": [
+        179513.4611935424,
+        398970.5875142933
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 8,
+      "additional_non_save_pipeline_speedup_assumption": 2.0,
+      "keep_allocated_rmb_envelope": [
+        148441.51981006662,
+        312246.47225865617
+      ],
+      "measured_or_assigned_to_a_microbatch": false
+    }
+  ],
+  "larger_memory_candidate_pilot": {
+    "4090": "microbatch 8/16; optimizer batch 512/1024; games 20; do not assume 32 is faster",
+    "PRO_6000_96GB": "microbatch 16/32/64; optimizer batch 1024/2048/4096; games 40/80; long-context capacity unmeasured",
+    "H100_SXM_80GB": "microbatch 16/32; optimizer batch 1024/2048; games 40/64; long-context capacity unmeasured",
+    "criterion": "actual environment transitions per billed second at equal history and training budget; not maximum memory usage"
+  },
+  "limitations": [
+    "Target-card and multi-GPU throughput have not been measured; baseline hardware ratios/fractions remain assumptions.",
+    "No automatic speedup is granted for bigger VRAM or microbatch; local measurements show little learner improvement.",
+    "Synthetic learner/model-decision rates are not environment transition throughput.",
+    "Public single-card prices are multiplied arithmetically; matching multi-GPU stock, CPU, disks and interconnect were not quoted.",
+    "Storage, tax, exchange fees, periodic layout updates, evaluation, retries and mature-policy distributions are not calibrated here.",
+    "Saved model and training settings are unchanged; no GPU rental or formal training was started."
+  ],
+  "source_sha256": {
+    "docs/benchmarks/action_linear_hardware_eta_20260910.json": "c28af9a38272ae5f0d05793d51c37b2805a9526b90916138cd05b0a9ca44b4ee",
+    "docs/benchmarks/action_linear_eta_later_20260910.json": "021f69f6f3d38ae607ebe186004a7c6970817c57c3b20aaea3b63d66a53c3d7f",
+    "docs/benchmarks/action_microbatch_4090_20260911.json": "d5efb965b63ff7c34af12d7bfc704843d7b0fe8de81a273ffb82078087d07eed",
+    "/mnt/e/agent/siguozero/tools/estimate_ppo_rental_cost.py": "9e91ef7b224fac68ea1c5416effb1d6c99a8aba8fe0e5bdd57e12ac62cf6fe38",
+    "docs/benchmarks/actor_batch_4090_20260911.json": "a4df144e7b2209c5f654c658162b7ccfc7a2ed4a29214ff3f3a2bb74d3e54660"
+  }
+}

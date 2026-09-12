@@ -37,6 +37,14 @@ def count_blocks(module):
                                   "estimated_forward_flops": 0})
     handles = []
     for name, child in module.named_modules():
+        if name == "board_encoder.projection" and isinstance(child, torch.nn.Linear):
+            def board_hook(layer, args):
+                boards = args[0].shape[0]
+                item = counts["board"]
+                item["calls"] += 1
+                item["batch_tokens"] += boards
+                item["estimated_forward_flops"] += 2 * boards * layer.in_features * layer.out_features
+            handles.append(child.register_forward_pre_hook(board_hook))
         if isinstance(child, models.PreNormEncoderBlock):
             kind = "board" if name.startswith("board_encoder.") else "temporal"
 

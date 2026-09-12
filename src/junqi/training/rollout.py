@@ -73,6 +73,9 @@ class RolloutMetrics:
     wall_seconds: float = 0.0
     actor_inference_seconds: float = 0.0
     environment_step_seconds: float = 0.0
+    environment_workers: int = 1
+    environment_worker_seconds: float = 0.0
+    environment_sync_seconds: float = 0.0
 
     def record_environment_steps(self, count: int = 1, *, continuation: bool = False) -> None:
         """Count executed state transitions, including every simulated branch.
@@ -105,6 +108,9 @@ class RolloutMetrics:
             "rollout/wall_seconds": self.wall_seconds,
             "rollout/actor_inference_seconds": self.actor_inference_seconds,
             "rollout/environment_step_work_seconds": self.environment_step_seconds,
+            "rollout/environment_workers": self.environment_workers,
+            "rollout/environment_worker_seconds_sum": self.environment_worker_seconds,
+            "rollout/environment_sync_seconds": self.environment_sync_seconds,
             "rollout/continuations_per_second": (
                 self.terminal_continuations / max(self.wall_seconds, 1e-9)
             ),
@@ -232,6 +238,7 @@ class BaseGamePool:
         max_game_plies: int | None,
         dead_rules_enabled: bool = True,
         seed: int,
+        layout_prefetch_games: int = 1,
     ) -> None:
         if pool_size <= 0:
             raise ValueError("base game pool size must be positive")
@@ -244,6 +251,15 @@ class BaseGamePool:
         self.dead_rules_enabled = dead_rules_enabled
         self.rng = random.Random(seed)
         self.slots: list[BaseGameSlot] = []
+        if type(layout_prefetch_games) is not int or layout_prefetch_games <= 0:
+            raise ValueError("layout prefetch games must be a positive integer")
+        self.layout_prefetch_games = layout_prefetch_games
+        self._layout_queue: list[LayoutSample] = []
+        self._layout_queue_version: int | None = None
+
+    def invalidate_layout_queue(self) -> None:
+        self._layout_queue.clear()
+        self._layout_queue_version = None
 
     def _new_slot(
         self,
@@ -251,9 +267,15 @@ class BaseGamePool:
         behavior_version: int,
     ) -> BaseGameSlot:
         spec = mode_spec(self.mode)
-        samples = tuple(
-            layout.sample_layouts(spec.player_count, self.mode, temperature=0.7)
-        )
+        if self._layout_queue_version != behavior_version:
+            self.invalidate_layout_queue()
+            self._layout_queue_version = behavior_version
+        if not self._layout_queue:
+            self._layout_queue = layout.sample_layouts(
+                spec.player_count * self.layout_prefetch_games, self.mode, temperature=0.7,
+            )
+        samples = tuple(self._layout_queue[:spec.player_count])
+        del self._layout_queue[:spec.player_count]
         game = new_game(
             self.mode,
             setups=[sample.setup for sample in samples],
@@ -278,8 +300,8 @@ class BaseGamePool:
         """Serialize every unfinished base game and player-view history exactly."""
 
         return {
-            # Version 4 records the explicit dead-rule architecture variant.
-            "format_version": 4,
+            # Version 5 stores only endpoint/actor action histories.
+            "format_version": 5,
             "mode": self.mode.value,
             "dead_rules_enabled": self.dead_rules_enabled,
             "pool_size": self.pool_size,
@@ -287,10 +309,13 @@ class BaseGamePool:
             "max_game_plies": self.max_game_plies,
             "rng_state": self.rng.getstate(),
             "slots": [self._slot_state_dict(slot) for slot in self.slots],
+            "layout_queue_version": self._layout_queue_version,
+            "layout_queue": [dict(mode=s.mode.value, position_indices=s.position_indices,
+                                  old_log_probs=s.old_log_probs) for s in self._layout_queue],
         }
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
-        if int(state.get("format_version", -1)) != 4:
+        if int(state.get("format_version", -1)) != 5:
             raise ValueError("unsupported base-game-pool checkpoint format")
         if normalize_mode(state["mode"]) is not self.mode:
             raise ValueError("base-game-pool mode does not match trainer mode")
@@ -310,6 +335,15 @@ class BaseGamePool:
             raise ValueError("checkpoint contains too many base-game slots")
         self.slots = slots
         self.rng.setstate(state["rng_state"])
+        queue = [layout_sample_from_trace(item['mode'], item['position_indices'], item['old_log_probs'])
+                 for item in state.get('layout_queue', [])]
+        if any(s.mode is not self.mode for s in queue) or len(queue) % mode_spec(self.mode).player_count:
+            raise ValueError("invalid saved layout prefetch queue")
+        version = state.get('layout_queue_version')
+        if queue and (type(version) is not int or version < 0):
+            raise ValueError("invalid saved layout prefetch version")
+        self._layout_queue = queue
+        self._layout_queue_version = version
 
     @staticmethod
     def _slot_state_dict(slot: BaseGameSlot) -> dict[str, Any]:

@@ -1,0 +1,75 @@
+{
+  "complete": true,
+  "timestamp_unix": 1789144294.6996348,
+  "snapshot": {
+    "id": "four-dark-local:live",
+    "run_id": "four-dark-local",
+    "run_name": "四暗棋 · 本地训练",
+    "mode": "four_dark",
+    "dead_rules_enabled": true,
+    "update": 10,
+    "kind": "live",
+    "label": "最新训练快照",
+    "evaluated": false,
+    "experimental": false,
+    "available": true,
+    "format_version": 6,
+    "unavailable_reason": null,
+    "modified": 1789144288.2001176,
+    "size_bytes": 214665491,
+    "path": "runs_local_4090/four_dark/with_dead_rules/inference/policy_000000010_98bfb44c.pt"
+  },
+  "snapshot_sha256": "32977f45e523427d73ae9a854507272aa5991ca287943aa95a8825c3ca56a8cb",
+  "cpu_model": {
+    "checkpoint": "policy_000000010_98bfb44c.pt",
+    "update": 10,
+    "mode": "four_dark",
+    "device": "cpu",
+    "cuda_initialized": false,
+    "cuda_visible_devices": "",
+    "pid": 2014,
+    "threads": 2,
+    "seed": 20260911,
+    "dead_rules_enabled": true
+  },
+  "game_plies": 12,
+  "model_load_and_layout_seconds": 2.8333072220000304,
+  "cpu_round_seconds": [
+    0.04690685700006725,
+    0.13237348999996357,
+    0.13502431699998851
+  ],
+  "same_time_training": {
+    "pid": 1268,
+    "update": 10,
+    "steps": 983040,
+    "cycle_rate": 1294.0029906513985,
+    "eta_days": 26.824392752733186,
+    "required_rate_20d": 1735.5422222222223,
+    "policy_lr": 4.000000000000001e-06,
+    "metrics_finite": true
+  },
+  "tests": {
+    "local_console_full_tests.log": {
+      "passed": true,
+      "count": 271
+    },
+    "local_console_tests.log": {
+      "passed": true,
+      "count": 12
+    }
+  },
+  "source_sha256": {
+    "src/junqi/web/__init__.py": "8cb3cae813cc6e7a99b3e4bc503a33f4f28134fc45ce4c64e3c0622dc728dcbf",
+    "src/junqi/web/cpu_game.py": "55144ca36eae03d0867da9098cbcb4768de0c0866b2ce36cbb62fc678c42d8c9",
+    "src/junqi/web/monitor.py": "6012ff427b094a14798508540c2a8dae539db1460b621c981b08c44d78343aee",
+    "src/junqi/web/server.py": "0b9ce1a5b1f106e059430bd62ee9203bd1a747a1d1d89e36e48d2658b9b056de",
+    "src/junqi/web/static/dashboard.js": "c6ae469b194387ca6670285afc1a8b49a68d5ea7a61f250c8cd9983159bd3ccb",
+    "src/junqi/web/static/index.html": "2e1a582c0c5a1d40cfda5981dca9620fd92b45a33d0e4244c6487b7f102cefa6",
+    "src/junqi/web/static/play.html": "b2a8ad18b003623313f69a406e3a43d0c8ea1d938c7a9918163637f47cb43302",
+    "src/junqi/web/static/play.js": "e153d63c7c19f3b8feb962f21c8ef9fffff0180a2682d66ea3cf12e8a8011039",
+    "src/junqi/web/static/style.css": "e933986f5bf5dab64b342cca7697236e81a699241a45fd6dfd79dffa4e844601",
+    "src/junqi/training/inference_snapshot.py": "9c7515111c4f3e7d9208a58b96434149e33e52cac670855e0de7ec424732765f",
+    "tools/local_console.py": "9979caff8840c261005c9be84b27caf2d5b81c1c9013ace10024da483db9e590"
+  }
+}

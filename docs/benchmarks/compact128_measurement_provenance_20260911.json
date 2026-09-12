@@ -1,0 +1,38 @@
+{
+  "date": "2026-09-11",
+  "final_budget_scope": ["four_dark"],
+  "double_open_probe": {
+    "run": "runs/benchmarks/compact128_g48_double_open_20260911",
+    "excluded_from_budget": true,
+    "reason": "user narrowed the budget to four_dark only",
+    "signal_logged_local": "2026-09-11 01:23:44.394",
+    "action": "SIGTERM after verified PID and cwd; completed update 3, retained checkpoint, finished bounded capacity checks, exited successfully",
+    "completed_environment_steps": 36864
+  },
+  "stopped_legacy_probe": {
+    "wsl_distribution": "Ubuntu-24.04",
+    "pid": 495,
+    "run": "runs/benchmarks/parallel_games_24_four_dark_20260911",
+    "config_revision": 21,
+    "action": "verified exact process command and cwd, then SIGTERM; completed update 3 and exited",
+    "signal_logged_local": "2026-09-11 00:36:55.682",
+    "last_update_logged_local": "2026-09-11 00:38:23.671",
+    "historical_checkpoints": "not modified; the legacy benchmark itself removed its disposable checkpoint"
+  },
+  "discarded_overlapping_probe": {
+    "pid": 476,
+    "run": "runs/benchmarks/compact128_g40_four_dark_20260911",
+    "games": 40,
+    "transitions_per_update": 5120,
+    "reason": "another process (1360) started a 48-game GPU benchmark during this probe; no end-to-end timing from this run is used",
+    "action": "terminated only this task's verified isolated benchmark; logs retained; no production checkpoint was loaded or changed"
+  },
+  "other_observed_probe": {
+    "pid": 1360,
+    "run": "runs/benchmarks/parallel_games_48_four_dark_rev22_20260911",
+    "excluded_updates_for_overlap": [1, 2],
+    "accepted_updates": [3, 4],
+    "accepted_local_time_window": ["2026-09-11 00:50:27.087", "2026-09-11 00:58:27.037"],
+    "note": "WSL process snapshots showed only PID 1360 training during the later window. This task's replacement probe started at 00:58:42.883 after PID 1360 exited. First two updates remain excluded."
+  }
+}

@@ -1,0 +1,162 @@
+{
+  "device": "NVIDIA GeForce RTX 4090",
+  "torch": "2.11.0+cu130",
+  "environment_steps_per_update": 2560,
+  "full_update_speedup": 2.925803234904701,
+  "full_update_wall_seconds": {
+    "before": 56.049041899,
+    "after": 19.156804952
+  },
+  "full_update_allocated_gib": {
+    "before": 17.952377796173096,
+    "after": 11.279533386230469
+  },
+  "full_update_stage_seconds": {
+    "before": {
+      "rollout/wall_seconds": 25.862132694000003,
+      "timing/policy_backward_seconds": 15.616939185999996,
+      "timing/critic_backward_seconds": 14.061015968,
+      "timing/layout_backward_seconds": 0.0,
+      "timing/update_seconds": 55.695636158999996
+    },
+    "after": {
+      "rollout/wall_seconds": 4.768761471000001,
+      "timing/policy_backward_seconds": 7.109967155,
+      "timing/critic_backward_seconds": 6.843531258000002,
+      "timing/layout_backward_seconds": 0.0,
+      "timing/update_seconds": 18.782580232
+    }
+  },
+  "python_hot_calls": {
+    "before": {
+      "rollout": {
+        "__hash__": 325037,
+        "builtins.hash": 702124,
+        "torch.as_tensor": 0,
+        "torch.tensor": 1176,
+        "copy_": 0
+      },
+      "learner": {
+        "__hash__": 3694,
+        "builtins.hash": 4998,
+        "torch.as_tensor": 31527,
+        "torch.tensor": 129,
+        "copy_": 0
+      }
+    },
+    "after": {
+      "rollout": {
+        "__hash__": 1827,
+        "builtins.hash": 53782,
+        "torch.as_tensor": 0,
+        "torch.tensor": 7,
+        "copy_": 90
+      },
+      "learner": {
+        "__hash__": 308,
+        "builtins.hash": 0,
+        "torch.as_tensor": 0,
+        "torch.tensor": 104,
+        "copy_": 33
+      }
+    }
+  },
+  "profiled_gpu_events": {
+    "before": {
+      "rollout": 14333,
+      "learner": 14946
+    },
+    "after": {
+      "rollout": 1666,
+      "learner": 5162
+    }
+  },
+  "matched_observed_rollout_fingerprint": false,
+  "numerical_validation": {
+    "checkpoint": "runs/benchmarks/compact128_g40_exclusive_four_dark_20260911/four_dark/with_dead_rules/checkpoints/latest.pt",
+    "device": "NVIDIA GeForce RTX 4090",
+    "checks": [
+      {
+        "model": "policy",
+        "dtype": "torch.float32",
+        "queries": 96,
+        "max_context_absolute_error": 2.2649765014648438e-06,
+        "max_output_absolute_error": 9.5367431640625e-07,
+        "decode_tokens": 256,
+        "graph_replays": 8
+      },
+      {
+        "model": "critic",
+        "dtype": "torch.float32",
+        "queries": 96,
+        "max_context_absolute_error": 2.2649765014648438e-06,
+        "max_output_absolute_error": 5.238689482212067e-10,
+        "decode_tokens": 256,
+        "graph_replays": 8
+      },
+      {
+        "model": "policy",
+        "dtype": "torch.bfloat16",
+        "queries": 96,
+        "max_context_absolute_error": 0.022823482751846313,
+        "max_output_absolute_error": 0.005124807357788086,
+        "decode_tokens": 256,
+        "graph_replays": 8
+      },
+      {
+        "model": "critic",
+        "dtype": "torch.bfloat16",
+        "queries": 96,
+        "max_context_absolute_error": 0.018775343894958496,
+        "max_output_absolute_error": 7.62939453125e-06,
+        "decode_tokens": 256,
+        "graph_replays": 8
+      }
+    ],
+    "checkpoint_stat_unchanged": true,
+    "complete": true
+  },
+  "distributed_validation": {
+    "world_size": 2,
+    "backend": "gloo",
+    "environment_steps": 8,
+    "completed_update": 2,
+    "resumed_update": 1,
+    "saves": [
+      "before_model_selection",
+      "after_model_selection",
+      "before_model_selection",
+      "after_model_selection"
+    ],
+    "checkpoints_only_at_evaluation": true,
+    "ranks_have_identical_parameters": true,
+    "pool_and_model_resume_exact": true,
+    "scheduled_evaluations": 2,
+    "checkpoint": "/mnt/e/agent/siguozero/runs/benchmarks/ppo_pipeline_20260911/ddp_verified/four_dark/with_dead_rules/checkpoints/latest.pt",
+    "complete": true
+  },
+  "tests": {
+    "cpu_passed": 240,
+    "cpu_skipped": 5,
+    "cpu_subtests_passed": 273,
+    "cuda_passed": 2
+  },
+  "source_sha256": {
+    "src\\junqi\\training\\history_arrays.py": "718afb2b51167ffb394a82557f9b21ca18ccf26510a13e6cd57f7a8d5136cb60",
+    "src\\junqi\\training\\fixed_kv.py": "d44a65ce0d95b6139150b32a507c5fe4189a9f8ea650d1ebd13f503b9deaf997",
+    "src\\junqi\\training\\fixed_kv_kernels.py": "d406ebdad9a3b01736e49056b5e6c5b2126c8250203edce3afb3230210d9881c",
+    "src\\junqi\\training\\encoding.py": "eed26c60cf5aec514211238a2ed697fa5f8c4c266e592db5f0b2edfba15c99f3",
+    "src\\junqi\\training\\models.py": "df13ded444ed5496395cc816fdd2450902aa385f0dbb8292ed6fabd9fc8e495a",
+    "src\\junqi\\training\\ppo.py": "684501e81702571dbd4241563f96fc6da5c1770ccbf4907eadf4666bffc2bb84",
+    "src\\junqi\\training\\settings.py": "ecf0f06e6b08515348695ee6bf4360013372691d96b5d3a3da3e7980892146bb",
+    "src\\junqi\\training\\cli.py": "487e48b922e35f26f996460eb00dc9710b01cc463fccdaed3fd9481d5e731849",
+    "configs\\bootstrap.yaml": "14b61ae7553ac6564afaac8f73e097c0738c50e3cb5fd021502bd21e7468a54f",
+    "tests\\test_ppo_pipeline.py": "57369b9b3ed0d5ee21894853839c67e71cb624f3fea2cfd188795bc95eb9ad26"
+  },
+  "limitations": [
+    "Short 40-game RTX 4090 probe; no PRO 6000 measurement or 15-day guarantee.",
+    "BF16 changes rounding and sampled trajectory; identical checkpoint, restored RNG, step count and history length statistics, not bitwise identical rollout.",
+    "Full update includes 15 policy and 15 critic optimizer steps; no layout update, evaluation or parameter save in that probe."
+  ],
+  "complete": true
+}

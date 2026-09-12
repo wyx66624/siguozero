@@ -19,9 +19,18 @@ from .accelerator import (
 )
 
 
-# Version 4 makes the deterministic dead-rule feature set an explicit,
-# architecture-changing training variant.  Cross-variant resume is forbidden.
-CHECKPOINT_FORMAT_VERSION = 4
+# Version 6 uses a five-number coordinate/player action projection and histories
+# without event outcome features. Version 5's action embeddings are incompatible.
+from .checkpoint_format import CHECKPOINT_FORMAT_VERSION
+
+
+def require_current_checkpoint(payload: dict[str, Any]) -> None:
+    if payload.get("format_version") != CHECKPOINT_FORMAT_VERSION:
+        raise ValueError(
+            f"unsupported checkpoint format: {payload.get('format_version')!r}; "
+            "the whole-board linear and five-input action architecture requires version 6 weights. "
+            "Use a new run directory; old board/action encoder weights are incompatible."
+        )
 
 
 def capture_rng_state(
@@ -191,10 +200,7 @@ class CheckpointManager:
             map_location=map_location,
             weights_only=False,
         )
-        if payload.get("format_version") != CHECKPOINT_FORMAT_VERSION:
-            raise RuntimeError(
-                f"unsupported checkpoint format: {payload.get('format_version')!r}"
-            )
+        require_current_checkpoint(payload)
         return payload
 
 
@@ -214,6 +220,7 @@ def restore_training_state(
     critic: nn.Module | None = None,
     critic_optimizer: torch.optim.Optimizer | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    require_current_checkpoint(payload)
     if payload["mode"] != expected_mode:
         raise RuntimeError(
             f"checkpoint mode {payload['mode']!r} does not match {expected_mode!r}"

@@ -7,19 +7,13 @@ from dataclasses import dataclass
 import math
 from typing import Iterable, Sequence
 
+import numpy as np
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
-from ..board import (
-    ArmPoint,
-    FourPlayerBoard,
-    HEADQUARTERS_COORDINATES,
-    PathKind,
-    PointKind,
-    TwoPlayerBoard,
-)
+from ..board import HEADQUARTERS_COORDINATES
 from ..pieces import (
     DEPLOYMENT_PIECE_SEQUENCE,
     PIECE_TYPE_INDICES,
@@ -28,17 +22,20 @@ from ..pieces import (
     PlayerSetup,
 )
 from .encoding import (
-    ACTION_COMBAT_PAD,
+    ACTION_ENCODER_TYPE,
+    ACTION_FEATURE_DIM,
     ACTION_PLAYER_PAD,
-    ACTION_POINT_PAD,
     BOARD_CODE_VOCAB_SIZE,
     BOARD_PAD_CODE,
     CASUALTY_SLOTS_PER_PLAYER,
+    MAX_BOARD_POINTS,
     MAX_CASUALTY_BITS,
     PolicyState,
     StateTokenRecord,
     history_prefix_groups,
+    policy_history_key,
 )
+from .history_arrays import HistoryArrayView, record_array
 from .accelerator import is_accelerator, supports_pinned_memory
 from .modes import MODE_SPECS, TrainingMode, mode_spec, normalize_mode
 from .paged_kv import PagedKVCache, PagedKVState
@@ -95,9 +92,8 @@ def _categorical_from_uniforms(probabilities: Tensor, uniforms: Tensor) -> Tenso
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
     board_dim: int = 256
-    board_layers: int = 4
-    board_heads: int = 8
-    board_ffn_dim: int = 1024
+    board_encoder_type: str = "whole_board_one_hot_linear"
+    action_encoder_type: str = ACTION_ENCODER_TYPE
     temporal_dim: int = 512
     temporal_layers: int = 8
     temporal_heads: int = 8
@@ -114,14 +110,28 @@ class ModelConfig:
     incremental_inference: bool = True
     paged_kv_cache: bool = True
     paged_kv_length_bucket_tokens: int = 1001
+    ppo_array_history: bool = True
+    ppo_fixed_kv: bool = True
+    ppo_cuda_graphs: bool = True
+    temporal_causal_sdpa: bool = False
+    ppo_tensor_learner: bool = False
+    ppo_varlen_attention: bool = False
+    ppo_low_precision_residual: bool = False
+    ppo_sampling_graphs: bool = False
+    ppo_compile_mode: str = "off"
     activation_checkpointing: bool = True
     dead_rules_enabled: bool = True
 
     def __post_init__(self) -> None:
+        if self.action_encoder_type != ACTION_ENCODER_TYPE:
+            raise ValueError("unsupported action encoder; expected coordinates_player_linear")
+        if self.board_encoder_type != "whole_board_one_hot_linear":
+            raise ValueError("unsupported board encoder; expected whole_board_one_hot_linear")
+        if self.board_dim <= 0 or self.board_chunk_size <= 0:
+            raise ValueError("board dimension and chunk size must be positive")
         if self.temporal_dim != 2 * self.board_dim:
             raise ValueError("temporal_dim must equal action_dim + board_dim")
         for dim, heads, label in (
-            (self.board_dim, self.board_heads, "board"),
             (self.temporal_dim, self.temporal_heads, "temporal"),
             (self.layout_dim, self.layout_heads, "layout"),
         ):
@@ -141,6 +151,15 @@ class ModelConfig:
             raise ValueError("paged KV length bucket must be positive")
         if not isinstance(self.dead_rules_enabled, bool):
             raise ValueError("dead_rules_enabled must be a boolean")
+        for name in ("ppo_array_history", "ppo_fixed_kv", "ppo_cuda_graphs", "temporal_causal_sdpa"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a boolean")
+        for name in ('ppo_tensor_learner', 'ppo_varlen_attention',
+                     'ppo_low_precision_residual', 'ppo_sampling_graphs'):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f'{name} must be a boolean')
+        if self.ppo_compile_mode not in ("off", "default", "reduce-overhead", "max-autotune-no-cudagraphs"):
+            raise ValueError("invalid PPO compile mode")
 
     @property
     def max_sequence_tokens(self) -> int:
@@ -152,9 +171,6 @@ class ModelConfig:
 
         return cls(
             board_dim=32,
-            board_layers=1,
-            board_heads=4,
-            board_ffn_dim=64,
             temporal_dim=64,
             temporal_layers=1,
             temporal_heads=4,
@@ -171,13 +187,10 @@ class ModelConfig:
 
     @classmethod
     def main(cls, *, dead_rules_enabled: bool = True) -> ModelConfig:
-        """Approximately 162M-parameter main-training pair from the design."""
+        """Main temporal/layout capacity with a single whole-board projection."""
 
         return cls(
             board_dim=256,
-            board_layers=8,
-            board_heads=8,
-            board_ffn_dim=1024,
             temporal_dim=512,
             temporal_layers=32,
             temporal_heads=8,
@@ -194,13 +207,10 @@ class ModelConfig:
 
     @classmethod
     def extended(cls, *, dead_rules_enabled: bool = True) -> ModelConfig:
-        """Approximately 243M-parameter capacity-ablation pair."""
+        """Extended temporal/layout capacity with the same whole-board encoder."""
 
         return cls(
             board_dim=256,
-            board_layers=12,
-            board_heads=8,
-            board_ffn_dim=1024,
             temporal_dim=512,
             temporal_layers=48,
             temporal_heads=8,
@@ -254,8 +264,27 @@ class PreNormEncoderBlock(nn.Module):
         *,
         valid_mask: Tensor,
         attention_mask: Tensor | None = None,
+        is_causal: bool = False,
     ) -> Tensor:
         normalized = self.attention_norm(inputs)
+        if is_causal:
+            # Temporal batches have valid prefixes and right padding. A valid
+            # causal query cannot see a padded key, so no B*H*S*S mask is needed.
+            if attention_mask is not None:
+                raise ValueError('direct causal attention must not receive an explicit mask')
+            qkv = F.linear(normalized, self.attention.in_proj_weight, self.attention.in_proj_bias)
+            batch, tokens, width = inputs.shape
+            heads = self.attention.num_heads
+            q, k, v = [item.view(batch, tokens, heads, width // heads).transpose(1, 2)
+                       for item in qkv.chunk(3, dim=-1)]
+            attended = F.scaled_dot_product_attention(
+                q, k, v, is_causal=True,
+                dropout_p=self.attention.dropout if self.training else 0.)
+            attended = attended.transpose(1, 2).contiguous().view(batch, tokens, width)
+            attended = F.linear(attended, self.attention.out_proj.weight, self.attention.out_proj.bias)
+            outputs = inputs + self.dropout(attended)
+            outputs = outputs + self.dropout(self.ffn(self.ffn_norm(outputs)))
+            return outputs.masked_fill(~valid_mask.unsqueeze(-1), 0.)
         key_padding_mask = torch.zeros(
             valid_mask.shape,
             dtype=normalized.dtype,
@@ -358,142 +387,72 @@ class PreNormEncoderBlock(nn.Module):
         return outputs
 
 
-def _static_board_features() -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    point_kind = torch.zeros((3, 129), dtype=torch.long)
-    row_index = torch.zeros((3, 129), dtype=torch.long)
-    road_degree = torch.zeros((3, 129), dtype=torch.long)
-    rail_degree = torch.zeros((3, 129), dtype=torch.long)
-    valid = torch.zeros((3, 129), dtype=torch.bool)
-    kind_indices = {
-        PointKind.STATION: 0,
-        PointKind.CAMP: 1,
-        PointKind.HEADQUARTERS: 2,
-        PointKind.CENTRAL_STATION: 3,
-    }
+class WholeBoardEncoder(nn.Module):
+    """Project one fixed, categorical whole-board vector into one history token.
 
-    boards = {
-        TrainingMode.FOUR_DARK: FourPlayerBoard(),
-        TrainingMode.DOUBLE_OPEN: FourPlayerBoard(),
-        TrainingMode.TWO_PLAYER: TwoPlayerBoard(),
-    }
-    for mode, board in boards.items():
-        mode_index = mode_spec(mode).mode_index
-        valid[mode_index, : board.point_count] = True
-        for code in range(board.point_count):
-            record = board.point(code)
-            point_kind[mode_index, code] = kind_indices[record.kind]
-            physical = record.physical
-            row_index[mode_index, code] = (
-                physical.row if isinstance(physical, ArmPoint) else 0
-            )
-            road_degree[mode_index, code] = min(
-                len(board.neighbors(code, PathKind.ROAD)), 8
-            )
-            rail_degree[mode_index, code] = min(
-                len(board.neighbors(code, PathKind.RAILWAY)), 8
-            )
-    return point_kind, row_index, road_degree, rail_degree, valid
-
-
-def _graph_relation_tables() -> Tensor:
-    """Return graph-distance/edge-type categories including a pooling token."""
-
-    tables = torch.full((3, 130, 130), 7, dtype=torch.long)
-    boards = {
-        TrainingMode.FOUR_DARK: FourPlayerBoard(),
-        TrainingMode.DOUBLE_OPEN: FourPlayerBoard(),
-        TrainingMode.TWO_PLAYER: TwoPlayerBoard(),
-    }
-    for mode, board in boards.items():
-        mode_index = mode_spec(mode).mode_index
-        size = board.point_count
-        tables[mode_index, 0, : size + 1] = 0
-        tables[mode_index, : size + 1, 0] = 0
-        for source in range(size):
-            distances = [-1] * size
-            distances[source] = 0
-            queue = [source]
-            for current in queue:
-                if distances[current] >= 3:
-                    continue
-                for target in board.neighbors(current):
-                    if distances[target] == -1:
-                        distances[target] = distances[current] + 1
-                        queue.append(target)
-            for target, distance in enumerate(distances):
-                if source == target:
-                    relation = 1
-                elif board.path_kind(source, target) is PathKind.ROAD:
-                    relation = 2
-                elif board.path_kind(source, target) is PathKind.RAILWAY:
-                    relation = 3
-                elif distance == 2:
-                    relation = 4
-                elif distance == 3:
-                    relation = 5
-                else:
-                    relation = 6
-                tables[mode_index, source + 1, target + 1] = relation
-    return tables
-
-
-class GraphBoardEncoder(nn.Module):
-    """Encode categorical board chains with explicit road/rail graph bias."""
+    No learned point embeddings, spatial attention or point feature outputs.
+    Position-major one-hot features preserve categorical IDs without treating
+    their numbers as piece strength. Mode and optional casualty bits enter the
+    same single linear layer.
+    """
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
-        dim = config.board_dim
         self.config = config
-        self.code_embedding = nn.Embedding(
-            BOARD_CODE_VOCAB_SIZE, dim, padding_idx=BOARD_PAD_CODE
+        self.board_feature_dim = MAX_BOARD_POINTS * BOARD_CODE_VOCAB_SIZE
+        self.mode_feature_dim = len(MODE_SPECS)
+        self.casualty_feature_dim = MAX_CASUALTY_BITS if config.dead_rules_enabled else 0
+        self.input_dim = (
+            self.board_feature_dim + self.mode_feature_dim + self.casualty_feature_dim
         )
-        self.position_embedding = nn.Embedding(129, dim)
-        self.point_kind_embedding = nn.Embedding(4, dim)
-        self.row_embedding = nn.Embedding(7, dim)
-        self.road_degree_embedding = nn.Embedding(9, dim)
-        self.rail_degree_embedding = nn.Embedding(9, dim)
-        self.mode_embedding = nn.Embedding(3, dim)
-        self.board_token = nn.Parameter(torch.empty(dim))
-        if config.dead_rules_enabled:
-            self.casualty_projection: nn.Linear | None = nn.Linear(
-                MAX_CASUALTY_BITS, dim, bias=False
-            )
-            self.board_casualty_fusion: nn.Sequential | None = nn.Sequential(
-                nn.Linear(2 * dim, dim),
-                nn.SiLU(),
-                nn.LayerNorm(dim),
-            )
-        else:
-            # The off variant contains no dormant 75-D input or unused
-            # parameters, making it a genuine architecture-level ablation.
-            self.casualty_projection = None
-            self.board_casualty_fusion = None
-        self.relation_bias = nn.Embedding(8, 1)
-        self.layers = nn.ModuleList(
-            PreNormEncoderBlock(
-                dim,
-                config.board_heads,
-                config.board_ffn_dim,
-                config.dropout,
-            )
-            for _ in range(config.board_layers)
-        )
-        self.final_norm = nn.LayerNorm(dim)
+        self.projection = nn.Linear(self.input_dim, config.board_dim)
+        # Sparse input: approximately one active feature per real board point.
+        nn.init.normal_(self.projection.weight, std=MAX_BOARD_POINTS ** -0.5)
+        nn.init.zeros_(self.projection.bias)
 
-        features = _static_board_features()
-        self.register_buffer("point_kind", features[0], persistent=False)
-        self.register_buffer("row_index", features[1], persistent=False)
-        self.register_buffer("road_degree", features[2], persistent=False)
-        self.register_buffer("rail_degree", features[3], persistent=False)
-        self.register_buffer("static_valid", features[4], persistent=False)
-        self.register_buffer(
-            "relation_tables", _graph_relation_tables(), persistent=False
+    def encode_vector(
+        self,
+        board_codes: Tensor,
+        point_mask: Tensor,
+        mode_ids: Tensor,
+        casualty_bits: Tensor | None,
+    ) -> Tensor:
+        """Build [boards, features] directly; never allocate [boards, points, d]."""
+        if board_codes.ndim != 2:
+            raise ValueError("board_codes must have shape [batch, points]")
+        batch, points = board_codes.shape
+        if (
+            batch == 0 or not 0 < points <= MAX_BOARD_POINTS
+            or point_mask.shape != board_codes.shape
+        ):
+            raise ValueError("invalid board point tensor shape")
+        if mode_ids.shape != (batch,):
+            raise ValueError("mode_ids must have shape [batch]")
+        if self.config.dead_rules_enabled:
+            if casualty_bits is None or casualty_bits.shape != (batch, MAX_CASUALTY_BITS):
+                raise ValueError(f"casualty_bits must have shape [batch, {MAX_CASUALTY_BITS}]")
+        elif casualty_bits is not None:
+            raise ValueError("casualty_bits must be absent when dead rules are disabled")
+        dtype = (torch.get_autocast_dtype(board_codes.device.type)
+                 if torch.is_autocast_enabled(board_codes.device.type) else self.projection.weight.dtype)
+        vector = torch.zeros((batch, self.input_dim), dtype=dtype, device=board_codes.device)
+        # Padded points have no active category; real empty points activate 0.
+        codes = board_codes.masked_fill(~point_mask, BOARD_PAD_CODE)
+        offsets = torch.arange(points, device=board_codes.device) * BOARD_CODE_VOCAB_SIZE
+        # Invalid category IDs must fail, not alias a neighboring point/mode
+        # after adding the flattened offsets. scatter checks the sentinel.
+        indices = (codes + offsets).masked_fill(
+            (codes < 0) | (codes >= BOARD_CODE_VOCAB_SIZE), self.input_dim
         )
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        nn.init.normal_(self.board_token, std=0.02)
-        nn.init.zeros_(self.relation_bias.weight)
+        vector.scatter_(1, indices, point_mask.to(dtype))
+        mode_indices = (mode_ids.unsqueeze(1) + self.board_feature_dim).masked_fill(
+            (mode_ids.unsqueeze(1) < 0) | (mode_ids.unsqueeze(1) >= self.mode_feature_dim),
+            self.input_dim,
+        )
+        vector.scatter_(1, mode_indices, 1.0)
+        if casualty_bits is not None:
+            vector[:, self.board_feature_dim + self.mode_feature_dim:] = casualty_bits.to(dtype)
+        return vector
 
     def forward(
         self,
@@ -501,117 +460,26 @@ class GraphBoardEncoder(nn.Module):
         point_mask: Tensor,
         mode_ids: Tensor,
         casualty_bits: Tensor | None,
-    ) -> tuple[Tensor, Tensor]:
-        if board_codes.ndim != 2:
-            raise ValueError("board_codes must have shape [batch, points]")
-        batch, points = board_codes.shape
-        if points > 129 or point_mask.shape != board_codes.shape:
-            raise ValueError("invalid board point tensor shape")
-        if mode_ids.shape != (batch,):
-            raise ValueError("mode_ids must have shape [batch]")
-        if self.config.dead_rules_enabled:
-            if casualty_bits is None or casualty_bits.shape != (
-                batch,
-                MAX_CASUALTY_BITS,
-            ):
-                raise ValueError(
-                    f"casualty_bits must have shape [batch, {MAX_CASUALTY_BITS}]"
-                )
-        elif casualty_bits is not None:
-            raise ValueError("casualty_bits must be absent when dead rules are disabled")
-        if batch == 0:
-            raise ValueError("cannot encode an empty board batch")
-        positions = torch.arange(points, device=board_codes.device)
-        static_kind = self.point_kind[mode_ids, :points]
-        rows = self.row_index[mode_ids, :points]
-        road = self.road_degree[mode_ids, :points]
-        rail = self.rail_degree[mode_ids, :points]
-        tokens = (
-            self.code_embedding(board_codes)
-            + self.position_embedding(positions).unsqueeze(0)
-            + self.point_kind_embedding(static_kind)
-            + self.row_embedding(rows)
-            + self.road_degree_embedding(road)
-            + self.rail_degree_embedding(rail)
-            + self.mode_embedding(mode_ids).unsqueeze(1)
-        )
-        pool = self.board_token.view(1, 1, -1).expand(batch, 1, -1)
-        tokens = torch.cat((pool, tokens), dim=1)
-        valid = torch.cat(
-            (
-                torch.ones((batch, 1), dtype=torch.bool, device=tokens.device),
-                point_mask,
-            ),
-            dim=1,
-        )
-        relation_ids = self.relation_tables[mode_ids[0], : points + 1, : points + 1]
-        attention_bias = self.relation_bias(relation_ids).squeeze(-1)
-        attention_bias = attention_bias.to(tokens.dtype)
-        for layer in self.layers:
-            if self.training and self.config.activation_checkpointing:
-                tokens = checkpoint(
-                    lambda values, block=layer: block(
-                        values,
-                        valid_mask=valid,
-                        attention_mask=attention_bias,
-                    ),
-                    tokens,
-                    use_reentrant=False,
-                )
-            else:
-                tokens = layer(
-                    tokens,
-                    valid_mask=valid,
-                    attention_mask=attention_bias,
-                )
-        tokens = self.final_norm(tokens)
-        board_global = tokens[:, 0]
-        if self.config.dead_rules_enabled:
-            if self.casualty_projection is None or self.board_casualty_fusion is None:
-                raise RuntimeError("dead-rule feature modules were not initialized")
-            assert casualty_bits is not None
-            casualty_embedding = self.casualty_projection(
-                casualty_bits.to(tokens.dtype)
-            )
-            board_global = self.board_casualty_fusion(
-                torch.cat((board_global, casualty_embedding), dim=-1)
-            )
-        return board_global, tokens[:, 1:]
+    ) -> Tensor:
+        return self.projection(self.encode_vector(board_codes, point_mask, mode_ids, casualty_bits))
 
 
 class PublicActionEncoder(nn.Module):
+    """Project five endpoint/actor numbers into one action history vector."""
+
     def __init__(self, output_dim: int) -> None:
         super().__init__()
-        field_dim = max(8, output_dim // 4)
-        self.source = nn.Embedding(130, field_dim, padding_idx=ACTION_POINT_PAD)
-        self.destination = nn.Embedding(130, field_dim, padding_idx=ACTION_POINT_PAD)
-        self.actor = nn.Embedding(5, field_dim, padding_idx=ACTION_PLAYER_PAD)
-        self.combat = nn.Embedding(5, field_dim, padding_idx=ACTION_COMBAT_PAD)
-        self.was_attack = nn.Embedding(3, field_dim, padding_idx=2)
-        self.flag_owner = nn.Embedding(5, field_dim, padding_idx=ACTION_PLAYER_PAD)
-        self.reveal_count = nn.Embedding(5, field_dim)
-        self.eliminated_count = nn.Embedding(5, field_dim)
-        self.projection = nn.Linear(8 * field_dim, output_dim)
-        self.norm = nn.LayerNorm(output_dim)
+        self.projection = nn.Linear(ACTION_FEATURE_DIM, output_dim)
 
     def forward(self, fields: Tensor, present: Tensor) -> Tensor:
-        if fields.shape[-1] != 8:
-            raise ValueError("action field tensor must end with 8 values")
-        embeddings = torch.cat(
-            (
-                self.source(fields[..., 0]),
-                self.destination(fields[..., 1]),
-                self.actor(fields[..., 2]),
-                self.combat(fields[..., 3]),
-                self.was_attack(fields[..., 4]),
-                self.flag_owner(fields[..., 5]),
-                self.reveal_count(fields[..., 6]),
-                self.eliminated_count(fields[..., 7]),
-            ),
-            dim=-1,
-        )
-        encoded = self.norm(self.projection(embeddings))
-        return encoded * present.unsqueeze(-1).to(encoded.dtype)
+        if fields.ndim < 1 or fields.shape[-1] != ACTION_FEATURE_DIM:
+            raise ValueError("action field tensor must end with 5 coordinate/player values")
+        if present.shape != fields.shape[:-1] or present.dtype != torch.bool:
+            raise ValueError("action presence mask must match the leading dimensions")
+        values = fields.to(self.projection.weight.dtype).masked_fill(~present.unsqueeze(-1), 0)
+        encoded = self.projection(values)
+        # Bias and padding cannot introduce a learned initial/no-action token.
+        return encoded.masked_fill(~present.unsqueeze(-1), 0)
 
 
 @dataclass(slots=True)
@@ -631,6 +499,7 @@ class PolicyTensorBatch:
     revealed_mask: Tensor
     current_player: Tensor
     mode_ids: Tensor
+    valid_indices: Tensor
 
 
 def collate_policy_states(
@@ -641,144 +510,62 @@ def collate_policy_states(
 ) -> PolicyTensorBatch:
     if not states:
         raise ValueError("cannot collate an empty policy batch")
-    modes = {state.mode for state in states}
-    if len(modes) != 1:
+    if len({state.mode for state in states}) != 1:
         raise ValueError("a policy batch must use one information mode")
-    max_tokens = max(len(state.records) for state in states)
-    max_points = max(len(record.board_codes) for state in states for record in state.records)
-    batch = len(states)
-    packed_tokens = sum(len(state.records) for state in states)
+    spec = mode_spec(states[0].mode)
+    lengths = np.asarray([len(state.records) for state in states], dtype=np.int64)
+    if np.any(lengths <= 0):
+        raise ValueError("a policy history cannot be empty")
+    batch, time_steps, packed = len(states), int(lengths.max()), int(lengths.sum())
+    width = spec.point_count + (MAX_CASUALTY_BITS if dead_rules_enabled else 0)
     requested_device = torch.device(device)
     pin_memory = supports_pinned_memory(requested_device)
-    board_codes = torch.full(
-        (packed_tokens, max_points),
-        BOARD_PAD_CODE,
-        dtype=torch.long,
-        pin_memory=pin_memory,
-    )
-    casualty_bits = (
-        torch.zeros(
-            (packed_tokens, MAX_CASUALTY_BITS),
-            dtype=torch.float32,
-            pin_memory=pin_memory,
-        )
-        if dead_rules_enabled
-        else None
-    )
-    point_mask = torch.zeros(
-        (batch, max_points), dtype=torch.bool, pin_memory=pin_memory
-    )
-    token_owner = torch.empty(
-        (packed_tokens,), dtype=torch.long, pin_memory=pin_memory
-    )
-    token_mask = torch.zeros(
-        (batch, max_tokens), dtype=torch.bool, pin_memory=pin_memory
-    )
-    action_fields = torch.zeros(
-        (batch, max_tokens, 8), dtype=torch.long, pin_memory=pin_memory
-    )
-    action_present = torch.zeros(
-        (batch, max_tokens), dtype=torch.bool, pin_memory=pin_memory
-    )
-    no_interaction = torch.zeros(
-        (batch, max_tokens), dtype=torch.long, pin_memory=pin_memory
-    )
-    active_mask = torch.zeros(
-        (batch, max_tokens), dtype=torch.long, pin_memory=pin_memory
-    )
-    revealed_mask = torch.zeros(
-        (batch, max_tokens), dtype=torch.long, pin_memory=pin_memory
-    )
-    current_player = torch.full(
-        (batch, max_tokens),
-        ACTION_PLAYER_PAD,
-        dtype=torch.long,
-        pin_memory=pin_memory,
-    )
-    mode_ids = torch.empty((batch,), dtype=torch.long, pin_memory=pin_memory)
-
-    packed_index = 0
-    for batch_index, state in enumerate(states):
-        spec = mode_spec(state.mode)
-        mode_ids[batch_index] = spec.mode_index
-        point_mask[batch_index, : spec.point_count] = True
-        for time_index, record in enumerate(state.records):
-            if len(record.board_codes) != spec.point_count:
-                raise ValueError("history board length does not match its mode")
-            token_mask[batch_index, time_index] = True
-            token_owner[packed_index] = batch_index
-            board_codes[packed_index, : spec.point_count] = torch.as_tensor(
-                record.board_codes, dtype=torch.long
-            )
-            if dead_rules_enabled:
-                if record.known_casualty_bits is None:
-                    raise ValueError("dead-rule model requires casualty history")
-                expected_casualty_bits = {
-                    TrainingMode.FOUR_DARK: 3 * CASUALTY_SLOTS_PER_PLAYER,
-                    TrainingMode.DOUBLE_OPEN: 2 * CASUALTY_SLOTS_PER_PLAYER,
-                    TrainingMode.TWO_PLAYER: CASUALTY_SLOTS_PER_PLAYER,
-                }[state.mode]
-                if len(record.known_casualty_bits) != expected_casualty_bits:
-                    raise ValueError("history casualty length does not match its mode")
-                if any(value not in (0, 1) for value in record.known_casualty_bits):
-                    raise ValueError("history casualty values must be binary")
-                source_bits = torch.as_tensor(
-                    record.known_casualty_bits, dtype=torch.float32
-                )
-                assert casualty_bits is not None
-                if state.mode is TrainingMode.FOUR_DARK:
-                    casualty_bits[packed_index] = source_bits
-                elif state.mode is TrainingMode.DOUBLE_OPEN:
-                    casualty_bits[
-                        packed_index,
-                        :CASUALTY_SLOTS_PER_PLAYER,
-                    ] = source_bits[:CASUALTY_SLOTS_PER_PLAYER]
-                    casualty_bits[
-                        packed_index,
-                        2 * CASUALTY_SLOTS_PER_PLAYER :,
-                    ] = source_bits[CASUALTY_SLOTS_PER_PLAYER:]
-                else:
-                    casualty_bits[
-                        packed_index,
-                        CASUALTY_SLOTS_PER_PLAYER : 2 * CASUALTY_SLOTS_PER_PLAYER,
-                    ] = source_bits
-            elif record.known_casualty_bits is not None:
-                raise ValueError("non-dead-rule model must not receive casualty history")
-            no_interaction[batch_index, time_index] = record.no_interaction_plies
-            active_mask[batch_index, time_index] = record.active_mask
-            revealed_mask[batch_index, time_index] = record.revealed_mask
-            current_player[batch_index, time_index] = record.current_player
-            if record.action is not None:
-                action_present[batch_index, time_index] = True
-                action_fields[batch_index, time_index] = torch.as_tensor(
-                    record.action.as_tuple(), dtype=torch.long
-                )
-            packed_index += 1
-
-    def transfer(tensor: Tensor) -> Tensor:
-        return tensor.to(requested_device, non_blocking=pin_memory)
-
+    # One compact upload for observations, one for all integer indices. The
+    # tensor's NumPy view lets whole history blocks fill pinned memory directly.
+    raw_cpu = torch.empty((packed, width + 10), dtype=torch.int16, pin_memory=pin_memory)
+    rows = raw_cpu.numpy()
+    offset = 0
+    for state, length in zip(states, lengths, strict=True):
+        target = rows[offset:offset + length]
+        if isinstance(state.records, HistoryArrayView):
+            if state.records.mode is not state.mode or state.records.dead_rules != dead_rules_enabled:
+                raise ValueError("history array mode/dead-rule features do not match the model")
+            state.records.copy_rows(target)
+        else:
+            for row, record in zip(target, state.records, strict=True):
+                record_array(record, state.mode, dead_rules_enabled, out=row)
+        offset += length
+    owners = np.repeat(np.arange(batch, dtype=np.int64), lengths)
+    starts = np.cumsum(lengths) - lengths
+    indices = np.arange(packed, dtype=np.int64) + np.repeat(np.arange(batch) * time_steps - starts, lengths)
+    index_cpu = torch.empty(2 * packed + batch, dtype=torch.long, pin_memory=pin_memory)
+    index_rows = index_cpu.numpy()
+    index_rows[:packed], index_rows[packed:2 * packed], index_rows[2 * packed:] = owners, indices, lengths
+    raw = raw_cpu.to(requested_device, non_blocking=pin_memory)
+    index_data = index_cpu.to(requested_device, non_blocking=pin_memory)
+    owner_tensor, valid_indices, length_tensor = index_data.split((packed, packed, batch))
+    fields = torch.zeros((batch * time_steps, 10), dtype=torch.long, device=requested_device)
+    # Padding's current-player embedding remains the established PAD index.
+    fields[:, -1] = ACTION_PLAYER_PAD
+    fields = fields.index_copy(0, valid_indices, raw[:, width:].long()).view(batch, time_steps, 10)
     return PolicyTensorBatch(
         states=states,
-        board_codes=transfer(board_codes),
-        casualty_bits=(None if casualty_bits is None else transfer(casualty_bits)),
-        token_owner=transfer(token_owner),
-        point_mask=transfer(point_mask),
-        token_mask=transfer(token_mask),
-        action_fields=transfer(action_fields),
-        action_present=transfer(action_present),
-        no_interaction=transfer(no_interaction),
-        active_mask=transfer(active_mask),
-        revealed_mask=transfer(revealed_mask),
-        current_player=transfer(current_player),
-        mode_ids=transfer(mode_ids),
+        board_codes=raw[:, :spec.point_count].long(),
+        casualty_bits=raw[:, spec.point_count:width].float() if dead_rules_enabled else None,
+        token_owner=owner_tensor,
+        point_mask=torch.ones((batch, spec.point_count), dtype=torch.bool, device=requested_device),
+        token_mask=torch.arange(time_steps, device=requested_device)[None, :] < length_tensor[:, None],
+        action_fields=fields[..., :5].float(), action_present=fields[..., 5].bool(),
+        no_interaction=fields[..., 6], active_mask=fields[..., 7],
+        revealed_mask=fields[..., 8], current_player=fields[..., 9],
+        mode_ids=torch.full((batch,), spec.mode_index, dtype=torch.long, device=requested_device),
+        valid_indices=valid_indices,
     )
 
 
 @dataclass(slots=True)
 class PolicyFeatures:
     context: Tensor
-    current_points: Tensor
     point_mask: Tensor
 
 
@@ -803,7 +590,7 @@ class GamePolicyTransformer(nn.Module):
     def __init__(self, config: ModelConfig | None = None) -> None:
         super().__init__()
         self.config = config or ModelConfig()
-        self.board_encoder = GraphBoardEncoder(self.config)
+        self.board_encoder = WholeBoardEncoder(self.config)
         self.action_encoder = PublicActionEncoder(self.config.board_dim)
         temporal_dim = self.config.temporal_dim
         self.position_embedding = nn.Embedding(
@@ -827,12 +614,12 @@ class GamePolicyTransformer(nn.Module):
         self.source_query = nn.Sequential(
             nn.Linear(temporal_dim, self.config.board_dim),
             nn.SiLU(),
-            nn.Linear(self.config.board_dim, self.config.board_dim),
+            nn.Linear(self.config.board_dim, MAX_BOARD_POINTS),
         )
         self.destination_query = nn.Sequential(
-            nn.Linear(temporal_dim + self.config.board_dim, self.config.board_dim),
+            nn.Linear(temporal_dim + MAX_BOARD_POINTS, self.config.board_dim),
             nn.SiLU(),
-            nn.Linear(self.config.board_dim, self.config.board_dim),
+            nn.Linear(self.config.board_dim, MAX_BOARD_POINTS),
         )
         # The cache is explicitly enabled only for a frozen rollout actor and
         # cleared before learner mode.  It stores detached board-global tokens,
@@ -845,6 +632,10 @@ class GamePolicyTransformer(nn.Module):
         self._inference_temporal_cache_limit = 0
         self._paged_kv_requested = False
         self._paged_kv_store: PagedKVCache | None = None
+        self._fixed_kv_store = None
+        self._tensor_learner_callable = None
+        self._packed_learner_callable = None
+        self._ppo_sampling_graphs = OrderedDict()
         self.reset_board_encoding_stats()
 
     @property
@@ -854,6 +645,7 @@ class GamePolicyTransformer(nn.Module):
     def start_inference_board_cache(self, max_entries: int | None = None) -> None:
         """Start a fresh per-collection cache for immutable history boards."""
 
+        self._ppo_sampling_graphs.clear()
         limit = (
             self.config.inference_board_cache_entries
             if max_entries is None
@@ -875,24 +667,44 @@ class GamePolicyTransformer(nn.Module):
             and self._inference_temporal_cache_limit > 0
         )
         self._paged_kv_store = None
+        self._fixed_kv_store = None
         self.reset_board_encoding_stats()
 
+    def start_ppo_inference_cache(self, *, capacity: int, behavior_version: int) -> None:
+        if not self.config.ppo_fixed_kv or not self.config.incremental_inference:
+            return
+        from .fixed_kv import FixedKVCache
+        if (self._fixed_kv_store is not None and self._fixed_kv_store.capacity == capacity
+                and self._fixed_kv_store.behavior_version == behavior_version):
+            return
+        self.clear_inference_board_cache()
+        self._fixed_kv_store = FixedKVCache(self, capacity=capacity, behavior_version=behavior_version,
+                                           cuda_graphs=self.config.ppo_cuda_graphs)
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        self.clear_inference_board_cache()
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+
     def clear_inference_board_cache(self) -> None:
+        self._ppo_sampling_graphs.clear()
         self._inference_board_cache.clear()
         self._inference_board_cache_limit = 0
         self._inference_temporal_cache.clear()
         self._inference_temporal_cache_limit = 0
         self._paged_kv_requested = False
         self._paged_kv_store = None
+        self._fixed_kv_store = None
 
     def reset_inference_temporal_cache(self) -> None:
         """Drop rollout prefixes between bounded anchor waves."""
 
         self._inference_temporal_cache.clear()
+        self._fixed_kv_store = None
         if self._paged_kv_store is not None:
             self._paged_kv_store.reset()
 
     def reset_board_encoding_stats(self) -> None:
+        self._rollout_cache_snapshot = None
         self._history_input_states = 0
         self._history_unique_states = 0
         self._raw_board_tokens = 0
@@ -917,6 +729,15 @@ class GamePolicyTransformer(nn.Module):
         unique_tokens = max(self._board_unique_tokens, 1)
         input_states = max(self._history_input_states, 1)
         return {
+            "encoding/fixed_kv_enabled": float(self._fixed_kv_store is not None),
+            "encoding/fixed_kv_slots": float(0 if self._fixed_kv_store is None else len(self._fixed_kv_store.entries)),
+            "encoding/fixed_kv_allocated_gib": float(
+                0 if self._fixed_kv_store is None or self._fixed_kv_store.storage is None
+                else self._fixed_kv_store.storage.numel() * self._fixed_kv_store.storage.element_size() / 2**30),
+            "encoding/fixed_kv_direct_attention": float(
+                self._fixed_kv_store is not None and self._fixed_kv_store.kernels is not None),
+            "encoding/cuda_graph_captures": float(0 if self._fixed_kv_store is None else self._fixed_kv_store.graph_captures),
+            "encoding/cuda_graph_replays": float(0 if self._fixed_kv_store is None else self._fixed_kv_store.graph_replays),
             "encoding/history_input_states": float(self._history_input_states),
             "encoding/history_unique_states": float(self._history_unique_states),
             "encoding/raw_board_tokens": float(self._raw_board_tokens),
@@ -1047,7 +868,7 @@ class GamePolicyTransformer(nn.Module):
                 if missing == 0
                 else state.records[:-missing]
             )
-            cached = self._get_temporal_cache((state.mode, records))
+            cached = self._get_temporal_cache((state.mode, getattr(records, "cache_key", records)))
             if cached is not None:
                 return cached, missing
         return None, len(state.records)
@@ -1081,7 +902,7 @@ class GamePolicyTransformer(nn.Module):
         self,
         records: Sequence[StateTokenRecord],
         mode: TrainingMode,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """Encode only the newly appended records of an incremental batch."""
 
         if not records:
@@ -1149,10 +970,10 @@ class GamePolicyTransformer(nn.Module):
         self._board_input_tokens += len(records)
         self._board_unique_tokens += len(records)
         self._board_encoder_tokens += len(records)
-        board_globals, point_tokens = self.board_encoder(
+        board_globals = self.board_encoder(
             codes, point_mask, mode_ids, casualties
         )
-        return board_globals, point_tokens, point_mask
+        return board_globals, point_mask
 
     def _record_temporal_tokens(
         self,
@@ -1173,7 +994,7 @@ class GamePolicyTransformer(nn.Module):
             raise ValueError("incremental history exceeds model position capacity")
         pin_memory = supports_pinned_memory(self.device)
         fields = torch.zeros(
-            (len(records), 1, 8), dtype=torch.long, pin_memory=pin_memory
+            (len(records), 1, ACTION_FEATURE_DIM), dtype=torch.float32, pin_memory=pin_memory
         )
         present = torch.zeros(
             (len(records), 1), dtype=torch.bool, pin_memory=pin_memory
@@ -1181,7 +1002,7 @@ class GamePolicyTransformer(nn.Module):
         for index, record in enumerate(records):
             if record.action is not None:
                 fields[index, 0] = torch.tensor(
-                    record.action.as_tuple(), dtype=torch.long
+                    record.action.as_vector(mode), dtype=torch.float32
                 )
                 present[index, 0] = True
         fields = fields.to(self.device, non_blocking=pin_memory)
@@ -1241,15 +1062,13 @@ class GamePolicyTransformer(nn.Module):
         if any(isinstance(prefix, PagedKVState) for prefix in prefixes):
             raise RuntimeError("cannot mix contiguous and paged temporal caches")
         caches = list(prefixes)
-        current_points: Tensor | None = None
         point_mask: Tensor | None = None
         if missing == 0:
-            _globals, current_points, point_mask = self._record_board_batch(
-                [state.records[-1] for state in states], mode
+            point_mask = torch.ones(
+                (len(states), mode_spec(mode).point_count), dtype=torch.bool, device=self.device
             )
             return PolicyFeatures(
                 torch.stack([cache.context for cache in caches]),
-                current_points,
                 point_mask,
             )
 
@@ -1266,7 +1085,7 @@ class GamePolicyTransformer(nn.Module):
                 state.records[len(state.records) - missing + offset]
                 for state in states
             ]
-            board_globals, current_points, point_mask = self._record_board_batch(
+            board_globals, point_mask = self._record_board_batch(
                 records, mode
             )
             hidden = self._record_temporal_tokens(
@@ -1304,14 +1123,14 @@ class GamePolicyTransformer(nn.Module):
                 # multiply contiguous KV memory without improving hit rate.
                 if offset == missing - 1:
                     self._put_temporal_cache(
-                        (mode, state.records), new_cache
+                        policy_history_key(state), new_cache
                     )
                 new_caches.append(new_cache)
             caches = new_caches
             self._temporal_incremental_tokens += len(states)
             self._temporal_computed_pairs += len(states) * (position + 1)
-        assert current_points is not None and point_mask is not None
-        return PolicyFeatures(contexts, current_points, point_mask)
+        assert point_mask is not None
+        return PolicyFeatures(contexts, point_mask)
 
     def _advance_paged_temporal_group(
         self,
@@ -1326,14 +1145,13 @@ class GamePolicyTransformer(nn.Module):
             raise RuntimeError("paged temporal cache has no backing store")
         mode = states[0].mode
         caches = list(prefixes)
-        current_points: Tensor | None = None
         point_mask: Tensor | None = None
         contexts = torch.stack([cache.context for cache in caches])
         if missing == 0:
-            _globals, current_points, point_mask = self._record_board_batch(
-                [state.records[-1] for state in states], mode
+            point_mask = torch.ones(
+                (len(states), mode_spec(mode).point_count), dtype=torch.bool, device=self.device
             )
-            return PolicyFeatures(contexts, current_points, point_mask)
+            return PolicyFeatures(contexts, point_mask)
 
         self._temporal_incremental_batches += missing
         self._temporal_incremental_batch_rows += len(states) * missing
@@ -1351,7 +1169,7 @@ class GamePolicyTransformer(nn.Module):
                     state.records[len(state.records) - missing + offset]
                     for state in states
                 ]
-                board_globals, current_points, point_mask = self._record_board_batch(
+                board_globals, point_mask = self._record_board_batch(
                     records, mode
                 )
                 hidden = self._record_temporal_tokens(
@@ -1400,12 +1218,12 @@ class GamePolicyTransformer(nn.Module):
                 self._paged_kv_total_attention_tokens += len(caches) * max_tokens
 
             for state, cache in zip(states, caches, strict=True):
-                key = (mode, state.records)
+                key = policy_history_key(state)
                 self._put_temporal_cache(key, cache)
                 if self._inference_temporal_cache.get(key) is cache:
                     del owned_caches[id(cache)]
-            assert current_points is not None and point_mask is not None
-            return PolicyFeatures(contexts, current_points, point_mask)
+            assert point_mask is not None
+            return PolicyFeatures(contexts, point_mask)
         finally:
             if owned_caches:
                 retained = {id(cache) for cache in self._inference_temporal_cache.values()}
@@ -1427,7 +1245,7 @@ class GamePolicyTransformer(nn.Module):
         inverse: list[int] = []
         state_to_unique: dict[object, int] = {}
         for state in states:
-            key = (state.mode, state.records)
+            key = policy_history_key(state)
             index = state_to_unique.get(key)
             if index is None:
                 index = len(unique_states)
@@ -1453,7 +1271,6 @@ class GamePolicyTransformer(nn.Module):
                 self._temporal_cache_hits += 1
 
         contexts: list[Tensor | None] = [None] * len(unique_states)
-        points: list[Tensor | None] = [None] * len(unique_states)
         masks: list[Tensor | None] = [None] * len(unique_states)
         cold_indices = [
             index for index, prefix in enumerate(prefixes) if prefix is None
@@ -1479,7 +1296,6 @@ class GamePolicyTransformer(nn.Module):
             )
             for row, index in enumerate(cold_indices):
                 contexts[index] = cold_features.context[row]
-                points[index] = cold_features.current_points[row]
                 masks[index] = cold_features.point_mask[row]
 
         buckets: dict[tuple[str, int, int], list[int]] = {}
@@ -1511,14 +1327,12 @@ class GamePolicyTransformer(nn.Module):
             )
             for row, index in enumerate(indices):
                 contexts[index] = features.context[row]
-                points[index] = features.current_points[row]
                 masks[index] = features.point_mask[row]
 
-        if any(item is None for item in contexts + points + masks):
+        if any(item is None for item in contexts + masks):
             raise RuntimeError("incremental cache did not produce every feature row")
         unique_features = PolicyFeatures(
             torch.stack([item for item in contexts if item is not None]),
-            torch.stack([item for item in points if item is not None]),
             torch.stack([item for item in masks if item is not None]),
         )
         if len(unique_states) == len(states):
@@ -1526,11 +1340,15 @@ class GamePolicyTransformer(nn.Module):
         expansion = torch.tensor(inverse, dtype=torch.long, device=self.device)
         return PolicyFeatures(
             unique_features.context.index_select(0, expansion),
-            unique_features.current_points.index_select(0, expansion),
             unique_features.point_mask.index_select(0, expansion),
         )
 
     def encode(self, states: Sequence[PolicyState]) -> PolicyFeatures:
+        if (self._fixed_kv_store is not None and states and not self.training and not torch.is_grad_enabled()
+                and all(isinstance(state.records, HistoryArrayView) for state in states)):
+            if len({state.mode for state in states}) != 1:
+                raise ValueError("a policy batch must use one information mode")
+            return self._fixed_kv_store.encode(states)
         cache_active = (
             self._inference_temporal_cache_limit > 0
             and not self.training
@@ -1546,9 +1364,17 @@ class GamePolicyTransformer(nn.Module):
         *,
         count_history_stats: bool = True,
         pack_prefixes: bool = False,
+        fixed_slots: Sequence[int] | None = None,
     ) -> PolicyFeatures:
         if not states:
             raise ValueError("cannot encode an empty policy batch")
+        if (self.config.ppo_tensor_learner and self.config.dropout == 0.
+                and self.config.temporal_causal_sdpa
+                and not self.config.activation_checkpointing
+                and (pack_prefixes or fixed_slots is not None)
+                and all(isinstance(s.records, HistoryArrayView) for s in states)):
+            return self._encode_array_batch(states, pack_prefixes=pack_prefixes,
+                                           fixed_slots=fixed_slots, count_history_stats=count_history_stats)
         deduplicate = not self.training or self.config.dropout == 0.0
         original_states = states
         packed = pack_prefixes and self.config.dropout == 0.0
@@ -1567,7 +1393,7 @@ class GamePolicyTransformer(nn.Module):
             unique_states: list[PolicyState] = []
             state_to_unique: dict[object, int] = {}
             for state in original_states:
-                key = (state.mode, state.records)
+                key = policy_history_key(state)
                 unique_offset = state_to_unique.get(key)
                 if unique_offset is None:
                     unique_offset = len(unique_states)
@@ -1592,9 +1418,7 @@ class GamePolicyTransformer(nn.Module):
             dead_rules_enabled=self.config.dead_rules_enabled,
         )
         batch_size, time_steps = batch.token_mask.shape
-        points = batch.board_codes.shape[1]
-        flat_token_mask = batch.token_mask.reshape(-1)
-        valid_indices = flat_token_mask.nonzero(as_tuple=False).squeeze(-1)
+        valid_indices = batch.valid_indices
         owner_indices = batch.token_owner
         flat_codes = batch.board_codes
         flat_casualties = batch.casualty_bits
@@ -1614,19 +1438,22 @@ class GamePolicyTransformer(nn.Module):
         unique_keys: list[object] = []
         unique_source_offsets: list[int] = []
         inverse_offsets: list[int] = []
-        sequence_starts: list[int] = []
         key_to_unique: dict[object, int] = {}
         compact_offset = 0
         for state in states:
-            sequence_starts.append(compact_offset)
-            for record in state.records:
+            if isinstance(state.records, HistoryArrayView):
+                view = state.records
+                record_keys = [(state.mode, view.identity, 0), *(
+                    (state.mode, view.identity, position)
+                    for position in range(view.window_start, view.window_start + len(view) - 1)
+                )]
+            else:
+                record_keys = [(state.mode, record.board_codes, record.known_casualty_bits)
+                               for record in state.records]
+            for record_key in record_keys:
                 key: object
                 if deduplicate:
-                    key = (
-                        state.mode,
-                        record.board_codes,
-                        record.known_casualty_bits,
-                    )
+                    key = record_key
                 else:
                     key = compact_offset
                 unique_offset = key_to_unique.get(key)
@@ -1637,21 +1464,14 @@ class GamePolicyTransformer(nn.Module):
                     unique_source_offsets.append(compact_offset)
                 inverse_offsets.append(unique_offset)
                 compact_offset += 1
-        last_unique_offsets = [
-            inverse_offsets[sequence_starts[row] + position]
-            for row, position in zip(query_rows, query_positions, strict=True)
-        ]
-
         self._board_input_tokens += len(inverse_offsets)
         self._board_unique_tokens += len(unique_keys)
-        current_unique = set(last_unique_offsets)
         encode_unique: list[int] = []
         global_rows: list[Tensor | None] = [None] * len(unique_keys)
-        current_point_rows: list[Tensor | None] = [None] * len(query_rows)
         if cache_active:
             for unique_offset, key in enumerate(unique_keys):
                 cached = self._inference_board_cache.get(key)
-                if cached is not None and unique_offset not in current_unique:
+                if cached is not None:
                     self._inference_board_cache.move_to_end(key)
                     global_rows[unique_offset] = cached
                     self._board_cache_hits += 1
@@ -1661,19 +1481,19 @@ class GamePolicyTransformer(nn.Module):
             encode_unique = list(range(len(unique_keys)))
         self._board_encoder_tokens += len(encode_unique)
 
-        last_unique_tensor = torch.tensor(
-            last_unique_offsets, dtype=torch.long, device=self.device
+        encoded_chunks: list[Tensor] = []
+        # Upload once, then slice on device. Hundreds of small synchronous
+        # tensor constructions otherwise serialize a long-history backward.
+        encode_sources = torch.tensor(
+            [unique_source_offsets[index] for index in encode_unique],
+            dtype=torch.long, device=self.device,
         )
         for start in range(0, len(encode_unique), self.config.board_chunk_size):
             chunk_unique = encode_unique[
                 start : start + self.config.board_chunk_size
             ]
-            chunk_sources = torch.tensor(
-                [unique_source_offsets[index] for index in chunk_unique],
-                dtype=torch.long,
-                device=self.device,
-            )
-            chunk_globals, chunk_points = self.board_encoder(
+            chunk_sources = encode_sources[start : start + self.config.board_chunk_size]
+            chunk_globals = self.board_encoder(
                 flat_codes.index_select(0, chunk_sources),
                 flat_point_mask.index_select(0, chunk_sources),
                 flat_modes.index_select(0, chunk_sources),
@@ -1683,9 +1503,11 @@ class GamePolicyTransformer(nn.Module):
                     else flat_casualties.index_select(0, chunk_sources)
                 ),
             )
-            chunk_unique_tensor = torch.tensor(
-                chunk_unique, dtype=torch.long, device=self.device
-            )
+            if not cache_active:
+                # Keep [boards, width] throughout the learner. Unbinding each
+                # row and stacking it again creates thousands of backward nodes.
+                encoded_chunks.append(chunk_globals)
+                continue
             for local_offset, unique_offset in enumerate(chunk_unique):
                 global_rows[unique_offset] = chunk_globals[local_offset]
                 if cache_active:
@@ -1699,23 +1521,13 @@ class GamePolicyTransformer(nn.Module):
                     # needed by the current batch.
                     while len(self._inference_board_cache) > self._inference_board_cache_limit:
                         self._inference_board_cache.popitem(last=False)
-            matches = (
-                chunk_unique_tensor.unsqueeze(1)
-                == last_unique_tensor.unsqueeze(0)
-            )
-            local_indices, batch_indices = matches.nonzero(as_tuple=True)
-            for local_index, batch_index in zip(
-                local_indices.tolist(), batch_indices.tolist(), strict=True
-            ):
-                current_point_rows[batch_index] = chunk_points[local_index]
 
-        if any(row is None for row in global_rows):
-            raise RuntimeError("board cache failed to provide a required token")
-        if any(row is None for row in current_point_rows):
-            raise RuntimeError("current board point embeddings were not encoded")
-        unique_globals = torch.stack(
-            [row for row in global_rows if row is not None]
-        )
+        if cache_active:
+            if any(row is None for row in global_rows):
+                raise RuntimeError("board cache failed to provide a required token")
+            unique_globals = torch.stack([row for row in global_rows if row is not None])
+        else:
+            unique_globals = torch.cat(encoded_chunks, dim=0)
         inverse_tensor = torch.tensor(
             inverse_offsets, dtype=torch.long, device=self.device
         )
@@ -1725,9 +1537,6 @@ class GamePolicyTransformer(nn.Module):
             dtype=valid_globals.dtype,
             device=self.device,
         ).index_copy(0, valid_indices, valid_globals)
-        current_points = torch.stack(
-            [row for row in current_point_rows if row is not None]
-        )
 
         board_globals = globals_by_token.view(batch_size, time_steps, -1)
         action_embeddings = self.action_encoder(
@@ -1744,7 +1553,9 @@ class GamePolicyTransformer(nn.Module):
             + self.revealed_embedding(batch.revealed_mask)
             + self.current_player_embedding(batch.current_player)
         )
-        causal_mask = torch.zeros(
+        if self.config.ppo_low_precision_residual and torch.is_autocast_enabled(self.device.type):
+            tokens = tokens.to(torch.get_autocast_dtype(self.device.type))
+        causal_mask = None if self.config.temporal_causal_sdpa else torch.zeros(
             (time_steps, time_steps), dtype=tokens.dtype, device=self.device
         ).masked_fill(
             torch.triu(
@@ -1760,10 +1571,26 @@ class GamePolicyTransformer(nn.Module):
             and not self.training
             and not torch.is_grad_enabled()
             and not packed
+            and fixed_slots is None
         )
+        fixed_metadata = None
+        if fixed_slots is not None:
+            fixed_metadata = torch.tensor(
+                [(slot, 0, len(state.records)) for slot, state in zip(fixed_slots, states, strict=True)],
+                dtype=torch.long, device=self.device,
+            )
         captured_keys: list[Tensor] = []
         captured_values: list[Tensor] = []
-        for layer in self.temporal_layers:
+        for layer_index, layer in enumerate(self.temporal_layers):
+            if fixed_metadata is not None:
+                q, k, v = layer.incremental_projection(tokens)
+                self._fixed_kv_store.write(layer_index, k, v, fixed_metadata)
+                # Right padding cannot affect a valid causal query. This also
+                # avoids projecting Q/K/V twice during cold-cache population.
+                attended = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=0.)
+                tokens = layer.incremental_output(tokens, attended.transpose(1, 2).reshape(batch_size, time_steps, -1))
+                tokens = tokens.masked_fill(~batch.token_mask.unsqueeze(-1), 0.)
+                continue
             if capture_temporal:
                 keys, values = layer.projected_keys_values(
                     layer.attention_norm(tokens)
@@ -1776,6 +1603,7 @@ class GamePolicyTransformer(nn.Module):
                         values,
                         valid_mask=batch.token_mask,
                         attention_mask=causal_mask,
+                        is_causal=self.config.temporal_causal_sdpa,
                     ),
                     tokens,
                     use_reentrant=False,
@@ -1785,13 +1613,14 @@ class GamePolicyTransformer(nn.Module):
                     tokens,
                     valid_mask=batch.token_mask,
                     attention_mask=causal_mask,
+                    is_causal=self.config.temporal_causal_sdpa,
                 )
         tokens = self.temporal_norm(tokens)
         query_row_tensor = torch.tensor(query_rows, dtype=torch.long, device=self.device)
         query_position_tensor = torch.tensor(query_positions, dtype=torch.long, device=self.device)
         contexts = tokens[query_row_tensor, query_position_tensor]
         features = PolicyFeatures(
-            contexts, current_points, batch.point_mask.index_select(0, query_row_tensor)
+            contexts, batch.point_mask.index_select(0, query_row_tensor)
         )
         if capture_temporal:
             paged_store = self._ensure_paged_kv_store(captured_keys[0].dtype)
@@ -1819,7 +1648,7 @@ class GamePolicyTransformer(nn.Module):
                         context=contexts[index].detach(),
                     )
                 self._put_temporal_cache(
-                    (state.mode, state.records),
+                    policy_history_key(state),
                     temporal_cache,
                 )
                 pairs = length * (length + 1) // 2
@@ -1833,10 +1662,127 @@ class GamePolicyTransformer(nn.Module):
             )
             features = PolicyFeatures(
                 features.context.index_select(0, expansion),
-                features.current_points.index_select(0, expansion),
                 features.point_mask.index_select(0, expansion),
             )
         return features
+
+    def _encode_array_batch(self, states, *, pack_prefixes, fixed_slots, count_history_stats):
+        """One compact upload; CPU history objects stay outside compiled regions."""
+        self._tensor_learner_calls = getattr(self, '_tensor_learner_calls', 0) + 1
+        from .packed_attention import AVAILABLE, prepare
+        if (self.config.ppo_varlen_attention and AVAILABLE and fixed_slots is None and self.device.type == 'cuda'
+                and torch.is_autocast_enabled('cuda')
+                and torch.get_autocast_dtype('cuda') in (torch.bfloat16, torch.float16)):
+            arguments, lengths = prepare(self, states)
+            function = self._packed_temporal_forward
+            if self.training and self.config.ppo_compile_mode != 'off':
+                if self._packed_learner_callable is None:
+                    self._packed_learner_callable = torch.compile(
+                        self._packed_temporal_forward, dynamic=True, mode=self.config.ppo_compile_mode)
+                function = self._packed_learner_callable
+            contexts = function(*arguments)
+            self._varlen_calls = getattr(self, '_varlen_calls', 0) + 1
+            if count_history_stats:
+                self._history_input_states += len(states)
+                self._history_unique_states += len(lengths)
+                self._raw_board_tokens += sum(len(s.records) for s in states)
+            self._board_input_tokens += int(lengths.sum())
+            self._board_unique_tokens += int(lengths.sum())
+            self._board_encoder_tokens += int(lengths.sum())
+            return PolicyFeatures(contexts, torch.ones((len(states), mode_spec(states[0].mode).point_count),
+                                                       dtype=torch.bool, device=self.device))
+        if len({s.mode for s in states}) != 1:
+            raise ValueError("a policy batch must use one information mode")
+        groups = history_prefix_groups(states) if pack_prefixes else [[i] for i in range(len(states))]
+        longest = [states[group[0]] for group in groups]
+        lengths = [len(s.records) for s in longest]
+        times = max(lengths)
+        # Small alignment padding stabilizes kernels without truncating history.
+        times = min(self.config.max_sequence_tokens, ((times + 31) // 32) * 32)
+        spec = mode_spec(states[0].mode)
+        width = spec.point_count + (MAX_CASUALTY_BITS if self.config.dead_rules_enabled else 0) + 10
+        pin = supports_pinned_memory(self.device)
+        raw_cpu = torch.zeros((len(groups), times, width), dtype=torch.int16, pin_memory=pin)
+        raw_numpy = raw_cpu.numpy()
+        for row, state in enumerate(longest):
+            if state.records.dead_rules != self.config.dead_rules_enabled or state.records.mode is not state.mode:
+                raise ValueError("history array mode/dead-rule features do not match the model")
+            state.records.copy_rows(raw_numpy[row, :lengths[row]])
+        query_rows = np.empty(len(states), dtype=np.int64)
+        for row, indices in enumerate(groups):
+            query_rows[indices] = row
+        metadata_cpu = torch.empty(len(groups) + 2 * len(states), dtype=torch.long, pin_memory=pin)
+        metadata_cpu.numpy()[:] = np.concatenate((lengths, query_rows, [len(s.records) - 1 for s in states]))
+        raw = raw_cpu.to(self.device, non_blocking=pin)
+        lengths_tensor, rows, positions = metadata_cpu.to(self.device, non_blocking=pin).split(
+            (len(groups), len(states), len(states)))
+        fixed_metadata = None if fixed_slots is None else torch.tensor(
+            [(slot, 0, length) for slot, length in zip(fixed_slots, lengths, strict=True)],
+            dtype=torch.long, device=self.device)
+        function = self._array_temporal_forward
+        if self.training and self.device.type == "cuda" and self.config.ppo_compile_mode != "off":
+            if self._tensor_learner_callable is None:
+                self._tensor_learner_callable = torch.compile(
+                    self._array_temporal_forward, dynamic=True, mode=self.config.ppo_compile_mode,
+                )
+            function = self._tensor_learner_callable
+            if self.config.ppo_compile_mode == 'reduce-overhead':
+                torch.compiler.cudagraph_mark_step_begin()
+        tokens = function(raw, lengths_tensor, states[0].mode, fixed_metadata)
+        contexts = tokens[rows, positions]
+        if count_history_stats:
+            self._history_input_states += len(states)
+            self._history_unique_states += len(groups)
+            self._raw_board_tokens += sum(len(s.records) for s in states)
+        actual = sum(lengths)
+        self._board_input_tokens += actual
+        self._board_unique_tokens += actual
+        self._board_encoder_tokens += len(groups) * times
+        return PolicyFeatures(contexts, torch.ones((len(states), spec.point_count),
+                                                   dtype=torch.bool, device=self.device))
+
+    def _packed_temporal_forward(self, *arguments):
+        from .packed_attention import forward
+        return forward(self, *arguments)
+
+    def _array_temporal_forward(self, raw, lengths, mode, fixed_metadata=None):
+        times = raw.shape[1]
+        positions = torch.arange(times, device=raw.device)[None, :]
+        valid = positions < lengths[:, None]
+        tokens = self._embed_observation_rows(raw, mode, positions)
+        for index, layer in enumerate(self.temporal_layers):
+            if fixed_metadata is None:
+                tokens = layer(tokens, valid_mask=valid, is_causal=True)
+            else:
+                q, k, v = layer.incremental_projection(tokens)
+                self._fixed_kv_store.write(index, k, v, fixed_metadata)
+                attended = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=0.)
+                tokens = layer.incremental_output(tokens, attended.transpose(1, 2).reshape_as(tokens))
+                tokens = tokens.masked_fill(~valid.unsqueeze(-1), 0.)
+        return self.temporal_norm(tokens)
+
+    def _embed_observation_rows(self, rows: Tensor, mode: TrainingMode, positions: Tensor) -> Tensor:
+        batch, times, _ = rows.shape
+        spec = mode_spec(mode)
+        flat = rows.reshape(batch * times, -1)
+        width = spec.point_count + (MAX_CASUALTY_BITS if self.config.dead_rules_enabled else 0)
+        board = self.board_encoder(
+            flat[:, :spec.point_count].long(),
+            torch.ones((batch * times, spec.point_count), dtype=torch.bool, device=rows.device),
+            torch.full((batch * times,), spec.mode_index, dtype=torch.long, device=rows.device),
+            flat[:, spec.point_count:width].float() if self.config.dead_rules_enabled else None,
+        ).view(batch, times, -1)
+        fields = rows[:, :, width:]
+        actions = self.action_encoder(fields[..., :5].float(), fields[..., 5].bool())
+        hidden = (torch.cat((actions, board), dim=-1) + self.position_embedding(positions)
+                + self.mode_embedding(torch.full((batch, 1), spec.mode_index, dtype=torch.long, device=rows.device))
+                + self.no_interaction_embedding(fields[..., 6].long())
+                + self.active_embedding(fields[..., 7].long())
+                + self.revealed_embedding(fields[..., 8].long())
+                + self.current_player_embedding(fields[..., 9].long()))
+        if self.config.ppo_low_precision_residual and torch.is_autocast_enabled(rows.device.type):
+            hidden = hidden.to(torch.get_autocast_dtype(rows.device.type))
+        return hidden
 
     def forward(
         self,
@@ -1845,9 +1791,12 @@ class GamePolicyTransformer(nn.Module):
         temperature: float = 1.0,
         *,
         pack_sequences: bool = False,
-    ) -> list[Tensor]:
+        ppo_actions: Sequence[tuple[int, int]] | None = None,
+    ) -> list[Tensor] | tuple[Tensor, Tensor]:
         """DDP-compatible entry point for policy likelihood training."""
 
+        if ppo_actions is not None:
+            return self.ppo_statistics(states, ppo_actions, pack_sequences=pack_sequences)
         return self.log_probs_for_action_groups(
             states, actions_by_state, temperature=temperature, pack_sequences=pack_sequences
         )
@@ -1862,9 +1811,8 @@ class GamePolicyTransformer(nn.Module):
     ) -> Tensor:
         if temperature <= 0:
             raise ValueError("temperature must be positive")
-        query = self.source_query(features.context)
-        logits = torch.einsum("bd,bnd->bn", query, features.current_points)
-        logits = logits / math.sqrt(self.config.board_dim) / temperature
+        logits = self.source_query(features.context)[:, :features.point_mask.shape[1]]
+        logits = logits / temperature
         if legal_masks is None:
             legal_masks = torch.zeros(
                 logits.shape, dtype=torch.bool, device="cpu"
@@ -1897,20 +1845,21 @@ class GamePolicyTransformer(nn.Module):
             dtype=torch.bool,
             pin_memory=pin_memory,
         )
-        for batch_index, state in enumerate(states):
-            if not state.legal_actions:
-                raise ValueError("a non-terminal policy state needs a legal action")
-            sources, targets = zip(*state.legal_actions, strict=True)
-            destination_masks[
-                batch_index,
-                torch.tensor(sources, dtype=torch.long),
-                torch.tensor(targets, dtype=torch.long),
-            ] = True
+        lengths = [len(state.legal_actions) for state in states]
+        if not all(lengths):
+            raise ValueError("a non-terminal policy state needs a legal action")
+        pairs = np.concatenate([state.legal_array for state in states])
+        owners = np.repeat(np.arange(len(states)), lengths)
+        destination_masks.numpy()[owners, pairs[:, 0], pairs[:, 1]] = True
         source_masks = destination_masks.any(dim=-1)
         return (
             source_masks.to(self.device, non_blocking=pin_memory),
             destination_masks.to(self.device, non_blocking=pin_memory),
         )
+
+    def _destination_logits(self, contexts: Tensor, sources: Tensor, point_count: int) -> Tensor:
+        source_codes = F.one_hot(sources, num_classes=MAX_BOARD_POINTS).to(contexts.dtype)
+        return self.destination_query(torch.cat((contexts, source_codes), dim=-1))[:, :point_count]
 
     def _destination_log_probs(
         self,
@@ -1921,11 +1870,7 @@ class GamePolicyTransformer(nn.Module):
         temperature: float,
     ) -> Tensor:
         contexts = features.context[batch_indices]
-        source_points = features.current_points[batch_indices, sources]
-        query = self.destination_query(torch.cat((contexts, source_points), dim=-1))
-        all_points = features.current_points[batch_indices]
-        logits = torch.einsum("md,mnd->mn", query, all_points)
-        logits = logits / math.sqrt(self.config.board_dim) / temperature
+        logits = self._destination_logits(contexts, sources, features.point_mask.shape[1]) / temperature
         masks = torch.zeros(logits.shape, dtype=torch.bool, device="cpu")
         for row, (batch_index, source) in enumerate(
             zip(batch_indices.tolist(), sources.tolist(), strict=True)
@@ -1941,6 +1886,53 @@ class GamePolicyTransformer(nn.Module):
         masks = masks.to(self.device, non_blocking=True)
         logits = logits.masked_fill(~masks, float("-inf"))
         return F.log_softmax(logits, dim=-1)
+
+    def _all_legal_log_probs(self, features: PolicyFeatures, states: Sequence[PolicyState],
+                             temperature: float = 1.0) -> tuple[Tensor, Tensor, list[int]]:
+        """Evaluate all legal moves as one flat tensor with no device-to-host queries."""
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
+        lengths = [len(state.legal_actions) for state in states]
+        if not all(lengths):
+            raise ValueError("a non-terminal policy state needs a legal action")
+        points = features.point_mask.shape[1]
+        pairs = np.concatenate([state.legal_array for state in states])
+        owners = np.repeat(np.arange(len(states)), lengths)
+        unique, inverse = np.unique(owners * points + pairs[:, 0], return_inverse=True)
+        count = len(pairs)
+        pin = supports_pinned_memory(self.device)
+        packed = torch.empty(count * 4 + len(unique), dtype=torch.long, pin_memory=pin)
+        packed.numpy()[:] = np.concatenate((owners, pairs[:, 0], pairs[:, 1], inverse, unique))
+        owner, source, target, destination_row, unique_key = packed.to(self.device, non_blocking=pin).split(
+            (count, count, count, count, len(unique)))
+        source_masks = torch.zeros(len(states) * points, dtype=torch.bool, device=self.device)
+        source_masks.scatter_(0, unique_key, True)
+        source_logs = self._source_log_probs(features, states, temperature,
+                                              legal_masks=source_masks.view(len(states), points))
+        destination_masks = torch.zeros(len(unique) * points, dtype=torch.bool, device=self.device)
+        destination_masks.scatter_(0, destination_row * points + target, True)
+        logits = self._destination_logits(features.context.index_select(0, unique_key // points),
+                                          unique_key % points, points) / temperature
+        destination_logs = F.log_softmax(
+            logits.masked_fill(~destination_masks.view(len(unique), points), float("-inf")), dim=-1,
+        )
+        return source_logs[owner, source] + destination_logs[destination_row, target], owner, lengths
+
+    def ppo_statistics(self, states: Sequence[PolicyState], actions: Sequence[tuple[int, int]],
+                       *, pack_sequences: bool = False) -> tuple[Tensor, Tensor]:
+        if len(states) != len(actions):
+            raise ValueError("PPO actions must match the state batch")
+        features = (self._encode_full(states, pack_prefixes=True)
+                    if pack_sequences else self.encode(states))
+        joint, owners, lengths = self._all_legal_log_probs(features, states)
+        offsets = np.cumsum([0, *lengths[:-1]])
+        selected = [int(offset) + state.legal_actions.index(action)
+                    for offset, state, action in zip(offsets, states, actions, strict=True)]
+        current = joint.index_select(0, torch.tensor(selected, dtype=torch.long, device=self.device)).float()
+        # FP32 reductions keep exact joint entropy, including every legal move.
+        logs = joint.float()
+        entropy = torch.zeros(len(states), device=self.device).scatter_add_(0, owners, -logs.exp() * logs)
+        return current, entropy
 
     def log_probs_for_action_groups(
         self,
@@ -1985,7 +1977,7 @@ class GamePolicyTransformer(nn.Module):
         sources = torch.tensor(flat_sources, dtype=torch.long, device=self.device)
         targets = torch.tensor(flat_targets, dtype=torch.long, device=self.device)
         # All destinations of one source share its conditional distribution.
-        # Evaluate it once, avoiding one duplicated point matrix per legal move.
+        # Evaluate it once, avoiding one duplicated destination evaluation per legal move.
         destination_log_probs = self._destination_log_probs(
             features, states,
             torch.tensor(unique_batch, dtype=torch.long, device=self.device),
@@ -2010,11 +2002,14 @@ class GamePolicyTransformer(nn.Module):
 
         ``sampling_uniforms[batch, sample]`` supplies source and destination
         uniforms, making game randomness independent of actor batching order.
-        Omitting it preserves the training multinomial sampling path.
+        Without supplied uniforms, the optional PPO sampling graph uses inverse
+        CDF sampling; other paths use multinomial. Both sample the joint policy.
         """
 
         if count <= 0:
             raise ValueError("sample count must be positive")
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
         uniform_values_valid = None
         if sampling_uniforms is not None:
             _validate_sampling_uniforms(
@@ -2029,8 +2024,18 @@ class GamePolicyTransformer(nn.Module):
             sampling_uniforms = sampling_uniforms.to(dtype=torch.float32).to(self.device)
         features = self.encode(states)
         source_masks, destination_masks = self._sampling_legal_masks(
-            states, features.current_points.shape[1]
+            states, features.point_mask.shape[1]
         )
+        if (self.config.ppo_sampling_graphs and self.config.ppo_cuda_graphs and count == 1
+                and sampling_uniforms is None and self._fixed_kv_store is not None
+                and self.device.type == 'cuda' and not self.training):
+            from .ppo_sampling import sample_graph
+            uniforms = torch.rand((len(states), 2), device=self.device)
+            sampled = sample_graph(self, features.context, source_masks, destination_masks,
+                                    uniforms, temperature).cpu()
+            pairs = sampled[:, :2].to(torch.long).tolist()
+            return ([[tuple(pair)] for pair in pairs],
+                    [sampled[i, 2:3] for i in range(len(states))] if return_log_probs else [])
         source_log_probs = self._source_log_probs(
             features,
             states,
@@ -2050,13 +2055,9 @@ class GamePolicyTransformer(nn.Module):
         )
         flat_sources = sampled_sources.reshape(-1)
         contexts = features.context[batch_indices]
-        source_points = features.current_points[batch_indices, flat_sources]
-        query = self.destination_query(torch.cat((contexts, source_points), dim=-1))
-        all_points = features.current_points[batch_indices]
-        destination_logits = torch.einsum("md,mnd->mn", query, all_points)
-        destination_logits = (
-            destination_logits / math.sqrt(self.config.board_dim) / temperature
-        )
+        destination_logits = self._destination_logits(
+            contexts, flat_sources, features.point_mask.shape[1]
+        ) / temperature
         selected_destination_masks = destination_masks[
             batch_indices, flat_sources
         ]
@@ -2330,7 +2331,7 @@ class PieceConditionedLayoutPointerDecoder(nn.Module):
                 self.logits(occupants, steps, mode_ids) / temperature, dim=-1
             )
             selected = torch.multinomial(log_probs.exp(), 1).squeeze(-1)
-            piece_id = int(self.piece_sequence[step].item())
+            piece_id = PIECE_TYPE_INDICES[DEPLOYMENT_PIECE_SEQUENCE[step]]
             occupants[rows, selected] = piece_id + 1
             choices.append(selected)
             old_logs.append(log_probs[rows, selected])
@@ -2375,7 +2376,7 @@ class PieceConditionedLayoutPointerDecoder(nn.Module):
                 raise ValueError("layout replay contains an illegal position")
             selected_logs.append(log_probs[rows, selected])
             entropies.append(-(probabilities * log_probs.nan_to_num()).sum(dim=-1))
-            piece_id = int(self.piece_sequence[step].item())
+            piece_id = PIECE_TYPE_INDICES[DEPLOYMENT_PIECE_SEQUENCE[step]]
             occupants = occupants.clone()
             occupants[rows, selected] = piece_id + 1
         return torch.stack(selected_logs, dim=1), torch.stack(entropies, dim=1)

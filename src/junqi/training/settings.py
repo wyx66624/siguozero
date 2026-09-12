@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from .encoding import ACTION_FEATURE_DIM
 from .models import ModelConfig
 from .modes import TrainingMode, normalize_mode
 from .rollout import REPLICAS_PER_CANDIDATE, ROOT_CANDIDATE_COUNT
@@ -78,11 +79,16 @@ class TrainingSettings:
     ppo_sequence_training: bool = True
     ppo_max_samples_per_sequence: int = 64
     ppo_minibatch_samples: int = 512
+    layout_prefetch_games: int = 1
+    ppo_deferred_values: bool = False
+    ppo_pipeline_groups: int = 1
+    ppo_fused_optimizer: bool = False
     grpo_equivalent_plies: int | None = None
     grpo_mean_remaining_plies: float = 334.5
     arena_enabled: bool = True
     arena_start_percent: int = 30
     arena_interval_percent: int = 5
+    arena_interval_environment_plies: int | None = None
     arena_games: int = 1000
     arena_max_plies: int = 2000
     arena_seed: int = 20260910
@@ -90,6 +96,8 @@ class TrainingSettings:
     arena_parallel_games: int = 32
     arena_inference_batch_size: int = 32
     arena_environment_workers: int = 4
+    checkpoint_policy: str = "periodic"
+    inference_snapshot_every_updates: int = 0
 
     @classmethod
     def from_yaml(
@@ -120,6 +128,11 @@ class TrainingSettings:
         model_selection = data.get("model_selection", {})
         if not isinstance(model_selection, dict):
             raise ValueError("model_selection must be a mapping")
+        four_player_selection = model_selection.get("four_player", {})
+        if not isinstance(four_player_selection, dict):
+            raise ValueError("model_selection.four_player must be a mapping")
+        if normalized is not TrainingMode.TWO_PLAYER:
+            model_selection = {**model_selection, **four_player_selection}
         algorithm = "grpo" if normalized is TrainingMode.TWO_PLAYER else "ppo"
         configured_dead_rules = runtime.get("dead_rules_enabled", True)
         if not isinstance(configured_dead_rules, bool):
@@ -157,6 +170,20 @@ class TrainingSettings:
             raise ValueError(
                 "model_scale must be bootstrap, main, or extended"
             )
+        if normalized is not TrainingMode.TWO_PLAYER and not tiny:
+            profile = data["models"].get("four_player", {})
+            if not isinstance(profile, dict):
+                raise ValueError("models.four_player must be a mapping")
+            board_dim = int(profile.get("board_embedding_dim", model.board_dim))
+            action_dim = int(profile.get("action_embedding_dim", model.board_dim))
+            if action_dim != board_dim:
+                raise ValueError("four-player action and board encoders must have equal output dimensions")
+            model = replace(
+                model,
+                board_dim=board_dim,
+                temporal_dim=int(profile.get("transition_token_dim", model.temporal_dim)),
+                temporal_ffn_dim=int(profile.get("temporal_ffn_dim", model.temporal_ffn_dim)),
+            )
         model = replace(
             model,
             inference_board_cache_entries=int(
@@ -171,6 +198,19 @@ class TrainingSettings:
                 runtime.get("incremental_inference", True)
             ),
             paged_kv_cache=bool(runtime.get("paged_kv_cache", True)),
+            ppo_array_history=ppo.get("array_history", True),
+            ppo_fixed_kv=ppo.get("fixed_kv", True),
+            ppo_cuda_graphs=ppo.get("cuda_graphs", True),
+            ppo_tensor_learner=ppo.get('tensor_learner', False) if algorithm == 'ppo' else False,
+            ppo_varlen_attention=ppo.get('varlen_attention', False) if algorithm == 'ppo' else False,
+            ppo_sampling_graphs=ppo.get('sampling_graphs', False) if algorithm == 'ppo' else False,
+            ppo_low_precision_residual=ppo.get('low_precision_residual', False) if algorithm == 'ppo' else False,
+            ppo_compile_mode=ppo.get('compile_mode', 'off') if algorithm == 'ppo' and not tiny else 'off',
+            board_chunk_size=int(ppo.get('board_chunk_size', model.board_chunk_size))
+                if algorithm == 'ppo' and not tiny else model.board_chunk_size,
+            temporal_causal_sdpa=ppo.get('causal_sdpa', True) if algorithm == 'ppo' else model.temporal_causal_sdpa,
+            activation_checkpointing=ppo.get('activation_checkpointing', model.activation_checkpointing)
+                if algorithm == 'ppo' else model.activation_checkpointing,
             paged_kv_length_bucket_tokens=int(
                 runtime.get("paged_kv_length_bucket_tokens", 1001)
             ),
@@ -193,6 +233,10 @@ class TrainingSettings:
             "ppo_sequence_training": bool(ppo.get("sequence_training", True)),
             "ppo_max_samples_per_sequence": int(ppo.get("max_samples_per_sequence", 64)),
             "ppo_minibatch_samples": int(ppo.get("optimizer_minibatch_samples", 512)),
+            "layout_prefetch_games": int(ppo.get("layout_prefetch_games", 1)) if algorithm == "ppo" else 1,
+            "ppo_deferred_values": ppo.get("deferred_values", False) if algorithm == 'ppo' else False,
+            "ppo_pipeline_groups": int(ppo.get("pipeline_groups", 1)) if algorithm == 'ppo' else 1,
+            "ppo_fused_optimizer": ppo.get("fused_optimizer", False) if algorithm == 'ppo' else False,
             "grpo_equivalent_plies": None,
             "grpo_mean_remaining_plies": float(ppo.get("grpo_mean_remaining_plies", 334.5)),
             # Preserve the YAML types so malformed booleans and fractional
@@ -200,6 +244,7 @@ class TrainingSettings:
             "arena_enabled": model_selection.get("enabled", True),
             "arena_start_percent": model_selection.get("start_percent", 30),
             "arena_interval_percent": model_selection.get("interval_percent", 5),
+            "arena_interval_environment_plies": model_selection.get("interval_environment_plies"),
             "arena_games": model_selection.get("games", 1000),
             "arena_max_plies": model_selection.get("max_plies", 2000),
             "arena_seed": model_selection.get("seed", 20260910),
@@ -273,6 +318,8 @@ class TrainingSettings:
             "checkpoint_every_updates": int(
                 runtime.get("checkpoint_every_updates", 10)
             ),
+            "checkpoint_policy": model_selection.get("checkpoint_policy", "periodic"),
+            "inference_snapshot_every_updates": int(runtime.get("inference_snapshot_every_updates", 0)),
             "archive_every_updates": int(
                 runtime.get("archive_every_updates", 500)
             ),
@@ -295,6 +342,9 @@ class TrainingSettings:
                 base_game_pool_size=int(ppo.get("base_game_pool_size", 8)),
                 actor_inference_batch=int(ppo.get("actor_inference_batch", 8)),
                 anchor_batch=int(ppo.get("transition_batch", 512)),
+                policy_microbatch=int(ppo.get('learner_microbatch_by_model_scale', {}).get(
+                    model_scale, policy_microbatch)),
+                rollout_environment_workers=int(ppo.get('environment_workers', 1)),
                 target_environment_plies=ppo.get(
                     "target_environment_plies",
                     values["target_environment_plies"] if values["target_environment_plies"] is not None
@@ -315,18 +365,29 @@ class TrainingSettings:
                     "actor_inference_batch": 16,
                     "rollout_anchor_wave_size": 1,
                     "rollout_environment_workers": 1,
+                    "ppo_pipeline_groups": 1,
                     "policy_epochs": 1,
                     "critic_epochs": 1,
                     "warmup_updates": 1,
                     "layout_update_interval": 1,
                     "layout_outcomes_per_update": 2,
                     "checkpoint_every_updates": 1,
+                    "checkpoint_policy": "periodic",
                     "archive_every_updates": 1,
                     "arena_enabled": False,
+                    "arena_interval_environment_plies": None,
                 }
             )
         if overrides:
             selected_overrides = dict(overrides)
+            # A caller explicitly selecting serial rules or online values also
+            # selects the compatible collector, unless it explicitly requested
+            # a contradictory pipeline configuration (validated below).
+            if 'ppo_pipeline_groups' not in selected_overrides and (
+                selected_overrides.get('rollout_environment_workers') == 1
+                or selected_overrides.get('ppo_deferred_values') is False
+            ):
+                values['ppo_pipeline_groups'] = 1
             if algorithm == "ppo" and "target_continuation_plies" in selected_overrides:
                 if "target_environment_plies" in selected_overrides:
                     raise ValueError("choose one environment budget option, not both aliases")
@@ -404,6 +465,8 @@ class TrainingSettings:
             "critic_epochs": self.critic_epochs,
             "ppo_max_samples_per_sequence": self.ppo_max_samples_per_sequence,
             "ppo_minibatch_samples": self.ppo_minibatch_samples,
+            "layout_prefetch_games": self.layout_prefetch_games,
+            "ppo_pipeline_groups": self.ppo_pipeline_groups,
             "layout_update_interval": self.layout_update_interval,
             "layout_outcomes_per_update": self.layout_outcomes_per_update,
             "checkpoint_every_updates": self.checkpoint_every_updates,
@@ -421,6 +484,8 @@ class TrainingSettings:
             )
         if self.resource_monitor_interval_seconds <= 0:
             raise ValueError("resource monitor interval must be positive")
+        if self.inference_snapshot_every_updates < 0:
+            raise ValueError("inference snapshot interval must be non-negative")
         if (
             self.target_continuation_plies is not None
             and self.target_continuation_plies <= 0
@@ -437,12 +502,27 @@ class TrainingSettings:
             raise ValueError("amp must be bfloat16, float16, or float32")
         if self.keep_checkpoint_archives < 0:
             raise ValueError("keep checkpoint archives cannot be negative")
+        if self.checkpoint_policy not in ("periodic", "evaluation"):
+            raise ValueError("checkpoint_policy must be periodic or evaluation")
         if not isinstance(self.learner_length_bucketing, bool):
             raise ValueError("learner_length_bucketing must be a boolean")
         if not isinstance(self.ppo_sequence_training, bool):
             raise ValueError("ppo_sequence_training must be a boolean")
+        if type(self.ppo_deferred_values) is not bool:
+            raise ValueError("ppo_deferred_values must be a boolean")
+        if type(self.ppo_fused_optimizer) is not bool:
+            raise ValueError("ppo_fused_optimizer must be a boolean")
+        if self.ppo_pipeline_groups > 1 and (not self.ppo_deferred_values or not self.model.ppo_array_history
+                                            or self.rollout_environment_workers < 2):
+            raise ValueError("PPO pipeline needs deferred values, array histories and parallel workers")
         if type(self.arena_enabled) is not bool:
             raise ValueError("arena_enabled must be a boolean")
+        if self.arena_interval_environment_plies is not None:
+            if (type(self.arena_interval_environment_plies) is not int
+                    or self.arena_interval_environment_plies <= 0):
+                raise ValueError("arena_interval_environment_plies must be a positive integer or None")
+            if self.arena_enabled and self.target_environment_plies is None:
+                raise ValueError("environment-step model selection requires target_environment_plies")
         for name in ("arena_start_percent", "arena_interval_percent"):
             value = getattr(self, name)
             if type(value) is not int or not 1 <= value <= 100:
@@ -460,17 +540,24 @@ class TrainingSettings:
                 f"arena_games must be divisible by {games_per_group} for {self.mode.value}"
             )
         match_seed_span = (2 + games_per_group) * (self.arena_games // games_per_group)
-        final_percent = self.arena_start_percent + (
-            (100 - self.arena_start_percent) // self.arena_interval_percent
-        ) * self.arena_interval_percent
+        final_seed_index = (len(self.arena_milestones)
+                            if self.arena_interval_environment_plies is not None
+                            else max(self.arena_milestones))
         if (
             type(self.arena_seed) is not int
             or self.arena_seed < 0
-            or self.arena_seed + (final_percent + 1) * match_seed_span >= 2**63
+            or self.arena_seed + (final_seed_index + 1) * match_seed_span >= 2**63
         ):
             raise ValueError(
                 "arena_seed and all scheduled matches must fit a nonnegative signed 64-bit integer"
             )
+
+    @property
+    def arena_milestones(self) -> range:
+        if self.arena_interval_environment_plies is not None:
+            interval = self.arena_interval_environment_plies
+            return range(interval, (self.target_environment_plies or 0) + 1, interval)
+        return range(self.arena_start_percent, 101, self.arena_interval_percent)
 
     def serializable(self) -> dict[str, Any]:
         values = asdict(self)
@@ -554,14 +641,18 @@ def _model_config(
     common = models["common"]
     policy = models["policy"]
     board = policy["board_encoder"]
+    action = policy["action_encoder"]
+    if int(action["input_dim"]) != ACTION_FEATURE_DIM:
+        raise ValueError("action encoder requires exactly five coordinate/player inputs")
+    if int(action["output_dim"]) != int(board["output_dim"]):
+        raise ValueError("action and board encoders must have equal output dimensions")
     temporal = policy["temporal_transformer"]
     layout = models["layout"]
     history = data["history"]
     return ModelConfig(
         board_dim=int(board["output_dim"]),
-        board_layers=int(board["transformer_layers"]),
-        board_heads=int(board["attention_heads"]),
-        board_ffn_dim=int(board["ffn_dim"]),
+        board_encoder_type=str(board["architecture"]),
+        action_encoder_type=str(action["architecture"]),
         temporal_dim=int(temporal["d_model"]),
         temporal_layers=int(temporal["transformer_layers"]),
         temporal_heads=int(temporal["attention_heads"]),

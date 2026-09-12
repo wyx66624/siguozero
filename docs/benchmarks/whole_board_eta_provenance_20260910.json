@@ -1,0 +1,13 @@
+{
+  "purpose": "current whole-board PPO ETA provenance; no formal training started",
+  "source_sha256": {
+    "src\\junqi\\training\\models.py": "c129e6517c35c83aa92d8aa5214f2f90f158f6f7d42cc63d90b63699a74c389f",
+    "src\\junqi\\training\\trainer.py": "96e184f3a5e775bae3c252916423ff9b61825b594216f7b3d0f07892ef1c4c64",
+    "src\\junqi\\training\\settings.py": "3936c29811bda7e0e0bcbd99e98cab88ece69f30181562880a93e24240c283f9",
+    "configs\\bootstrap.yaml": "2d7c5d4d08db68d677af9b7953954fe8a49d93b97a4d300ee4c71e76a89cf4a8",
+    "scripts\\start_four_player_ppo.sh": "6e96ec8137ceeef089dfabf4a19ebc2793f6721b7bcf9445585fabfab79be377",
+    "tools\\estimate_whole_board_ppo_eta.py": "216148816192fd066f7b4c88320c2cf0235625455224cb9a609886678826b181"
+  },
+  "validation": "probe counter identities, epoch count, IO arithmetic, availability, source hashes, weak-scaling units and report links checked",
+  "cuda_multicard_or_other_gpus_measured": false
+}

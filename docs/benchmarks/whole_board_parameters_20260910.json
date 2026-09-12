@@ -1,0 +1,50 @@
+{
+  "bootstrap": {
+    "with_dead_rules": {
+      "policy": 26692354,
+      "critic": 26330881,
+      "layout": 8887296,
+      "total": 61910531,
+      "board_encoder": 4610560
+    },
+    "without_dead_rules": {
+      "policy": 26673154,
+      "critic": 26311681,
+      "layout": 8887296,
+      "total": 61872131,
+      "board_encoder": 4591360
+    }
+  },
+  "main": {
+    "with_dead_rules": {
+      "policy": 140036866,
+      "critic": 139675393,
+      "layout": 17292288,
+      "total": 297004547,
+      "board_encoder": 4610560
+    },
+    "without_dead_rules": {
+      "policy": 140017666,
+      "critic": 139656193,
+      "layout": 17292288,
+      "total": 296966147,
+      "board_encoder": 4591360
+    }
+  },
+  "extended": {
+    "with_dead_rules": {
+      "policy": 207211266,
+      "critic": 206849793,
+      "layout": 25697280,
+      "total": 439758339,
+      "board_encoder": 4610560
+    },
+    "without_dead_rules": {
+      "policy": 207192066,
+      "critic": 206830593,
+      "layout": 25697280,
+      "total": 439719939,
+      "board_encoder": 4591360
+    }
+  }
+}

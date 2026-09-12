@@ -2,18 +2,34 @@
 
 本目录保存四国军棋与二人军棋的规则、棋盘编码、动作编码、可执行训练环境和自博弈方案。
 
+**revision 22 当前四国编码**：棋盘和动作各 128 维，时序 token 256 维，main 32 层、FFN 1024。
+缩小模型阶段的参数与历史并行情景见[128＋128 并行训练核算](compact128_parallel_training_eta_zh.md)。
+实现及短轮诊断见[PPO 历史数组、批量学习和固定 KV 优化](ppo_pipeline_optimization_zh.md)：4090 的 2560 步诊断轮约 2.93 倍加速，包含数值、CUDA、分布式恢复验证。
+上一阶段的 4 进程并行和约 70 天测量见[并行环境与学习端优化](ppo_parallel_optimization_zh.md)。
+最新实现和工期见[20 天目标分项优化](ppo20_optimization_zh.md)：批量布阵、变长注意力、编译、融合优化器、批量 Critic 和分组在线流水。
+48 局兼容配置实测外推 **33.5 天**，96 局大采样配置 **27.3 天**，均为连续训练时间，20 天目标尚未达到。
+评测保存、停机和后期长局分布变化需另计。
+此前串行环境版本的[48 局训练复测](four_dark_optimized_training_eta_zh.md)保留为对照，平均约 237 步/秒。
+编码规则沿用[五维动作单层投影](action_linear_zh.md)与[整盘向量单层投影](whole_board_linear_zh.md)，二人宽度保持原值。
+旧 512 维结构的时间估算保留在[revision 21 训练时间](action_linear_training_eta_zh.md)。
+“为什么时间变长”、扩大 microbatch 的实测与人民币租卡预算见[动作与租卡费用核对](action_microbatch_rental_cost_zh.md)。
+动作/棋盘完整码表见[输入编码](current_encoding_and_hardware_eta_zh.md)；该页参数和硬件时间表保留旧基线，最新情景以 revision 22 报告为准。
+
 **四国当前训练入口**：[PPO、独立价值模型与 4090 显存实测](four_player_ppo_zh.md)。
 revision 19 的[统一环境步定义](environment_step_budget_zh.md)：30 亿指训练采样与实际模拟分支的总交互预算。
 预算口径见 [PPO 序列训练优化与 30 亿环境交互步预算](four_player_ppo_optimization_zh.md)；
-最新[计算量与性能剖析](four_player_ppo_compute_audit_zh.md)说明棋盘编码和实现开销；
+修改前的[计算量与性能剖析](four_player_ppo_compute_audit_zh.md)说明棋盘编码和实现开销；
 [30 亿总交互时间重估](four_player_ppo_eta_budget_zh.md)补测四暗、双明，并列出硬件条件情景和吞吐目标；
 [显卡及多卡历史情景](four_player_ppo_hardware_eta_zh.md)未获目标硬件实测验证，已暂停用于排期；
 [旧 PPO 计时](four_player_ppo_timing_zh.md)保留为未合并前缀的对照基线。
-训练中的千局选优见[自动最优模型选择](best_model_selection_zh.md)，资源配置见
+四国训练从 0 步建立基准、每 5000 万环境步进行 100 局选优，见[自动最优模型选择](best_model_selection_zh.md)，资源配置见
 [并行模型对弈与资源调优](parallel_arena_zh.md)；固定旧对手比较见
 [历史模型棋力评测](historical_arena_zh.md)。
 自 revision 16 起四暗、双明使用 PPO；下列旧 GRPO 预算和架构 PDF 保留为历史
 对照与二人模式说明，四国当前参数以这份 PPO 文档为准。
+
+本地运行入口见 [训练监控与 CPU 对弈控制台](local_console_zh.md)：真实进程与心跳、
+完整周期 ETA、固定版本人机对弈、训练快照发布和 WSL 启动方式。
 
 建议按以下顺序阅读：
 
@@ -30,7 +46,7 @@ revision 19 的[统一环境步定义](environment_step_budget_zh.md)：30 亿�
    说明布阵校验、行走、铁路寻路、战斗、轮转、观测、奖励以及训练环境接口。
 
 5. [策略状态、棋盘快照与转移 Token 编码规范](state_token_encoding_zh.md)  
-   定义玩家可见的全棋盘整数链、按观察者持久保存的确定存活身份码与 25 位/玩家确定阵亡先验、256 维棋盘/动作嵌入、512 维 concat 转移 token，以及固定初始 token 加最近 1,000 步的上下文。
+   定义玩家可见的全棋盘整数链、确定存活身份码与阵亡先验、四国 128＋128 / 二人 256＋256 的 concat token，以及固定初始 token 加最近 1,000 步的上下文。
 
 6. [棋子条件自回归 Pointer 布阵模型与终局训练说明](layout_decoder_training_zh.md)  
    区分现有位置优先规则采样器与新版棋子优先 Pointer Decoder，说明固定棋子序列、25 点 Hard Mask、默认温度 0.7 的概率采样、终局反向传播及防坍缩要求。

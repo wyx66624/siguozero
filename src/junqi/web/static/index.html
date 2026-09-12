@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SiguoZero · 训练监控</title><link rel="stylesheet" href="/style.css"><script src="/dashboard.js" defer></script></head>
+<body><header><a class="brand" href="/">四国 <span>SiguoZero</span></a><nav><a class="active" href="/">训练监控</a><a href="/play">与模型下棋 ↗</a></nav><span class="local">● 本地控制台</span></header>
+<main><div class="page-heading"><div><p class="eyebrow">TRAINING OBSERVATORY</p><h1>每一步，都看得见。</h1><p class="muted">训练进度、运行状态与实时指标 · 每 15 秒自动刷新</p></div><div class="refresh"><button id="refresh">立即刷新</button><small id="updated">正在连接服务…</small></div></div>
+<div id="connection" class="error" hidden></div><section class="hardware" id="hardware" aria-label="硬件状态"></section>
+<div class="section-title"><h2>训练任务</h2><span class="muted">PPO 环境步与 GRPO 分支步分别统计</span></div><div id="runs"><div class="empty">正在读取训练记录…</div></div>
+<section class="callout"><div><span class="eyebrow">PLAY & EVALUATE</span><h2>亲自与模型过招</h2><p>独立 CPU 副本 · 每局固定权重 · 遵循完整军棋规则</p></div><a class="button" href="/play">进入对弈室 →</a></section>
+<footer>耗时预测依据本次运行完整周期吞吐，包含窗口内保存与评测开销。短窗口估计会随长局比例变化；棋力请以独立对局评测为准。</footer></main></body></html>

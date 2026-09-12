@@ -1,0 +1,394 @@
+{
+  "status": "short_probe_extrapolation_not_a_validated_training_duration",
+  "architecture": "whole_board_one_hot_linear",
+  "config_revisions": [
+    22
+  ],
+  "action_encoder_types": [
+    "coordinates_player_linear"
+  ],
+  "target_environment_steps_per_mode": 3000000000,
+  "availability": 0.8,
+  "save_every_updates": 1,
+  "observed_device": "RTX 4090 24GB",
+  "probes": [
+    {
+      "source": "docs/benchmarks/parallel_games_48_four_dark_rev22_4090_20260911.json",
+      "source_sha256": "1b31bb152673b83e05b659171c70b570a4d601077d3de83f17a771e1439dedfa",
+      "config_revision": 22,
+      "model_config": {
+        "board_dim": 128,
+        "board_encoder_type": "whole_board_one_hot_linear",
+        "action_encoder_type": "coordinates_player_linear",
+        "temporal_dim": 256,
+        "temporal_layers": 32,
+        "temporal_heads": 8,
+        "temporal_ffn_dim": 1024,
+        "layout_dim": 256,
+        "layout_layers": 16,
+        "layout_heads": 8,
+        "layout_ffn_dim": 1024,
+        "max_transitions": 1000,
+        "dropout": 0.0,
+        "board_chunk_size": 128,
+        "inference_board_cache_entries": 65536,
+        "inference_temporal_cache_entries": 576,
+        "incremental_inference": true,
+        "paged_kv_cache": true,
+        "paged_kv_length_bucket_tokens": 1001,
+        "activation_checkpointing": true,
+        "dead_rules_enabled": true
+      },
+      "effective_sequence_microbatch_after_training": 8,
+      "mode": "four_dark",
+      "device": "NVIDIA GeForce RTX 4090",
+      "torch": "2.11.0+cu130",
+      "games": 48,
+      "per_rank_transition_batch": 12288,
+      "sequence_microbatch": 8,
+      "optimizer_minibatch_samples": 512,
+      "checkpoint_seconds": 5.655507451999938,
+      "checkpoint_bytes": 1175104349,
+      "peak_allocated_gib": 18.778151512145996,
+      "peak_reserved_gib": 19.85546875,
+      "total_measured_environment_steps": 24576,
+      "weighted_environment_steps_per_second_with_periodic_save": 50.100105353917186,
+      "weighted_seconds_with_periodic_save": 490.5378906169999,
+      "updates": [
+        {
+          "environment_steps": 12288,
+          "base_steps": 12288,
+          "branch_steps": 0,
+          "history": {
+            "update": 3,
+            "mean_tokens": 462.5772298177083,
+            "min_tokens": 1,
+            "max_tokens": 768
+          },
+          "seconds_without_save": 272.62490716800005,
+          "seconds_with_save": 278.28041462,
+          "environment_steps_per_second_with_save": 44.156898417661274,
+          "policy_epochs": 3.0,
+          "critic_epochs": 3.0,
+          "policy_nonzero_advantage_fraction": 0.9999999909082867,
+          "terminal_games": 27,
+          "policy_backward_seconds": 56.51728909299993,
+          "critic_backward_seconds": 51.530456491999985,
+          "layout_backward_seconds": 0.0,
+          "effective_sequence_microbatch": 8
+        },
+        {
+          "environment_steps": 12288,
+          "base_steps": 12288,
+          "branch_steps": 0,
+          "history": {
+            "update": 4,
+            "mean_tokens": 266.6829427083333,
+            "min_tokens": 1,
+            "max_tokens": 999
+          },
+          "seconds_without_save": 206.60196854499998,
+          "seconds_with_save": 212.25747599699991,
+          "environment_steps_per_second_with_save": 57.89195382768841,
+          "policy_epochs": 3.0,
+          "critic_epochs": 3.0,
+          "policy_nonzero_advantage_fraction": 0.9999999902841713,
+          "terminal_games": 24,
+          "policy_backward_seconds": 42.58508709800003,
+          "critic_backward_seconds": 35.644354710000016,
+          "layout_backward_seconds": 0.0,
+          "effective_sequence_microbatch": 8
+        }
+      ],
+      "source_total_measured_environment_steps": 49152,
+      "excluded_initial_updates": 2
+    }
+  ],
+  "single_card": [
+    {
+      "mode": "four_dark",
+      "measured_non_save_seconds": 479.226875713,
+      "measured_environment_steps": 24576,
+      "amortized_steps_per_second": 50.10009884767472,
+      "continuous_days": 693.0569603823002,
+      "calendar_days": 866.3212004778752,
+      "individual_batch_continuous_days": [
+        786.3374346132632,
+        599.7763061438663
+      ],
+      "individual_batch_envelope_is_not_a_bound": true,
+      "save_count": 244142,
+      "save_only_continuous_days": 15.980866902154732,
+      "archive_every_updates": 100,
+      "additional_archive_days_if_each_costs_one_full_save": 0.15984663423360937,
+      "save_frequency_sensitivity": [
+        {
+          "every_updates": 1,
+          "continuous_days": 693.0569603823002
+        },
+        {
+          "every_updates": 10,
+          "continuous_days": 678.6742325361707
+        },
+        {
+          "every_updates": 100,
+          "continuous_days": 677.2359401143791
+        }
+      ]
+    }
+  ],
+  "modes_included": [
+    "four_dark"
+  ],
+  "selected_modes_sequential_continuous_days": 693.0569603823002,
+  "selected_modes_sequential_calendar_days": 866.3212004778752,
+  "two_modes_sequential_continuous_days": null,
+  "two_modes_sequential_calendar_days": null,
+  "selection_estimate": null,
+  "hardware_sensitivities": [
+    {
+      "mode": "four_dark",
+      "cards": 1,
+      "per_card_non_save_speedup_assumption": 1,
+      "parallel_efficiency_assumptions": [
+        1.0
+      ],
+      "global_transition_batch": 12288,
+      "calendar_days": [
+        866.3212004778752,
+        866.3212004778752
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 2,
+      "per_card_non_save_speedup_assumption": 1,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 24576,
+      "calendar_days": [
+        480.17985521885873,
+        614.5203499569828
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 4,
+      "per_card_non_save_speedup_assumption": 1,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 49152,
+      "calendar_days": [
+        240.0900094310071,
+        307.26025680006916
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 8,
+      "per_card_non_save_speedup_assumption": 1,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 98304,
+      "calendar_days": [
+        120.0450456262924,
+        153.63016931082345
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 1,
+      "per_card_non_save_speedup_assumption": 2,
+      "parallel_efficiency_assumptions": [
+        1.0
+      ],
+      "global_transition_batch": 12288,
+      "calendar_days": [
+        443.1486420527843,
+        443.1486420527843
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 2,
+      "per_card_non_save_speedup_assumption": 2,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 24576,
+      "calendar_days": [
+        245.08398942714157,
+        312.25423679620366
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 4,
+      "per_card_non_save_speedup_assumption": 2,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 49152,
+      "calendar_days": [
+        122.54207653514851,
+        156.12720021967957
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 8,
+      "per_card_non_save_speedup_assumption": 2,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 98304,
+      "calendar_days": [
+        61.271079178363124,
+        78.06364102062864
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 1,
+      "per_card_non_save_speedup_assumption": 3,
+      "parallel_efficiency_assumptions": [
+        1.0
+      ],
+      "global_transition_batch": 12288,
+      "calendar_days": [
+        302.091122577754,
+        302.091122577754
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 2,
+      "per_card_non_save_speedup_assumption": 3,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 24576,
+      "calendar_days": [
+        166.71870082990253,
+        211.49886574261063
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 4,
+      "per_card_non_save_speedup_assumption": 3,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 49152,
+      "calendar_days": [
+        83.35943223652899,
+        105.74951469288303
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 8,
+      "per_card_non_save_speedup_assumption": 3,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 98304,
+      "calendar_days": [
+        41.67975702905335,
+        52.874798257230374
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 1,
+      "per_card_non_save_speedup_assumption": 4,
+      "parallel_efficiency_assumptions": [
+        1.0
+      ],
+      "global_transition_batch": 12288,
+      "calendar_days": [
+        231.56236284023885,
+        231.56236284023885
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 2,
+      "per_card_non_save_speedup_assumption": 4,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 24576,
+      "calendar_days": [
+        127.53605653128304,
+        161.12118021581404
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 4,
+      "per_card_non_save_speedup_assumption": 4,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 49152,
+      "calendar_days": [
+        63.768110087219235,
+        80.56067192948476
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    },
+    {
+      "mode": "four_dark",
+      "cards": 8,
+      "per_card_non_save_speedup_assumption": 4,
+      "parallel_efficiency_assumptions": [
+        0.7,
+        0.9
+      ],
+      "global_transition_batch": 98304,
+      "calendar_days": [
+        31.884095954398475,
+        40.28037687553123
+      ],
+      "status": "conditional_only_not_measured_on_target_hardware"
+    }
+  ],
+  "limitations": [
+    "Learning/forward passes are not environment steps; PPO currently has no extra simulation branches.",
+    "Use the recorded measured history lengths; short random-policy probes do not establish mature-policy steady-state throughput.",
+    "Named PRO 6000/H100 devices have no measured speedup in this model; old GPU factors are not reused.",
+    "Multi-card sensitivities assume each rank keeps the measured workload; global batches grow with cards.",
+    "Periodic layout updates may not occur in a short probe; inspect layout_backward_seconds before treating their amortized cost as measured.",
+    "Serial save latency does not speed up with GPU compute. Archive and evaluation overhead are listed separately."
+  ]
+}

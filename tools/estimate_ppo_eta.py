@@ -56,12 +56,18 @@ def read_probe(path: Path) -> dict:
             "terminal_games": update["rollout/base_games_completed"],
             "policy_backward_seconds": update["timing/policy_backward_seconds"],
             "critic_backward_seconds": update["timing/critic_backward_seconds"],
+            "layout_backward_seconds": update.get("timing/layout_backward_seconds", 0.0),
+            "effective_sequence_microbatch": update.get(
+                "optimizer/effective_policy_microbatch", raw["sequence_microbatch"]),
         })
     steps = sum(row["environment_steps"] for row in rows)
     elapsed = phases["real_training_loop_without_checkpoint"]["seconds"] + len(rows) * saved["seconds"]
     return {
         "source": path.as_posix(),
         "source_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "config_revision": raw.get("config_revision"),
+        "model_config": raw.get("model_config"),
+        "effective_sequence_microbatch_after_training": rows[-1]["effective_sequence_microbatch"],
         "mode": raw["mode"], "device": raw["device"], "torch": raw["torch"],
         "games": raw["games"], "per_rank_transition_batch": raw["transitions_per_update"],
         "sequence_microbatch": raw["sequence_microbatch"],

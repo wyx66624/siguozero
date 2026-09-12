@@ -1,39 +1,50 @@
 # 四国军棋 PPO、独立价值模型与 RTX 4090 显存实测
 
-日期：2026-09-10；配置 revision 18。适用于 `four_dark` 和 `double_open`。
+2026-09-11 补充：数组历史、批量动作损失、固定席位 KV 及 CUDA Graph 已默认启用，
+模型结构及检查点格式保持兼容。同检查点 4090 完整训练轮从 56.05 秒降至 19.16 秒，
+详见[数据路径优化与验证](ppo_pipeline_optimization_zh.md)。下文较早计时保留为历史基线。
+
+当前四国 main 使用 48 局、12288 步采样批、32 条历史的学习微批和 4 个 CPU 环境进程，
+启用直接因果 SDPA、关闭激活重算。当前工期与满窗口容量见
+[并行环境与学习端优化](ppo_parallel_optimization_zh.md)。此前 237 步/秒的
+[正式批量复测](four_dark_optimized_training_eta_zh.md)保留为历史对照。
+
+日期：2026-09-11；当前配置 revision 22。适用于 `four_dark` 和 `double_open`。
 这两个模式的行棋训练现已使用 PPO；`two_player` 保留 K=4、M=2 的 Game-GRPO。
-当前默认并行数、30 亿环境交互步预算和端到端排期见
+整盘单层编码与本次验证见[整盘向量投影](whole_board_linear_zh.md)。
+当前默认并行数、参数和训练时间见[128＋128 并行训练核算](compact128_parallel_training_eta_zh.md)。
+30 亿环境交互步预算和旧版端到端计时见
 [序列训练优化与预算报告](four_player_ppo_optimization_zh.md)。
 
 ## 1. 参数量与模型职责
 
-以下为默认开启死规则时，按实际 `nn.Module.parameters()` 统计的参数量。
+以下为 revision 22 默认开启死规则时，按实际 `nn.Module.parameters()` 统计的参数量。
 四暗和双明使用相同架构，不按四个座位复制模型。
 
-| 规格 | 行棋 Policy | 新增 Critic | 布阵 Layout | PPO 可训练参数合计 |
+| 规格 | 行棋 Policy | 独立 Critic | 布阵 Layout | PPO 可训练参数合计 |
 |---|---:|---:|---:|---:|
-| bootstrap | 26,610,696 | 26,151,433 | 8,887,296 | 61,649,425 |
-| main | 144,157,704 | 143,698,441 | 17,292,288 | 305,148,433 |
-| extended | 215,534,600 | 215,075,337 | 25,697,280 | 456,307,217 |
+| bootstrap | 11,109,250 | 10,993,921 | 8,887,296 | 30,990,467 |
+| main | 36,324,226 | 36,208,897 | 17,292,288 | 89,825,411 |
+| extended | 53,134,210 | 53,018,881 | 25,697,280 | 131,850,371 |
 
-原 main 的 Policy + Layout 合计 **161,449,992** 参数。直接执行 Python CLI
-默认选择 `bootstrap`；正式启动脚本明确传入 `--model-scale main`。
+`WholeBoardEncoder` 把按点位排列的整盘类别向量、模式和可选阵亡位拼成一个固定输入，
+只经过一个 `Linear(18009, 128)`（关闭死规则为 `Linear(17934, 128)`）。不创建逐点
+神经特征或棋盘 Transformer。其输出与 128 维动作向量 concat 成 256 维时序 token。
+main 的时序网络仍为 32 层、8 个注意力头，FFN 为 1024；动作头直接预测起点及给定起点后的终点 logits。
+动作输入为[五维坐标单层投影](action_linear_zh.md)：起点 x/y、终点 x/y、相对行动方
+直接经过 `Linear(5,128)`，不包含战斗结果字段或字段 Embedding。
 
-`GameValueTransformer` 使用与 Policy 相同的图棋盘编码器、公开动作编码器和
-32 层、512 维 causal history Transformer，将两个动作查询头替换为
-`Linear(512, 1)`。它每次为一个玩家可见的历史状态输出一个标量 `V(h)`，表示
-该玩家所属队伍的预期终局回报。价值头初始为零，骨干从 Policy 复制初值；两者
-具有独立参数、优化器和推理缓存。Critic 接收与 Policy 相同的信息，包含四暗或
-双明允许看见的身份，不额外接收裁判隐藏信息。
+`GameValueTransformer` 使用同样的整盘线性编码、动作编码与时序网络，用
+`Linear(256, 1)` 替代动作头。它输出该观察者队伍的预期终局回报，不接收裁判隐藏身份。
+骨干从 Policy 复制初值；两个模型各自拥有参数、优化器和推理缓存。
 
-四国训练常驻 Policy、Critic、Layout，以及一份冻结的 Layout 参考模型。
-PPO 根据采样时保存的 `old_log_prob` 计算概率比，不保留冻结 reference Policy。
-main 常驻网络共 **322,440,721** 参数，原 GRPO 的双份 Policy/Layout 为
-322,899,984 参数，模型权重数量几乎相同。新增的主要常驻开销是 Critic 的
-AdamW 状态；相对原 GRPO，约多 **1.07 GiB** 的 FP32 优化器状态，另外还要
-考虑价值反传激活、梯度和 Critic 的 KV 缓存。
+四国训练常驻 Policy、Critic、Layout，以及一份冻结 Layout 参考模型。
+main 可训练参数合计 **89,825,411**，加冻结 Layout 共 **107,117,699**。
+推理和历史评测只加载 Policy + Layout，不加载 Critic 或优化器。
 
-推理和历史评测继续只加载 Policy + Layout，不加载 Critic 或它的优化器。
+宽度覆盖在 `models.four_player` 中，仅作用于非 tiny 的四国训练。布阵模型、层数、
+1000 步历史和二人模型宽度保留原值。旧 512 维检查点不能直接恢复为新 256 维模型；
+正式入口使用独立根目录 `runs_four_player_ppo_128_3b`，旧检查点保留。
 
 ## 2. 单条真实轨迹替代 8 条终局续局
 
@@ -71,7 +82,9 @@ clip 都是 0.2，value coefficient 为 0.5；两者学习率默认 1e-4，分�
 终局结果做已有的 clipped terminal-return 更新；布阵训练没有新增模拟分支。
 它的 Layout GRPO、Layout reference 和缓冲区机制保持独立。
 
-## 3. RTX 4090 24GB 实测与并行设置
+## 3. 修改前 RTX 4090 24GB 实测与并行设置
+
+以下计时和容量记录来自旧空间编码器。revision 20 的测试见[整盘投影验证](whole_board_linear_zh.md)，不能直接沿用旧数字预测新结构工期。
 
 环境：本机 WSL2、RTX 4090 24GB、PyTorch `2.11.0+cu130`、BF16 autocast、
 FP32 权重/AdamW、activation checkpointing、main、死规则开启、1001 token。
@@ -91,11 +104,11 @@ FP32 权重/AdamW、activation checkpointing、main、死规则开启、1001 tok
 原始结果见 [4090 PPO 容量数据](benchmarks/2026-09-10_ppo_4090.json)。
 后两行来自新增的[序列训练及 20 局容量数据](benchmarks/2026-09-10_ppo_sequences_20_4090.json)。
 
-**microbatch=8 可用；默认采用通过实测的 20 局并行。** 当前配置为：
+**以下是旧结构当时的 20 局并行配置。** revision 22 的并行配置以[新版实测](compact128_parallel_training_eta_zh.md)为准：
 
 ```text
 model_scale=main
-policy_microbatch=8       # 每次反传最多 8 条具有相同前缀的历史序列
+policy_microbatch=8       # 旧结构：每次反传最多 8 条具有相同前缀的历史序列
 max_samples_per_sequence=64
 optimizer_minibatch_samples=512 # 每 rank 每次优化器 step 的决策数
 base_game_pool_size=20    # 独立对局数
@@ -117,32 +130,38 @@ target_environment_plies=3000000000 # 所有对局、座位合计的真实动作
 
 ## 4. 运行、迁移和评测
 
+架构切换后使用新的 run-dir。下方 `--init-from` 只适用于同为 v6、编码和模型维度均相同的 GRPO→PPO 权重初始化，不会把旧图编码器或 512 维时序权重转换为新 256 维结构。
+
 RTX 4090 正式规格启动命令（不会自动启动训练）：
 
 ```bash
 bash scripts/start_four_player_ppo.sh four_dark
 bash scripts/start_four_player_ppo.sh double_open
 
-# 显存需要留更多余量时，使用也已测过的 16 局配置
-BASE_GAME_POOL=16 ACTOR_BATCH=16 TEMPORAL_CACHE_ENTRIES=192 TRANSITION_BATCH=4096 \
+# 四张卡，每张卡保留所选默认并行工作量
+NUM_GPUS=4 \
   bash scripts/start_four_player_ppo.sh four_dark
 ```
 
 脚本默认使用 `/root/anaconda3/envs/siguozero/bin/python`，可通过 `PYTHON_BIN`
-覆盖。输出进入 `runs_four_player_ppo_3b/<mode>/<dead_rule_variant>`。
+覆盖。输出进入 `runs_four_player_ppo_128_3b/<mode>/<dead_rule_variant>`。
+默认仅在每 5000 万环境步的评测前后保存模型和完整续训状态，然后与此前最优旧版本
+对弈 100 局；平时及退出时不保存。首次比较基线先留在 CPU 内存，到首次评测再写盘。
+中途停止从最近评测保存点恢复，首次评测前没有可恢复快照。保存与比较规则详见
+[自动最优模型选择](best_model_selection_zh.md)。
 `--transition-batch` 是 `--anchor-batch` 的别名，PPO 的单位是实际动作；
 `--target-environment-plies` 设置累计训练环境交互目标，含采样对局和实际模拟分支，
 例如 8 条分支各走 32 步合计 256。详见[统一定义](environment_step_budget_zh.md)。
 当前 PPO 不执行额外蒙特卡洛分支，所以总交互数暂时等于采集的对局动作数。
 使用同一种环境交互单位，也不能保证不同算法获得相同棋力或产生相同算力消耗。
-配置和启动脚本均默认 30 亿环境交互步，5120 步采样批对应 585,938 次外层更新，
-最后一批为 2560 步；默认 warmup 2000 次。PPO 会根据目标及采样批自动推导
+配置和启动脚本均默认 30 亿环境交互步，外层更新数为目标除以全局采样批向上取整，
+最后一批按剩余步数收集；默认 warmup 2000 次。PPO 会根据目标及采样批自动推导
 更新上限和学习率周期，显式 `--updates` 优先；冒烟测试仍默认一轮。
 此目标不保证棋力收敛，旧 GRPO 等价换算仅保留为显式兼容选项。
 
-新 PPO 检查点仍使用兼容推理端的 v4 外层格式，并新增 `algorithm=ppo`、
+当前检查点使用 v6 格式，拒绝直接加载旧编码器的 v4/v5 权重。相同新架构的 PPO 检查点包含 `algorithm=ppo`、
 `critic`、`critic_optimizer`、critic GradScaler，以及实际环境步计数。
-旧 v4 缺少 algorithm 时按 GRPO 处理，不会随机创建 Critic 后静默续训。
+缺少 `algorithm` 的同架构 v6 检查点按 GRPO 处理，跨算法续训仍被拒绝；旧 v4/v5 在格式检查时即被拒绝。
 
 从既有四国 GRPO 权重初始化时，必须明确使用一个新输出目录：
 
@@ -158,7 +177,7 @@ bash scripts/start_four_player_ppo.sh four_dark \
 `latest.pt`，保留最后一个完整原子检查点。
 
 `train_npu_cluster.sh` 的四国入口也切换为 PPO，并使用独立的
-`runs_npu_910b_ppo_3b` 默认目录，也按环境交互目标推导更新数；以上 4090 数字
+`runs_npu_910b_ppo_128_3b` 默认目录，也按环境交互目标推导更新数；以上 4090 数字
 不代表 NPU 显存/吞吐实测。
 CPU 双进程 DDP 已验证；NPU 仍需实机验收。
 
@@ -169,10 +188,13 @@ PPO 的 `rollout/root_candidates` 与 `rollout/terminal_continuations` 应为零
 
 ## 5. 训练时间与验证边界
 
-当前结果见[序列训练优化与预算报告](four_player_ppo_optimization_zh.md)：
+当前结果见[revision 21 实测与各卡预算](action_linear_training_eta_zh.md)。
+以下保留逐点棋盘编码阶段的历史对照，不能用于当前架构排期：
+[序列训练优化与预算报告](four_player_ppo_optimization_zh.md)中，
 同一批真实样本的历史反传约快 10.4 倍。但新预算是 30 亿环境交互步，按短基准
 外推训练本体约需 2.5～4.2 年连续运行，80% 可用率约 3.1～5.2 个日历年；
-当前 1.5 万局串行评测另需约 7 个连续运行日。旧百万步预算的按天排期已失效。
+自动选优现为每 5000 万步 100 局，30 亿步共 6000 局；旧 1.5 万局串行评测的
+7 天估计已失效，最新并行评测条件估算见[时间重估](four_player_ppo_eta_budget_zh.md)。旧百万步预算的按天排期已失效。
 这些不是长期实测或上界。满长窗口大量滑动时，
 前缀复用比例可能降低，需要用实际训练曲线修正。此前独立历史样本路径的
 [时间报告](four_player_ppo_timing_zh.md)仅保留为历史基线。

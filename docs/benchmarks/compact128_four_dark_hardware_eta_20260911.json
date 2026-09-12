@@ -1,0 +1,2352 @@
+{
+  "status": "conditional_engineering_scenarios_not_target_gpu_measurements_or_bounds",
+  "encoding_config_revision": 22,
+  "timing_baseline_config_revisions": [
+    22
+  ],
+  "current_five_input_action_timing_measured": true,
+  "model_parameter_counts": {
+    "bootstrap": {
+      "policy": 11109250,
+      "critic": 10993921,
+      "layout": 8887296,
+      "trainable_total": 30990467,
+      "including_frozen_layout": 39877763
+    },
+    "main": {
+      "policy": 36324226,
+      "critic": 36208897,
+      "layout": 17292288,
+      "trainable_total": 89825411,
+      "including_frozen_layout": 107117699
+    },
+    "extended": {
+      "policy": 53134210,
+      "critic": 53018881,
+      "layout": 25697280,
+      "trainable_total": 131850371,
+      "including_frozen_layout": 157547651
+    }
+  },
+  "budget_per_mode": 3000000000,
+  "availability": 0.8,
+  "measured_baseline_device": "RTX 4090 24GB",
+  "hardware": {
+    "RTX 4090 24GB": {
+      "dense_bf16_fp32_accumulate_tflops": 165.2,
+      "memory_bandwidth_gb_s": 1008,
+      "source": "https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf",
+      "gpu_stage_speedup_scenarios": [
+        1.0,
+        1.0
+      ],
+      "non_save_speedup_scenario_range": [
+        1.0,
+        1.0
+      ]
+    },
+    "RTX PRO 6000 Blackwell Workstation 96GB": {
+      "dense_bf16_fp32_accumulate_tflops": 503.8,
+      "memory_bandwidth_gb_s": 1792,
+      "source": "https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/quadro-product-literature/NVIDIA-RTX-Blackwell-PRO-GPU-Architecture-v1.0.pdf",
+      "gpu_stage_speedup_scenarios": [
+        1.7777777777777777,
+        3.049636803874092
+      ],
+      "non_save_speedup_scenario_range": [
+        1.3559322033898304,
+        2.3325153942312147
+      ]
+    },
+    "H100 SXM 80GB": {
+      "dense_bf16_fp32_accumulate_tflops": 989.5,
+      "memory_bandwidth_gb_s": 3350,
+      "source": "https://www.nvidia.com/en-us/data-center/h100/",
+      "gpu_stage_speedup_scenarios": [
+        3.3234126984126986,
+        5.989709443099274
+      ],
+      "non_save_speedup_scenario_range": [
+        1.7225421637186344,
+        3.4257127525143245
+      ]
+    }
+  },
+  "baseline_spec": {
+    "dense_bf16_fp32_accumulate_tflops": 165.2,
+    "memory_bandwidth_gb_s": 1008,
+    "source": "https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf"
+  },
+  "assumptions": {
+    "gpu_accelerable_fraction_of_non_save_wall_time": [
+      0.6,
+      0.85
+    ],
+    "fraction_is_measured": false,
+    "same_relative_gpu_kernel_utilization": true,
+    "multi_card_efficiency": [
+      0.7,
+      0.9
+    ],
+    "weak_scaling": "each rank retains the selected measured games and transition batch; global batch grows with cards",
+    "sixteen_card_scaling": "conditional on adequate inter-node CPU and communication capacity; not measured",
+    "checkpoint_latency": "measured single-card latency held constant; rank-gather growth unmeasured",
+    "formula": "S=1/((1-f)+f/r); days=(work_seconds/(N*S*efficiency)+save_count*save_seconds)/86400/availability",
+    "excluded": [
+      "extra checkpoint archives",
+      "selection games",
+      "changed mature-policy history distribution",
+      "periodic layout update cost when no layout backward occurred in the probe",
+      "unmeasured larger per-card rollout concurrency on higher-memory GPUs"
+    ]
+  },
+  "action": {
+    "architecture": "coordinates_player_linear",
+    "field_count": 5,
+    "fields": [
+      "source_x",
+      "source_y",
+      "destination_x",
+      "destination_y",
+      "actor"
+    ],
+    "learned_field_embeddings": false,
+    "normalization": "none",
+    "projection_output_dim": 128,
+    "layer_norm": false,
+    "parameters": 768,
+    "four_dark_example_0_to_120_actor_3": [
+      -2.0,
+      -3.0,
+      -2.0,
+      -2.0,
+      3.0
+    ],
+    "coordinates_by_mode": {
+      "four_dark": [
+        [
+          -2,
+          -3
+        ],
+        [
+          -1,
+          -3
+        ],
+        [
+          0,
+          -3
+        ],
+        [
+          1,
+          -3
+        ],
+        [
+          2,
+          -3
+        ],
+        [
+          -2,
+          -4
+        ],
+        [
+          -1,
+          -4
+        ],
+        [
+          0,
+          -4
+        ],
+        [
+          1,
+          -4
+        ],
+        [
+          2,
+          -4
+        ],
+        [
+          -2,
+          -5
+        ],
+        [
+          -1,
+          -5
+        ],
+        [
+          0,
+          -5
+        ],
+        [
+          1,
+          -5
+        ],
+        [
+          2,
+          -5
+        ],
+        [
+          -2,
+          -6
+        ],
+        [
+          -1,
+          -6
+        ],
+        [
+          0,
+          -6
+        ],
+        [
+          1,
+          -6
+        ],
+        [
+          2,
+          -6
+        ],
+        [
+          -2,
+          -7
+        ],
+        [
+          -1,
+          -7
+        ],
+        [
+          0,
+          -7
+        ],
+        [
+          1,
+          -7
+        ],
+        [
+          2,
+          -7
+        ],
+        [
+          -2,
+          -8
+        ],
+        [
+          -1,
+          -8
+        ],
+        [
+          0,
+          -8
+        ],
+        [
+          1,
+          -8
+        ],
+        [
+          2,
+          -8
+        ],
+        [
+          -3,
+          2
+        ],
+        [
+          -3,
+          1
+        ],
+        [
+          -3,
+          0
+        ],
+        [
+          -3,
+          -1
+        ],
+        [
+          -3,
+          -2
+        ],
+        [
+          -4,
+          2
+        ],
+        [
+          -4,
+          1
+        ],
+        [
+          -4,
+          0
+        ],
+        [
+          -4,
+          -1
+        ],
+        [
+          -4,
+          -2
+        ],
+        [
+          -5,
+          2
+        ],
+        [
+          -5,
+          1
+        ],
+        [
+          -5,
+          0
+        ],
+        [
+          -5,
+          -1
+        ],
+        [
+          -5,
+          -2
+        ],
+        [
+          -6,
+          2
+        ],
+        [
+          -6,
+          1
+        ],
+        [
+          -6,
+          0
+        ],
+        [
+          -6,
+          -1
+        ],
+        [
+          -6,
+          -2
+        ],
+        [
+          -7,
+          2
+        ],
+        [
+          -7,
+          1
+        ],
+        [
+          -7,
+          0
+        ],
+        [
+          -7,
+          -1
+        ],
+        [
+          -7,
+          -2
+        ],
+        [
+          -8,
+          2
+        ],
+        [
+          -8,
+          1
+        ],
+        [
+          -8,
+          0
+        ],
+        [
+          -8,
+          -1
+        ],
+        [
+          -8,
+          -2
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          -1,
+          3
+        ],
+        [
+          -2,
+          3
+        ],
+        [
+          2,
+          4
+        ],
+        [
+          1,
+          4
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          -1,
+          4
+        ],
+        [
+          -2,
+          4
+        ],
+        [
+          2,
+          5
+        ],
+        [
+          1,
+          5
+        ],
+        [
+          0,
+          5
+        ],
+        [
+          -1,
+          5
+        ],
+        [
+          -2,
+          5
+        ],
+        [
+          2,
+          6
+        ],
+        [
+          1,
+          6
+        ],
+        [
+          0,
+          6
+        ],
+        [
+          -1,
+          6
+        ],
+        [
+          -2,
+          6
+        ],
+        [
+          2,
+          7
+        ],
+        [
+          1,
+          7
+        ],
+        [
+          0,
+          7
+        ],
+        [
+          -1,
+          7
+        ],
+        [
+          -2,
+          7
+        ],
+        [
+          2,
+          8
+        ],
+        [
+          1,
+          8
+        ],
+        [
+          0,
+          8
+        ],
+        [
+          -1,
+          8
+        ],
+        [
+          -2,
+          8
+        ],
+        [
+          3,
+          -2
+        ],
+        [
+          3,
+          -1
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          3,
+          1
+        ],
+        [
+          3,
+          2
+        ],
+        [
+          4,
+          -2
+        ],
+        [
+          4,
+          -1
+        ],
+        [
+          4,
+          0
+        ],
+        [
+          4,
+          1
+        ],
+        [
+          4,
+          2
+        ],
+        [
+          5,
+          -2
+        ],
+        [
+          5,
+          -1
+        ],
+        [
+          5,
+          0
+        ],
+        [
+          5,
+          1
+        ],
+        [
+          5,
+          2
+        ],
+        [
+          6,
+          -2
+        ],
+        [
+          6,
+          -1
+        ],
+        [
+          6,
+          0
+        ],
+        [
+          6,
+          1
+        ],
+        [
+          6,
+          2
+        ],
+        [
+          7,
+          -2
+        ],
+        [
+          7,
+          -1
+        ],
+        [
+          7,
+          0
+        ],
+        [
+          7,
+          1
+        ],
+        [
+          7,
+          2
+        ],
+        [
+          8,
+          -2
+        ],
+        [
+          8,
+          -1
+        ],
+        [
+          8,
+          0
+        ],
+        [
+          8,
+          1
+        ],
+        [
+          8,
+          2
+        ],
+        [
+          -2,
+          -2
+        ],
+        [
+          0,
+          -2
+        ],
+        [
+          2,
+          -2
+        ],
+        [
+          -2,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          -2,
+          2
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "double_open": [
+        [
+          -2,
+          -3
+        ],
+        [
+          -1,
+          -3
+        ],
+        [
+          0,
+          -3
+        ],
+        [
+          1,
+          -3
+        ],
+        [
+          2,
+          -3
+        ],
+        [
+          -2,
+          -4
+        ],
+        [
+          -1,
+          -4
+        ],
+        [
+          0,
+          -4
+        ],
+        [
+          1,
+          -4
+        ],
+        [
+          2,
+          -4
+        ],
+        [
+          -2,
+          -5
+        ],
+        [
+          -1,
+          -5
+        ],
+        [
+          0,
+          -5
+        ],
+        [
+          1,
+          -5
+        ],
+        [
+          2,
+          -5
+        ],
+        [
+          -2,
+          -6
+        ],
+        [
+          -1,
+          -6
+        ],
+        [
+          0,
+          -6
+        ],
+        [
+          1,
+          -6
+        ],
+        [
+          2,
+          -6
+        ],
+        [
+          -2,
+          -7
+        ],
+        [
+          -1,
+          -7
+        ],
+        [
+          0,
+          -7
+        ],
+        [
+          1,
+          -7
+        ],
+        [
+          2,
+          -7
+        ],
+        [
+          -2,
+          -8
+        ],
+        [
+          -1,
+          -8
+        ],
+        [
+          0,
+          -8
+        ],
+        [
+          1,
+          -8
+        ],
+        [
+          2,
+          -8
+        ],
+        [
+          -3,
+          2
+        ],
+        [
+          -3,
+          1
+        ],
+        [
+          -3,
+          0
+        ],
+        [
+          -3,
+          -1
+        ],
+        [
+          -3,
+          -2
+        ],
+        [
+          -4,
+          2
+        ],
+        [
+          -4,
+          1
+        ],
+        [
+          -4,
+          0
+        ],
+        [
+          -4,
+          -1
+        ],
+        [
+          -4,
+          -2
+        ],
+        [
+          -5,
+          2
+        ],
+        [
+          -5,
+          1
+        ],
+        [
+          -5,
+          0
+        ],
+        [
+          -5,
+          -1
+        ],
+        [
+          -5,
+          -2
+        ],
+        [
+          -6,
+          2
+        ],
+        [
+          -6,
+          1
+        ],
+        [
+          -6,
+          0
+        ],
+        [
+          -6,
+          -1
+        ],
+        [
+          -6,
+          -2
+        ],
+        [
+          -7,
+          2
+        ],
+        [
+          -7,
+          1
+        ],
+        [
+          -7,
+          0
+        ],
+        [
+          -7,
+          -1
+        ],
+        [
+          -7,
+          -2
+        ],
+        [
+          -8,
+          2
+        ],
+        [
+          -8,
+          1
+        ],
+        [
+          -8,
+          0
+        ],
+        [
+          -8,
+          -1
+        ],
+        [
+          -8,
+          -2
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          -1,
+          3
+        ],
+        [
+          -2,
+          3
+        ],
+        [
+          2,
+          4
+        ],
+        [
+          1,
+          4
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          -1,
+          4
+        ],
+        [
+          -2,
+          4
+        ],
+        [
+          2,
+          5
+        ],
+        [
+          1,
+          5
+        ],
+        [
+          0,
+          5
+        ],
+        [
+          -1,
+          5
+        ],
+        [
+          -2,
+          5
+        ],
+        [
+          2,
+          6
+        ],
+        [
+          1,
+          6
+        ],
+        [
+          0,
+          6
+        ],
+        [
+          -1,
+          6
+        ],
+        [
+          -2,
+          6
+        ],
+        [
+          2,
+          7
+        ],
+        [
+          1,
+          7
+        ],
+        [
+          0,
+          7
+        ],
+        [
+          -1,
+          7
+        ],
+        [
+          -2,
+          7
+        ],
+        [
+          2,
+          8
+        ],
+        [
+          1,
+          8
+        ],
+        [
+          0,
+          8
+        ],
+        [
+          -1,
+          8
+        ],
+        [
+          -2,
+          8
+        ],
+        [
+          3,
+          -2
+        ],
+        [
+          3,
+          -1
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          3,
+          1
+        ],
+        [
+          3,
+          2
+        ],
+        [
+          4,
+          -2
+        ],
+        [
+          4,
+          -1
+        ],
+        [
+          4,
+          0
+        ],
+        [
+          4,
+          1
+        ],
+        [
+          4,
+          2
+        ],
+        [
+          5,
+          -2
+        ],
+        [
+          5,
+          -1
+        ],
+        [
+          5,
+          0
+        ],
+        [
+          5,
+          1
+        ],
+        [
+          5,
+          2
+        ],
+        [
+          6,
+          -2
+        ],
+        [
+          6,
+          -1
+        ],
+        [
+          6,
+          0
+        ],
+        [
+          6,
+          1
+        ],
+        [
+          6,
+          2
+        ],
+        [
+          7,
+          -2
+        ],
+        [
+          7,
+          -1
+        ],
+        [
+          7,
+          0
+        ],
+        [
+          7,
+          1
+        ],
+        [
+          7,
+          2
+        ],
+        [
+          8,
+          -2
+        ],
+        [
+          8,
+          -1
+        ],
+        [
+          8,
+          0
+        ],
+        [
+          8,
+          1
+        ],
+        [
+          8,
+          2
+        ],
+        [
+          -2,
+          -2
+        ],
+        [
+          0,
+          -2
+        ],
+        [
+          2,
+          -2
+        ],
+        [
+          -2,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          -2,
+          2
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "two_player": [
+        [
+          -2,
+          -1
+        ],
+        [
+          -1,
+          -1
+        ],
+        [
+          0,
+          -1
+        ],
+        [
+          1,
+          -1
+        ],
+        [
+          2,
+          -1
+        ],
+        [
+          -2,
+          -2
+        ],
+        [
+          -1,
+          -2
+        ],
+        [
+          0,
+          -2
+        ],
+        [
+          1,
+          -2
+        ],
+        [
+          2,
+          -2
+        ],
+        [
+          -2,
+          -3
+        ],
+        [
+          -1,
+          -3
+        ],
+        [
+          0,
+          -3
+        ],
+        [
+          1,
+          -3
+        ],
+        [
+          2,
+          -3
+        ],
+        [
+          -2,
+          -4
+        ],
+        [
+          -1,
+          -4
+        ],
+        [
+          0,
+          -4
+        ],
+        [
+          1,
+          -4
+        ],
+        [
+          2,
+          -4
+        ],
+        [
+          -2,
+          -5
+        ],
+        [
+          -1,
+          -5
+        ],
+        [
+          0,
+          -5
+        ],
+        [
+          1,
+          -5
+        ],
+        [
+          2,
+          -5
+        ],
+        [
+          -2,
+          -6
+        ],
+        [
+          -1,
+          -6
+        ],
+        [
+          0,
+          -6
+        ],
+        [
+          1,
+          -6
+        ],
+        [
+          2,
+          -6
+        ],
+        [
+          2,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          -1,
+          1
+        ],
+        [
+          -2,
+          1
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          1,
+          2
+        ],
+        [
+          0,
+          2
+        ],
+        [
+          -1,
+          2
+        ],
+        [
+          -2,
+          2
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          0,
+          3
+        ],
+        [
+          -1,
+          3
+        ],
+        [
+          -2,
+          3
+        ],
+        [
+          2,
+          4
+        ],
+        [
+          1,
+          4
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          -1,
+          4
+        ],
+        [
+          -2,
+          4
+        ],
+        [
+          2,
+          5
+        ],
+        [
+          1,
+          5
+        ],
+        [
+          0,
+          5
+        ],
+        [
+          -1,
+          5
+        ],
+        [
+          -2,
+          5
+        ],
+        [
+          2,
+          6
+        ],
+        [
+          1,
+          6
+        ],
+        [
+          0,
+          6
+        ],
+        [
+          -1,
+          6
+        ],
+        [
+          -2,
+          6
+        ]
+      ]
+    }
+  },
+  "board": {
+    "points": 129,
+    "category_vocabulary": 139,
+    "input_dim_dead_rules_on": 18009,
+    "projection_output_dim": 128,
+    "parameters": 2305280,
+    "codebook_by_relative_owner_0_1_2_3": {
+      "flag": [
+        30,
+        62,
+        94,
+        126
+      ],
+      "bomb": [
+        31,
+        63,
+        95,
+        127
+      ],
+      "engineer": [
+        32,
+        64,
+        96,
+        128
+      ],
+      "platoon_commander": [
+        33,
+        65,
+        97,
+        129
+      ],
+      "company_commander": [
+        34,
+        66,
+        98,
+        130
+      ],
+      "battalion_commander": [
+        35,
+        67,
+        99,
+        131
+      ],
+      "regiment_commander": [
+        36,
+        68,
+        100,
+        132
+      ],
+      "brigade_commander": [
+        37,
+        69,
+        101,
+        133
+      ],
+      "division_commander": [
+        38,
+        70,
+        102,
+        134
+      ],
+      "army_commander": [
+        39,
+        71,
+        103,
+        135
+      ],
+      "commander": [
+        40,
+        72,
+        104,
+        136
+      ],
+      "mine": [
+        41,
+        73,
+        105,
+        137
+      ]
+    }
+  },
+  "initial_board_examples": [
+    {
+      "mode": "four_dark",
+      "seed": 20260910,
+      "viewer": 0,
+      "board_codes": [
+        34,
+        38,
+        33,
+        37,
+        39,
+        32,
+        0,
+        35,
+        0,
+        35,
+        36,
+        33,
+        0,
+        40,
+        38,
+        37,
+        0,
+        34,
+        0,
+        34,
+        32,
+        41,
+        31,
+        36,
+        41,
+        33,
+        30,
+        32,
+        41,
+        31,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        0,
+        2,
+        0,
+        2,
+        2,
+        2,
+        0,
+        2,
+        2,
+        2,
+        0,
+        2,
+        0,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        0,
+        3,
+        0,
+        3,
+        3,
+        3,
+        0,
+        3,
+        3,
+        3,
+        0,
+        3,
+        0,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "raw_casualty_bits": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "meaning": "one reproducible legal initial layout, not a fixed layout for all games"
+    },
+    {
+      "mode": "double_open",
+      "seed": 20260910,
+      "viewer": 0,
+      "board_codes": [
+        34,
+        38,
+        33,
+        37,
+        39,
+        32,
+        0,
+        35,
+        0,
+        35,
+        36,
+        33,
+        0,
+        40,
+        38,
+        37,
+        0,
+        34,
+        0,
+        34,
+        32,
+        41,
+        31,
+        36,
+        41,
+        33,
+        30,
+        32,
+        41,
+        31,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        102,
+        96,
+        96,
+        96,
+        103,
+        100,
+        0,
+        99,
+        0,
+        102,
+        97,
+        101,
+        0,
+        95,
+        101,
+        104,
+        0,
+        98,
+        0,
+        97,
+        95,
+        98,
+        98,
+        97,
+        100,
+        105,
+        94,
+        99,
+        105,
+        105,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        0,
+        3,
+        0,
+        3,
+        3,
+        3,
+        0,
+        3,
+        3,
+        3,
+        0,
+        3,
+        0,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "raw_casualty_bits": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "meaning": "one reproducible legal initial layout, not a fixed layout for all games"
+    }
+  ],
+  "scenarios": [
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 1,
+      "global_games_by_mode": {
+        "four_dark": 48
+      },
+      "global_transition_batch": 12288,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            866.3212004778752,
+            866.3212004778752
+          ],
+          "last_measured_update": [
+            749.7204951845023,
+            749.7204951845023
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          866.3212004778752,
+          866.3212004778752
+        ],
+        "last_measured_update": [
+          749.7204951845023,
+          749.7204951845023
+        ]
+      }
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 2,
+      "global_games_by_mode": {
+        "four_dark": 96
+      },
+      "global_transition_batch": 24576,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            480.1798552188588,
+            614.520349956983
+          ],
+          "last_measured_update": [
+            415.4016856114294,
+            531.234131890288
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          480.1798552188588,
+          614.520349956983
+        ],
+        "last_measured_update": [
+          415.4016856114294,
+          531.234131890288
+        ]
+      }
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 4,
+      "global_games_by_mode": {
+        "four_dark": 192
+      },
+      "global_transition_batch": 49152,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            240.09000943100713,
+            307.2602568000692
+          ],
+          "last_measured_update": [
+            207.7009246272924,
+            265.6171477667217
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          240.09000943100713,
+          307.2602568000692
+        ],
+        "last_measured_update": [
+          207.7009246272924,
+          265.6171477667217
+        ]
+      }
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 8,
+      "global_games_by_mode": {
+        "four_dark": 384
+      },
+      "global_transition_batch": 98304,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            120.04504562629242,
+            153.63016931082348
+          ],
+          "last_measured_update": [
+            103.85050322443506,
+            132.80861479414972
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          120.04504562629242,
+          153.63016931082348
+        ],
+        "last_measured_update": [
+          103.85050322443506,
+          132.80861479414972
+        ]
+      }
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 16,
+      "global_games_by_mode": {
+        "four_dark": 768
+      },
+      "global_transition_batch": 196608,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            60.022563723935065,
+            76.81512556620059
+          ],
+          "last_measured_update": [
+            51.92529252300639,
+            66.40434830786373
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          60.022563723935065,
+          76.81512556620059
+        ],
+        "last_measured_update": [
+          51.92529252300639,
+          66.40434830786373
+        ]
+      }
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 1,
+      "global_games_by_mode": {
+        "four_dark": 48
+      },
+      "global_transition_batch": 12288,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            382.82261357702004,
+            644.1556073047026
+          ],
+          "last_measured_update": [
+            332.83335923737013,
+            558.16258715084
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          382.82261357702004,
+          644.1556073047026
+        ],
+        "last_measured_update": [
+          332.83335923737013,
+          558.16258715084
+        ]
+      }
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 2,
+      "global_games_by_mode": {
+        "four_dark": 96
+      },
+      "global_transition_batch": 24576,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            211.5695291628281,
+            455.8306405475738
+          ],
+          "last_measured_update": [
+            183.79772119635595,
+            394.40705472338635
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          211.5695291628281,
+          455.8306405475738
+        ],
+        "last_measured_update": [
+          183.79772119635595,
+          394.40705472338635
+        ]
+      }
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 4,
+      "global_games_by_mode": {
+        "four_dark": 192
+      },
+      "global_transition_batch": 49152,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            105.78484640299176,
+            227.91540209536464
+          ],
+          "last_measured_update": [
+            91.89894241975568,
+            197.20360918327088
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          105.78484640299176,
+          227.91540209536464
+        ],
+        "last_measured_update": [
+          91.89894241975568,
+          197.20360918327088
+        ]
+      }
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 8,
+      "global_games_by_mode": {
+        "four_dark": 384
+      },
+      "global_transition_batch": 98304,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            52.89246411228474,
+            113.95774195847117
+          ],
+          "last_measured_update": [
+            45.949512120666704,
+            98.6018455024243
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          52.89246411228474,
+          113.95774195847117
+        ],
+        "last_measured_update": [
+          45.949512120666704,
+          98.6018455024243
+        ]
+      }
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 16,
+      "global_games_by_mode": {
+        "four_dark": 768
+      },
+      "global_transition_batch": 196608,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            26.446272966931232,
+            56.97891189002445
+          ],
+          "last_measured_update": [
+            22.974796971122213,
+            49.30096366200101
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          26.446272966931232,
+          56.97891189002445
+        ],
+        "last_measured_update": [
+          22.974796971122213,
+          49.30096366200101
+        ]
+      }
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 1,
+      "global_games_by_mode": {
+        "four_dark": 48
+      },
+      "global_transition_batch": 12288,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            267.03273373036217,
+            511.3110040008974
+          ],
+          "last_measured_update": [
+            232.99581536708348,
+            443.6199438055089
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          267.03273373036217,
+          511.3110040008974
+        ],
+        "last_measured_update": [
+          232.99581536708348,
+          443.6199438055089
+        ]
+      }
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 2,
+      "global_games_by_mode": {
+        "four_dark": 96
+      },
+      "global_transition_batch": 24576,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            147.24181813690709,
+            360.941638187713
+          ],
+          "last_measured_update": [
+            128.33241904619666,
+            312.59088090529264
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          147.24181813690709,
+          360.941638187713
+        ],
+        "last_measured_update": [
+          128.33241904619666,
+          312.59088090529264
+        ]
+      }
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 4,
+      "global_games_by_mode": {
+        "four_dark": 192
+      },
+      "global_transition_batch": 49152,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            73.62099089003127,
+            180.47090091543424
+          ],
+          "last_measured_update": [
+            64.16629134467607,
+            156.29552227422406
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          73.62099089003127,
+          180.47090091543424
+        ],
+        "last_measured_update": [
+          64.16629134467607,
+          156.29552227422406
+        ]
+      }
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 8,
+      "global_games_by_mode": {
+        "four_dark": 384
+      },
+      "global_transition_batch": 98304,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            36.81053635580449,
+            90.23549136850598
+          ],
+          "last_measured_update": [
+            32.08318658312689,
+            78.14780204790088
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          36.81053635580449,
+          90.23549136850598
+        ],
+        "last_measured_update": [
+          32.08318658312689,
+          78.14780204790088
+        ]
+      }
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 16,
+      "global_games_by_mode": {
+        "four_dark": 768
+      },
+      "global_transition_batch": 196608,
+      "calendar_days_by_mode": {
+        "four_dark": {
+          "selected_window_average": [
+            18.40530908869111,
+            45.11778659504184
+          ],
+          "last_measured_update": [
+            16.041634202352302,
+            39.073941934739295
+          ]
+        }
+      },
+      "calendar_days_across_modes": {
+        "selected_window_average": [
+          18.40530908869111,
+          45.11778659504184
+        ],
+        "last_measured_update": [
+          16.041634202352302,
+          39.073941934739295
+        ]
+      }
+    }
+  ],
+  "source_sha256": {
+    "docs/benchmarks/compact128_four_dark_eta_later_20260911.json": "2617aaa0b38758f9e17ddcd3e710c3a099af003385b31d852404f205fc6a3adf",
+    "E:/agent/siguozero/tools/report_encoding_hardware_eta.py": "a266c4d5674f09aaa65d9062b571672eea349ed79bf597c7110850c18e49569e",
+    "configs/bootstrap.yaml": "eb8fcb3d0dba1ae7ec29c55d445d1f79b5f7d89c1b198ea987d8d8c0406944c5",
+    "src/junqi/training/encoding.py": "389318decf6ccecdb1dedb2910ed9c852e00f20c3d26979a7ca1d54ac057a878",
+    "src/junqi/training/models.py": "de75fe9eef124d002296305870318daee5b813bd1ff8fbc3a2b99c7eecf5c2d6",
+    "src/junqi/game.py": "f5ea0670b469f26d02b35b17141aa3c6706247b2987529424d0fa0cb8fa2d3fb"
+  }
+}

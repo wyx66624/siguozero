@@ -89,7 +89,22 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
     parser.add_argument("--warmup-updates", type=int, default=None)
     parser.add_argument("--actor-batch", type=int, default=None)
     parser.add_argument("--rollout-anchor-wave", type=int, default=None)
-    parser.add_argument("--environment-workers", type=int, default=None)
+    parser.add_argument("--environment-workers", type=int, default=None,
+                        help='PPO CPU worker processes per rank; 1 selects serial collection (GRPO uses threads)')
+    parser.add_argument('--activation-checkpointing', action=argparse.BooleanOptionalAction, default=None,
+                        help='recompute full temporal blocks to reduce activation memory')
+    parser.add_argument('--causal-sdpa', action=argparse.BooleanOptionalAction, default=None,
+                        help='use direct causal SDPA for temporal attention')
+    parser.add_argument('--board-chunk-size', type=int, default=None)
+    parser.add_argument('--layout-prefetch-games', type=int, default=None)
+    parser.add_argument('--ppo-deferred-values', action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument('--ppo-fused-optimizer', action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument('--ppo-pipeline-groups', type=int, default=None)
+    parser.add_argument('--ppo-tensor-learner', action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument('--ppo-varlen-attention', action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument('--ppo-sampling-graphs', action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument('--ppo-low-precision-residual', action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument('--ppo-compile-mode', choices=('off', 'default', 'reduce-overhead', 'max-autotune-no-cudagraphs'), default=None)
     parser.add_argument("--temporal-cache-entries", type=int, default=None)
     parser.add_argument("--paged-kv-length-bucket", type=int, default=None)
     parser.add_argument(
@@ -102,15 +117,24 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
         action="store_true",
         help="use the legacy contiguous rollout KV cache for an A/B benchmark",
     )
+    parser.add_argument("--no-ppo-array-history", action="store_true",
+                        help="use replay-record histories for a PPO pipeline A/B check")
+    parser.add_argument("--no-ppo-fixed-kv", action="store_true",
+                        help="use the legacy prefix KV backend for PPO")
+    parser.add_argument("--no-ppo-cuda-graphs", action="store_true",
+                        help="run fixed-slot PPO decode eagerly without CUDA graph replay")
     parser.add_argument("--base-game-pool", type=int, default=None)
     parser.add_argument("--max-game-plies", type=int, default=None)
-    parser.add_argument("--checkpoint-every", type=int, default=None)
+    parser.add_argument("--checkpoint-policy", choices=("periodic", "evaluation"), default=None,
+                        help="evaluation saves only for scheduled matches; periodic also saves at update intervals and on exit")
+    parser.add_argument("--checkpoint-every", type=int, default=None,
+                        help="update interval for the periodic checkpoint policy")
     parser.add_argument("--archive-every", type=int, default=None)
     parser.add_argument("--keep-checkpoint-archives", type=int, default=None)
     parser.add_argument(
         "--no-model-selection",
         action="store_true",
-        help="disable scheduled current-versus-best model matches",
+        help="disable scheduled current-versus-best matches (also disables automatic saves with the evaluation checkpoint policy)",
     )
     parser.add_argument("--arena-games", type=int, default=None,
                         help="total games per selection, divisible by 2 (two-player) or 4 (four-player)")
@@ -118,6 +142,8 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
                         help="first training progress percentage to evaluate (default: 30)")
     parser.add_argument("--arena-interval-percent", type=int, default=None,
                         help="training progress between selections (default: 5 percentage points)")
+    parser.add_argument("--arena-interval-environment-plies", type=int, default=None,
+                        help="select every N global training environment transitions (four-player default: 50000000)")
     parser.add_argument("--arena-max-plies", type=int, default=None,
                         help="maximum moves per arena game before adjudicating a draw")
     parser.add_argument("--arena-parallel-games", type=int, default=None,
@@ -159,7 +185,8 @@ def main(
     *,
     default_mode: TrainingMode | None = None,
 ) -> None:
-    args = build_parser(default_mode).parse_args(argv)
+    parser = build_parser(default_mode)
+    args = parser.parse_args(argv)
     overrides = {}
     if args.device is not None:
         overrides["device"] = args.device
@@ -177,6 +204,8 @@ def main(
         overrides["ppo_minibatch_samples"] = args.ppo_minibatch
     if args.no_ppo_sequences:
         overrides["ppo_sequence_training"] = False
+    if args.no_ppo_array_history and args.ppo_pipeline_groups is None:
+        overrides['ppo_pipeline_groups'] = 1
     if args.grpo_equivalent_plies is not None:
         overrides["grpo_equivalent_plies"] = args.grpo_equivalent_plies
     if args.grpo_mean_remaining_plies is not None:
@@ -189,20 +218,32 @@ def main(
         overrides["rollout_anchor_wave_size"] = args.rollout_anchor_wave
     if args.environment_workers is not None:
         overrides["rollout_environment_workers"] = args.environment_workers
+    for name in ('layout_prefetch_games', 'ppo_deferred_values', 'ppo_pipeline_groups', 'ppo_fused_optimizer'):
+        if getattr(args, name) is not None:
+            overrides[name] = getattr(args, name)
     if args.base_game_pool is not None:
         overrides["base_game_pool_size"] = args.base_game_pool
     if args.max_game_plies is not None:
         overrides["max_game_plies"] = args.max_game_plies
     if args.checkpoint_every is not None:
         overrides["checkpoint_every_updates"] = args.checkpoint_every
+    if args.checkpoint_policy is not None:
+        overrides["checkpoint_policy"] = args.checkpoint_policy
     if args.archive_every is not None:
         overrides["archive_every_updates"] = args.archive_every
     if args.keep_checkpoint_archives is not None:
         overrides["keep_checkpoint_archives"] = args.keep_checkpoint_archives
     if args.no_model_selection:
         overrides["arena_enabled"] = False
+    if args.arena_interval_environment_plies is not None and (
+        args.arena_start_percent is not None or args.arena_interval_percent is not None
+    ):
+        parser.error("choose environment-step or percentage model selection, not both")
+    if args.arena_start_percent is not None or args.arena_interval_percent is not None:
+        overrides["arena_interval_environment_plies"] = None
     for name in (
         "arena_games", "arena_start_percent", "arena_interval_percent", "arena_max_plies",
+        "arena_interval_environment_plies",
         "arena_parallel_games", "arena_inference_batch_size", "arena_environment_workers",
     ):
         value = getattr(args, name)
@@ -229,6 +270,14 @@ def main(
         or args.paged_kv_length_bucket is not None
         or args.no_incremental_inference
         or args.no_paged_kv
+        or args.no_ppo_array_history
+        or args.no_ppo_fixed_kv
+        or args.no_ppo_cuda_graphs
+        or args.activation_checkpointing is not None
+        or args.causal_sdpa is not None
+        or any(getattr(args, name) is not None for name in (
+            'board_chunk_size', 'ppo_tensor_learner', 'ppo_varlen_attention',
+            'ppo_low_precision_residual', 'ppo_sampling_graphs', 'ppo_compile_mode'))
     ):
         settings = replace(
             settings,
@@ -247,6 +296,15 @@ def main(
                 paged_kv_cache=(
                     False if args.no_paged_kv else settings.model.paged_kv_cache
                 ),
+                ppo_array_history=False if args.no_ppo_array_history else settings.model.ppo_array_history,
+                ppo_fixed_kv=False if args.no_ppo_fixed_kv else settings.model.ppo_fixed_kv,
+                ppo_cuda_graphs=False if args.no_ppo_cuda_graphs else settings.model.ppo_cuda_graphs,
+                activation_checkpointing=(settings.model.activation_checkpointing if args.activation_checkpointing is None
+                                          else args.activation_checkpointing),
+                temporal_causal_sdpa=(settings.model.temporal_causal_sdpa if args.causal_sdpa is None else args.causal_sdpa),
+                **{name: getattr(args, name) for name in (
+                    'board_chunk_size', 'ppo_tensor_learner', 'ppo_varlen_attention',
+                    'ppo_low_precision_residual', 'ppo_sampling_graphs', 'ppo_compile_mode') if getattr(args, name) is not None},
                 paged_kv_length_bucket_tokens=(
                     settings.model.paged_kv_length_bucket_tokens
                     if args.paged_kv_length_bucket is None

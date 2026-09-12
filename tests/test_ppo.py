@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -87,8 +88,8 @@ class PPOTests(unittest.TestCase):
         self.assertEqual(critic(batch).shape, (2,))
         self.assertTrue(torch.equal(critic(batch), torch.zeros(2)))
         self.assertFalse(hasattr(critic, "source_query"))
-        self.assertNotEqual(policy.board_encoder.board_token.data_ptr(),
-                            critic.board_encoder.board_token.data_ptr())
+        self.assertNotEqual(policy.board_encoder.projection.weight.data_ptr(),
+                            critic.board_encoder.projection.weight.data_ptr())
         with torch.no_grad():
             logs = policy(batch, [[state.legal_actions[0]] for state in batch])
         samples = [PPOSample(state, state.legal_actions[0], float(log[0]), 0,
@@ -109,7 +110,7 @@ class PPOTests(unittest.TestCase):
             critic_optimizer.step()
         self.assertFalse(torch.equal(policy_before, policy.source_query[0].weight))
         self.assertFalse(torch.equal(critic_before, critic.value_head.weight))
-        self.assertGreater(float(critic.board_encoder.board_token.grad.abs().sum()), 0)
+        self.assertGreater(float(critic.board_encoder.projection.weight.grad.abs().sum()), 0)
         self.assertTrue(all(parameter.grad is None for parameter in policy.parameters()))
 
     def test_clipped_policy_and_value_losses(self):
@@ -213,8 +214,8 @@ class PPOTests(unittest.TestCase):
             try:
                 self.assertEqual(migrated.update, 0)
                 self.assertEqual(len(migrated.critic_optimizer.state), 0)
-                self.assertTrue(torch.equal(migrated.policy.board_encoder.board_token,
-                                             migrated.critic.board_encoder.board_token))
+                self.assertTrue(torch.equal(migrated.policy.board_encoder.projection.weight,
+                                             migrated.critic.board_encoder.projection.weight))
             finally:
                 migrated.logger.close()
 
@@ -223,9 +224,14 @@ class PPOTests(unittest.TestCase):
             settings = training_settings(mode)
             self.assertEqual(settings.algorithm, "grpo" if mode is TrainingMode.TWO_PLAYER else "ppo")
         settings = TrainingSettings.from_yaml(CONFIG, TrainingMode.FOUR_DARK, model_scale="main")
-        self.assertEqual(settings.policy_microbatch, 8)
-        self.assertEqual(settings.base_game_pool_size, 20)
-        self.assertEqual(settings.model.inference_temporal_cache_entries, 240)
+        self.assertEqual(settings.policy_microbatch, 32)
+        self.assertEqual(settings.rollout_environment_workers, 4)
+        self.assertTrue(settings.model.temporal_causal_sdpa)
+        self.assertFalse(settings.model.activation_checkpointing)
+        self.assertEqual(settings.base_game_pool_size, 48)
+        self.assertEqual(settings.actor_inference_batch, 48)
+        self.assertEqual(settings.anchor_batch, 12288)
+        self.assertEqual(settings.model.inference_temporal_cache_entries, 576)
 
     def test_no_dead_rules_and_real_step_budget(self):
         settings = TrainingSettings.from_yaml(
@@ -235,11 +241,16 @@ class PPOTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             trainer = SelfPlayTrainer(settings, run_directory=directory)
-            self.assertIsNone(trainer.critic.board_encoder.casualty_projection)
+            self.assertEqual(trainer.critic.board_encoder.casualty_feature_dim, 0)
             trainer.train()
             self.assertEqual(trainer.update, 1)
             self.assertEqual(trainer.cumulative["environment_plies"], 8)
             self.assertEqual(trainer.cumulative["continuation_plies"], 0)
+            metrics = json.loads(trainer.logger.latest_path.read_text(encoding="utf-8"))
+            self.assertEqual(metrics["ppo/rollout_samples"], 8)
+            self.assertEqual(metrics["ppo/no_advantage_signal"], 1)
+            self.assertEqual(metrics["critic/rollout_explained_variance_defined"], 0)
+            self.assertNotIn("critic/rollout_explained_variance", metrics)
 
 
 if __name__ == "__main__":

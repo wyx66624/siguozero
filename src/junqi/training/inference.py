@@ -12,7 +12,7 @@ import torch
 
 from ..game import JunqiGame, StepResult
 from .accelerator import is_accelerator, is_bf16_supported, resolve_device
-from .checkpoint import CHECKPOINT_FORMAT_VERSION
+from .checkpoint import require_current_checkpoint
 from .encoding import GameHistory
 from .models import (
     GamePolicyTransformer,
@@ -54,10 +54,7 @@ class InferenceEngine:
         payload = torch.load(
             Path(checkpoint), map_location="cpu", mmap=True, weights_only=False
         )
-        if payload.get("format_version") != CHECKPOINT_FORMAT_VERSION:
-            raise ValueError(
-                f"unsupported checkpoint format: {payload.get('format_version')!r}"
-            )
+        require_current_checkpoint(payload)
         checkpoint_dead_rules = payload.get("dead_rules_enabled")
         if not isinstance(checkpoint_dead_rules, bool):
             raise ValueError("checkpoint has no valid dead-rule variant marker")

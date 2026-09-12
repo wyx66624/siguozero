@@ -1,0 +1,23 @@
+{
+  "world_size": 2,
+  "backend": "gloo",
+  "environment_steps": 8,
+  "optimized": true,
+  "deferred_values": true,
+  "pipeline_groups": 2,
+  "environment_workers_per_rank": 2,
+  "completed_update": 2,
+  "resumed_update": 1,
+  "saves": [
+    "before_model_selection",
+    "after_model_selection",
+    "before_model_selection",
+    "after_model_selection"
+  ],
+  "checkpoints_only_at_evaluation": true,
+  "ranks_have_identical_parameters": true,
+  "pool_and_model_resume_exact": true,
+  "scheduled_evaluations": 2,
+  "checkpoint": "/mnt/e/agent/siguozero/runs/benchmarks/ppo20_ddp_resume_20260911/four_dark/with_dead_rules/checkpoints/latest.pt",
+  "complete": true
+}

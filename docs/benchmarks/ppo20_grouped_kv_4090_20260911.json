@@ -1,0 +1,167 @@
+{
+  "complete": true,
+  "cases": [
+    {
+      "batch": 8,
+      "queries": 1,
+      "extent": 64,
+      "old_ms": 0.011998936407515712,
+      "grouped_ms": 0.01134296306365825,
+      "speedup": 1.057830863080136,
+      "max_absolute_error": 0.001953125
+    },
+    {
+      "batch": 8,
+      "queries": 1,
+      "extent": 512,
+      "old_ms": 0.015980647473285595,
+      "grouped_ms": 0.012730240120242039,
+      "speedup": 1.2553296184786935,
+      "max_absolute_error": 0.0009765625
+    },
+    {
+      "batch": 8,
+      "queries": 1,
+      "extent": 1024,
+      "old_ms": 0.02275329110580322,
+      "grouped_ms": 0.021815563539381733,
+      "speedup": 1.0429843384393296,
+      "max_absolute_error": 0.0009765625
+    },
+    {
+      "batch": 8,
+      "queries": 4,
+      "extent": 64,
+      "old_ms": 0.011204183101654053,
+      "grouped_ms": 0.010457201268545038,
+      "speedup": 1.071432289952754,
+      "max_absolute_error": 0.00390625
+    },
+    {
+      "batch": 8,
+      "queries": 4,
+      "extent": 512,
+      "old_ms": 0.01886548756975943,
+      "grouped_ms": 0.014075209218272045,
+      "speedup": 1.340334433201091,
+      "max_absolute_error": 0.0009765625
+    },
+    {
+      "batch": 8,
+      "queries": 4,
+      "extent": 1024,
+      "old_ms": 0.026881463144506727,
+      "grouped_ms": 0.020417751859798383,
+      "speedup": 1.3165731138811172,
+      "max_absolute_error": 0.0009765625
+    },
+    {
+      "batch": 8,
+      "queries": 8,
+      "extent": 64,
+      "old_ms": 0.007864312916557049,
+      "grouped_ms": 0.00926727183288386,
+      "speedup": 0.8486114423288448,
+      "max_absolute_error": 0.00390625
+    },
+    {
+      "batch": 8,
+      "queries": 8,
+      "extent": 512,
+      "old_ms": 0.021910985737619265,
+      "grouped_ms": 0.016678727372147314,
+      "speedup": 1.3137084891866255,
+      "max_absolute_error": 0.001953125
+    },
+    {
+      "batch": 8,
+      "queries": 8,
+      "extent": 1024,
+      "old_ms": 0.038329936303306944,
+      "grouped_ms": 0.023842950942000153,
+      "speedup": 1.607600351003008,
+      "max_absolute_error": 0.0009765625
+    },
+    {
+      "batch": 48,
+      "queries": 1,
+      "extent": 64,
+      "old_ms": 0.015043733287085262,
+      "grouped_ms": 0.011666051197022284,
+      "speedup": 1.2895308817884426,
+      "max_absolute_error": 0.00390625
+    },
+    {
+      "batch": 48,
+      "queries": 1,
+      "extent": 512,
+      "old_ms": 0.05001225816515776,
+      "grouped_ms": 0.04718698128502562,
+      "speedup": 1.0598740755011746,
+      "max_absolute_error": 0.001953125
+    },
+    {
+      "batch": 48,
+      "queries": 1,
+      "extent": 1024,
+      "old_ms": 0.08891776241738387,
+      "grouped_ms": 0.08323693745488288,
+      "speedup": 1.068248846440082,
+      "max_absolute_error": 0.0009765625
+    },
+    {
+      "batch": 48,
+      "queries": 4,
+      "extent": 64,
+      "old_ms": 0.01105919989534247,
+      "grouped_ms": 0.011796695066143644,
+      "speedup": 0.9374828995183766,
+      "max_absolute_error": 0.00390625
+    },
+    {
+      "batch": 48,
+      "queries": 4,
+      "extent": 512,
+      "old_ms": 0.07053989869279739,
+      "grouped_ms": 0.05047199969398387,
+      "speedup": 1.3976045950326308,
+      "max_absolute_error": 0.001953125
+    },
+    {
+      "batch": 48,
+      "queries": 4,
+      "extent": 1024,
+      "old_ms": 0.1607762165224872,
+      "grouped_ms": 0.0892434727513429,
+      "speedup": 1.8015459457797478,
+      "max_absolute_error": 0.0009765625
+    },
+    {
+      "batch": 48,
+      "queries": 8,
+      "extent": 64,
+      "old_ms": 0.013852693765970614,
+      "grouped_ms": 0.014875636314338242,
+      "speedup": 0.9312336946970369,
+      "max_absolute_error": 0.00390625
+    },
+    {
+      "batch": 48,
+      "queries": 8,
+      "extent": 512,
+      "old_ms": 0.09069649510342499,
+      "grouped_ms": 0.050611357745013116,
+      "speedup": 1.792018612904365,
+      "max_absolute_error": 0.00390625
+    },
+    {
+      "batch": 48,
+      "queries": 8,
+      "extent": 1024,
+      "old_ms": 0.22420834948402305,
+      "grouped_ms": 0.0848391349259898,
+      "speedup": 2.64274676633152,
+      "max_absolute_error": 0.0009765625
+    }
+  ]
+}

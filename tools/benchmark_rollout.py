@@ -26,6 +26,7 @@ from junqi.training.accelerator import (
     synchronize,
 )
 from junqi.training.encoding import GameHistory
+from junqi.training.checkpoint import require_current_checkpoint
 from junqi.training.models import (
     GamePolicyTransformer,
     ModelConfig,
@@ -111,6 +112,7 @@ def main() -> None:
             weights_only=False,
             mmap=True,
         )
+        require_current_checkpoint(checkpoint_payload)
         if checkpoint_payload["mode"] != mode.value:
             raise ValueError("checkpoint mode does not match --mode")
         if checkpoint_payload.get("dead_rules_enabled") is not args.dead_rules:

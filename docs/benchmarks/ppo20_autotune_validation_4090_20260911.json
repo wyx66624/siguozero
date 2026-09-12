@@ -1,0 +1,45 @@
+{
+  "device": "NVIDIA GeForce RTX 4090",
+  "torch": "2.11.0+cu130",
+  "cases": [
+    {
+      "name": "reference",
+      "first_call_seconds": 0.580915828000002,
+      "seconds": [
+        0.04352292700002636,
+        0.03972905500000934,
+        0.040559346999998525
+      ],
+      "gradient_relative_l2_error": 0.0,
+      "gradient_max_absolute_error": 0.0,
+      "forward_max_absolute_error": 0.0
+    },
+    {
+      "name": "packed",
+      "first_call_seconds": 0.03575919799999383,
+      "seconds": [
+        0.02964612600004557,
+        0.04893235699995557,
+        0.03548544200003789
+      ],
+      "gradient_relative_l2_error": 0.005526401366287989,
+      "gradient_max_absolute_error": 0.03125,
+      "forward_max_absolute_error": 0.025390625
+    },
+    {
+      "name": "compiled",
+      "first_call_seconds": 164.39584999600004,
+      "seconds": [
+        0.032406805000050554,
+        0.02641596799992385,
+        0.030410858999971424
+      ],
+      "gradient_relative_l2_error": 0.005442496440563777,
+      "gradient_max_absolute_error": 0.03125,
+      "forward_max_absolute_error": 0.021484375
+    }
+  ],
+  "complete": true,
+  "max_history": 1001,
+  "independent_windows": 6
+}

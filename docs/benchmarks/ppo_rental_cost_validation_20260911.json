@@ -1,0 +1,9 @@
+{
+  "status": "passed",
+  "cost_endpoints_independently_checked": 48,
+  "artifact_links_checked": 11,
+  "benchmark_rows": 17,
+  "completed_incremental_batch_cases": 3,
+  "runtime_and_benchmark_source_hashes_match": true,
+  "formal_training_or_rental_started": false
+}

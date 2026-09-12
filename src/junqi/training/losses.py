@@ -15,7 +15,7 @@ from .rollout import LayoutOutcome, PolicyGroup
 @dataclass(slots=True)
 class LossOutput:
     loss: Tensor
-    metrics: dict[str, float]
+    metrics: dict[str, float | Tensor]
 
 
 def policy_grpo_loss(

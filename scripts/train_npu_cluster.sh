@@ -66,7 +66,8 @@ else
   default_pool=$((world_size * 8))
   default_actor=8
   default_cache=96
-  default_run_dir=runs_npu_910b_ppo_3b
+  # Width-256 temporal models cannot resume the old width-512 run.
+  default_run_dir=runs_npu_910b_ppo_128_3b
 fi
 anchor_batch="${ANCHOR_BATCH:-$default_batch}"
 base_game_pool="${BASE_GAME_POOL:-$default_pool}"

@@ -29,7 +29,6 @@ from junqi.training.accelerator import (
     synchronize,
 )
 from junqi.training.encoding import (
-    ACTION_PLAYER_PAD,
     ActionFeatures,
     GameHistory,
     PolicyState,
@@ -116,11 +115,6 @@ def synthetic_state(
             source=source,
             destination=destination,
             actor=0,
-            combat=0,
-            was_attack=0,
-            flag_captured_owner=ACTION_PLAYER_PAD,
-            newly_revealed_count=0,
-            eliminated_count=0,
         ),
         no_interaction_plies=0,
         active_mask=initial.active_mask,

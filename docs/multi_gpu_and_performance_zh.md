@@ -1,5 +1,7 @@
 # 多 GPU/NPU 训练与历史编码加速设计
 
+> revision 20 已改为[整盘向量单层投影](whole_board_linear_zh.md)。本文的逐点图编码器、旧参数量和已有性能数字属于修改前版本，不能作为新架构的计时或显存结论。
+
 四国 revision 18 的 PPO 为 Policy/Critic 分别创建 DDP 包装和优化器；全局 batch
 按真实动作数计，反传时顺序更新两个网络，采样时共享全座位的 Policy 和 Critic。
 采样批与优化器小批分开：每 rank 每 512 个决策执行一次 optimizer step，

@@ -1,8 +1,8 @@
 # 共享训练配置：同时定义 bootstrap/main/extended 三档；实际档位必须由
 # --model-scale 明确选择。正式启动脚本选 main，直接使用 Python CLI 默认 bootstrap。
 schema_version: 1
-config_revision: 19
-experiment_name: siguozero_v19_four_player_ppo_environment_budget_3b
+config_revision: 22
+experiment_name: siguozero_v22_four_player_128_ppo_environment_budget_3b
 
 rules:
   game_modes:
@@ -24,7 +24,7 @@ rules:
   no_interaction_draw_plies: 60
 
 board_piece_codes:
-  # 下列数值都是类别 ID，必须先查 embedding，不能当作连续军阶标量。
+  # 类别 ID 按点位顺序展开为整盘 one-hot 向量，不解释为连续军阶标量。
   empty: 0
   unknown_previous_player: 1
   unknown_opposite_player: 2
@@ -103,7 +103,7 @@ board_piece_codes:
     use_referee_hidden_identity_to_infer: false
   exact_casualty_prior:
     # 仅在 runtime.dead_rules_enabled=true 时存在；关闭后模型结构中也没有
-    # 75->256 投影和融合层，而不是简单地输入全零向量。
+    # 整盘投影中的 75 个输入列，而不是简单地输入全零向量。
     slots_per_player: 25
     slot_order: same_as_models.layout.piece_sequence
     values: binary_exactly_known_dead
@@ -122,6 +122,15 @@ models:
     board_embedding_dim: 256
     transition_token_dim: 512
     dropout: 0.0
+
+  # Applied to four_dark/double_open after selecting bootstrap/main/extended.
+  # Layer counts, layout capacity and history length retain the selected scale.
+  # The base profile below remains available for existing two-player models.
+  four_player:
+    action_embedding_dim: 128
+    board_embedding_dim: 128
+    transition_token_dim: 256
+    temporal_ffn_dim: 1024
 
   layout:
     architecture: piece_conditioned_autoregressive_pointer_decoder
@@ -181,28 +190,34 @@ models:
   policy:
     architecture: board_encoder_plus_causal_transition_transformer
     action_encoder:
+      architecture: coordinates_player_linear
+      input_dim: 5
       output_dim: 256
+      coordinate_system: viewer_relative_board_wide_cartesian
+      normalization: none
+      linear_layers: 1
+      learned_field_embeddings: false
+      layer_norm: false
       fields:
-        - source
-        - destination
+        - source_x
+        - source_y
+        - destination_x
+        - destination_y
         - actor
-        - move_or_attack
-        - public_result
-        - public_reveal
     board_encoder:
+      architecture: whole_board_one_hot_linear
       input: player_visible_integer_chain_plus_optional_exact_casualty_prior
-      code_embedding_is_categorical: true
+      vector_encoding: position_major_categorical_one_hot_then_mode_and_optional_casualties
+      board_point_capacity: 129
+      board_code_categories: 139
+      mode_categories: 3
       canonical_casualty_input_dim_when_dead_rules_enabled: 75
-      casualty_projection_dim_when_dead_rules_enabled: 256
-      disabled_behavior: no_casualty_tensor_projection_or_fusion_parameters
-      fusion_when_enabled: linear_silu_layernorm_of_concat_board_pool_and_casualty_embedding
-      point_d_model: 256
+      disabled_behavior: omit_casualty_tensor_and_projection_input_columns
+      input_dim_with_dead_rules: 18009
+      input_dim_without_dead_rules: 17934
       output_dim: 256
-      transformer_layers: 4
-      attention_heads: 8
-      ffn_dim: 1024
-      pooling: board_token
-      preserve_point_representations_for_action_heads: true
+      linear_layers: 1
+      preserve_point_representations_for_action_heads: false
     temporal_transformer:
       token_construction: concat_action_then_post_action_board
       initial_action_padding: zeros_256
@@ -214,6 +229,7 @@ models:
     action_factorization:
       - source
       - destination_given_source
+    action_head: context_to_position_logits_with_one_hot_source_conditioning
     value_head: false
     belief_head: false
     sample_from_distribution: true
@@ -269,18 +285,41 @@ ppo:
   max_samples_per_sequence: 64
   # Samples per optimizer step per rank; distinct from the rollout buffer.
   optimizer_minibatch_samples: 512
-  transition_batch: 5120
+  # Independent game groups overlap CPU rules with the next group's Policy.
+  environment_workers: 4
+  pipeline_groups: 2
+  deferred_values: true
+  tensor_learner: true
+  varlen_attention: true
+  low_precision_residual: true
+  fused_optimizer: true
+  sampling_graphs: true
+  # Dynamic training CUDA Graph capture was slower / exceeded safe VRAM.
+  compile_mode: default
+  # Same 512 supervised decisions / Adam step; only sequence microbatch changes.
+  learner_microbatch_by_model_scale:
+    main: 32
+  causal_sdpa: true
+  board_chunk_size: 2048
+  layout_prefetch_games: 16
+  activation_checkpointing: false
+  transition_batch: 12288
   # Total TRAINING environment transitions across games, seats and ranks:
   # base-game actions + every actually executed simulated-branch action.
   # E.g. 8 branches x 32 actions = 256 steps; a separate base action adds 1.
   # Network forward/backward, value bootstrap and repeated epochs add 0 steps.
   # total_updates is derived from this target unless --updates is explicit.
   target_environment_plies: 3000000000
-  # 4090: learner microbatch=8 sequences, actor=20 independent games.
-  base_game_pool_size: 20
-  actor_inference_batch: 20
-  # 3 prefixes x 4 seats x 20 games per model; full-window probe: 19.02 GiB.
-  inference_temporal_cache_entries: 240
+  # 4090 compact four-player model: 256 actions/game/update, 32 learner sequences.
+  # The launch script multiplies global games/transitions by NUM_GPUS.
+  base_game_pool_size: 48
+  actor_inference_batch: 48
+  # PPO 观察按数值块存储；固定游戏/席位 KV，一次补齐已发生的多个 token。
+  array_history: true
+  fixed_kv: true
+  cuda_graphs: true
+  # 兼容旧分支缓存的后备容量；fixed_kv 使用 4 seats x live games 个槽。
+  inference_temporal_cache_entries: 576
   # Historical four-player estimate, used only by --grpo-equivalent-plies.
   grpo_mean_remaining_plies: 334.5
 
@@ -351,12 +390,18 @@ learner:
     loss_and_reductions: float32
 
 model_selection:
-  # 训练进度达到 30%、35%、...、100% 时，当前模型对阵此前 best。
+  # 二人保留百分比日程；四暗、双明从初始基准起每 5000 万训练环境交互选拔。
   # games 是全体 rank 合计局数；二人按 2 局换边、四国按 4 局整队轮转分组。
   enabled: true
+  checkpoint_policy: periodic
   start_percent: 30
   interval_percent: 5
   games: 1000
+  four_player:
+    interval_environment_plies: 50000000
+    games: 100
+    # 只在评测时保存；首次比较的初始参数先保留在 CPU 内存。
+    checkpoint_policy: evaluation
   max_plies: 2000
   seed: 20260910
   temporal_cache_entries: 8

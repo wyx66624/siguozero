@@ -1,0 +1,24 @@
+{
+  "parameter_counts": {
+    "bootstrap": {
+      "policy": 11109250,
+      "critic": 10993921,
+      "layout": 8887296
+    },
+    "main": {
+      "policy": 36324226,
+      "critic": 36208897,
+      "layout": 17292288
+    },
+    "extended": {
+      "policy": 53134210,
+      "critic": 53018881,
+      "layout": 25697280
+    }
+  },
+  "strict_checkpoint_load": "policy, critic and layout passed",
+  "checkpoint": "runs/benchmarks/compact128_g40_exclusive_four_dark_20260911/four_dark/with_dead_rules/checkpoints/latest.pt",
+  "checkpoint_update": 4,
+  "format_version": 6,
+  "critic_head_nonzero_and_finite": true
+}

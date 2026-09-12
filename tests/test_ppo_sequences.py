@@ -190,9 +190,9 @@ class SequencePPOTests(unittest.TestCase):
                 settings = TrainingSettings.from_yaml(CONFIG, mode, model_scale="main")
                 self.assertEqual(settings.target_environment_plies, 3_000_000_000)
                 self.assertIsNone(settings.grpo_equivalent_plies)
-                self.assertEqual(settings.total_updates, 585_938)
+                self.assertEqual(settings.total_updates, 244_141)
                 self.assertEqual(settings.warmup_updates, 2000)
-                self.assertEqual(3_000_000_000 - 585_937 * settings.anchor_batch, 2560)
+                self.assertEqual(3_000_000_000 - 244_140 * settings.anchor_batch, 7680)
                 schedule = SimpleNamespace(settings=settings, policy_lr_scale=1.0)
                 # The former 200K limit must neither stop training nor exhaust LR.
                 self.assertGreater(SelfPlayTrainer._learning_rate(schedule, 200_000),

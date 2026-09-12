@@ -1,0 +1,598 @@
+{
+  "status": "rough_scenarios_not_target_gpu_measurements_or_confidence_intervals",
+  "date": "2026-09-11",
+  "target_environment_steps_per_mode": 3000000000,
+  "architecture_scope": {
+    "config_revision": 21,
+    "board_dim": 256,
+    "temporal_dim": 512,
+    "temporal_layers": 32,
+    "does_not_apply_to_revision_22_128_plus_128_four_player_models": true
+  },
+  "availability": 0.8,
+  "baselines_20_games_later_two_updates": {
+    "four_dark": {
+      "updates": [
+        3,
+        4
+      ],
+      "environment_steps": 10240,
+      "non_save_seconds": 241.42264380499998,
+      "actor_plus_critic_inference_seconds": 151.0699112439993,
+      "other_non_save_seconds": 90.35273256100069,
+      "checkpoint_seconds_each": 11.59752615900004,
+      "inference_share_with_save": 0.5708987473527798,
+      "env_steps_per_second_including_amortized_save": 38.6973363838835,
+      "calendar_days_at_80_percent": 1121.5960020404395,
+      "history_batches": [
+        {
+          "update": 3,
+          "mean_tokens": 479.556640625,
+          "min_tokens": 1,
+          "max_tokens": 768
+        },
+        {
+          "update": 4,
+          "mean_tokens": 310.456640625,
+          "min_tokens": 1,
+          "max_tokens": 948
+        }
+      ]
+    },
+    "double_open": {
+      "updates": [
+        3,
+        4
+      ],
+      "environment_steps": 10240,
+      "non_save_seconds": 263.52628393099997,
+      "actor_plus_critic_inference_seconds": 155.04633788600012,
+      "other_non_save_seconds": 108.47994604499985,
+      "checkpoint_seconds_each": 10.93568921100001,
+      "inference_share_with_save": 0.543264218100805,
+      "env_steps_per_second_including_amortized_save": 35.87976129718415,
+      "calendar_days_at_80_percent": 1209.6729802152845,
+      "history_batches": [
+        {
+          "update": 3,
+          "mean_tokens": 482.1373046875,
+          "min_tokens": 1,
+          "max_tokens": 768
+        },
+        {
+          "update": 4,
+          "mean_tokens": 388.4234375,
+          "min_tokens": 1,
+          "max_tokens": 1001
+        }
+      ]
+    }
+  },
+  "new_24_game_probe": {
+    "source": "docs/benchmarks/parallel_games_24_four_dark_4090_20260911.json",
+    "games": 24,
+    "transitions_per_update": 6144,
+    "requested_updates": 4,
+    "completed_updates": 3,
+    "interruption": "SIGTERM was logged during update 3; sender not determined; update 3 and result export completed",
+    "all_completed_updates": {
+      "updates": [
+        1,
+        2,
+        3
+      ],
+      "environment_steps": 18432,
+      "non_save_seconds": 312.777438958,
+      "actor_plus_critic_inference_seconds": 182.31277050399973,
+      "other_non_save_seconds": 130.46466845400028,
+      "checkpoint_seconds_each": 12.382226446999994,
+      "inference_share_with_save": 0.5210065867715319,
+      "env_steps_per_second_including_amortized_save": 52.67427718214722,
+      "calendar_days_at_80_percent": 823.9843069453298,
+      "history_batches": [
+        {
+          "update": 1,
+          "mean_tokens": 118.02913411458333,
+          "min_tokens": 1,
+          "max_tokens": 256
+        },
+        {
+          "update": 2,
+          "mean_tokens": 312.3619791666667,
+          "min_tokens": 1,
+          "max_tokens": 512
+        },
+        {
+          "update": 3,
+          "mean_tokens": 440.8997395833333,
+          "min_tokens": 1,
+          "max_tokens": 768
+        }
+      ]
+    },
+    "later_updates_after_first_two": {
+      "updates": [
+        3
+      ],
+      "environment_steps": 6144,
+      "non_save_seconds": 143.760141562,
+      "actor_plus_critic_inference_seconds": 89.17244706699964,
+      "other_non_save_seconds": 54.58769449500036,
+      "checkpoint_seconds_each": 12.382226446999994,
+      "inference_share_with_save": 0.5710970584349007,
+      "env_steps_per_second_including_amortized_save": 39.34870514866191,
+      "calendar_days_at_80_percent": 1103.0293783187865,
+      "history_batches": [
+        {
+          "update": 3,
+          "mean_tokens": 440.8997395833333,
+          "min_tokens": 1,
+          "max_tokens": 768
+        }
+      ]
+    },
+    "phases": [
+      {
+        "phase": "real_training_loop_without_checkpoint",
+        "seconds": 313.884391117,
+        "peak_allocated_gib": 19.20318603515625,
+        "peak_reserved_gib": 19.984375
+      },
+      {
+        "phase": "checkpoint_to_workspace_drive",
+        "seconds": 12.382226446999994,
+        "peak_allocated_gib": 3.4612855911254883,
+        "peak_reserved_gib": 3.58984375,
+        "bytes": 3650747997,
+        "gib": 3.4000240238383412,
+        "removed_disposable_checkpoint": true
+      }
+    ],
+    "effective_microbatch": 8,
+    "effective_actor_batches": [
+      24,
+      24,
+      24
+    ],
+    "process_cuda_allocator_limit_fraction": 0.9,
+    "same_trajectories_as_baseline": false
+  },
+  "fixed_80_stream_inference_probe": {
+    "actual_environment_steps": 0,
+    "rows": [
+      {
+        "inference_batch": 20,
+        "model_decisions_per_second": 129.27133541733127
+      },
+      {
+        "inference_batch": 40,
+        "model_decisions_per_second": 145.02155781938978
+      },
+      {
+        "inference_batch": 80,
+        "model_decisions_per_second": 153.35996350023308
+      }
+    ],
+    "gain_20_to_80": 1.1863416046963207,
+    "not_80_parallel_four_player_games": true
+  },
+  "memory_arena_calculation": [
+    {
+      "games": 20,
+      "player_view_histories": 80,
+      "cache_entries_per_model": 240,
+      "dual_model_kv_arena_gib": 11.71875,
+      "transitions_per_rank_update": 5120,
+      "excludes_weights_optimizers_board_cache_and_temporary_tensors": true
+    },
+    {
+      "games": 24,
+      "player_view_histories": 96,
+      "cache_entries_per_model": 288,
+      "dual_model_kv_arena_gib": 14.0625,
+      "transitions_per_rank_update": 6144,
+      "excludes_weights_optimizers_board_cache_and_temporary_tensors": true
+    },
+    {
+      "games": 28,
+      "player_view_histories": 112,
+      "cache_entries_per_model": 336,
+      "dual_model_kv_arena_gib": 16.40625,
+      "transitions_per_rank_update": 7168,
+      "excludes_weights_optimizers_board_cache_and_temporary_tensors": true
+    },
+    {
+      "games": 32,
+      "player_view_histories": 128,
+      "cache_entries_per_model": 384,
+      "dual_model_kv_arena_gib": 18.75,
+      "transitions_per_rank_update": 8192,
+      "excludes_weights_optimizers_board_cache_and_temporary_tensors": true
+    },
+    {
+      "games": 40,
+      "player_view_histories": 160,
+      "cache_entries_per_model": 480,
+      "dual_model_kv_arena_gib": 23.4375,
+      "transitions_per_rank_update": 10240,
+      "excludes_weights_optimizers_board_cache_and_temporary_tensors": true
+    },
+    {
+      "games": 64,
+      "player_view_histories": 256,
+      "cache_entries_per_model": 768,
+      "dual_model_kv_arena_gib": 37.5,
+      "transitions_per_rank_update": 16384,
+      "excludes_weights_optimizers_board_cache_and_temporary_tensors": true
+    },
+    {
+      "games": 80,
+      "player_view_histories": 320,
+      "cache_entries_per_model": 960,
+      "dual_model_kv_arena_gib": 46.875,
+      "transitions_per_rank_update": 20480,
+      "excludes_weights_optimizers_board_cache_and_temporary_tensors": true
+    },
+    {
+      "games": 96,
+      "player_view_histories": 384,
+      "cache_entries_per_model": 1152,
+      "dual_model_kv_arena_gib": 56.25,
+      "transitions_per_rank_update": 24576,
+      "excludes_weights_optimizers_board_cache_and_temporary_tensors": true
+    },
+    {
+      "games": 128,
+      "player_view_histories": 512,
+      "cache_entries_per_model": 1536,
+      "dual_model_kv_arena_gib": 75.0,
+      "transitions_per_rank_update": 32768,
+      "excludes_weights_optimizers_board_cache_and_temporary_tensors": true
+    }
+  ],
+  "scenarios": [
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 1,
+      "games_per_card_candidates": [
+        24,
+        28
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.08
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          1046.075704748323,
+          1105.210721104472
+        ],
+        "double_open": [
+          1134.5071940863627,
+          1194.2227594100818
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        1046.075704748323,
+        1194.2227594100818
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 2,
+      "games_per_card_candidates": [
+        24,
+        28
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.08
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          577.2519984963653,
+          771.8802775851615
+        ],
+        "double_open": [
+          626.6032321090521,
+          836.4621718429945
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        577.2519984963653,
+        836.4621718429945
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 4,
+      "games_per_card_candidates": [
+        24,
+        28
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.08
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          288.6260831423245,
+          385.9403065808643
+        ],
+        "double_open": [
+          313.3016951610742,
+          418.23124413459345
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        288.6260831423245,
+        418.23124413459345
+      ]
+    },
+    {
+      "hardware": "RTX 4090 24GB",
+      "cards": 8,
+      "games_per_card_candidates": [
+        24,
+        28
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.08
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          144.31312546530398,
+          192.97032107871573
+        ],
+        "double_open": [
+          156.6509266870852,
+          209.11578028039295
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        144.31312546530398,
+        209.11578028039295
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 1,
+      "games_per_card_candidates": [
+        64,
+        80,
+        96
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.2
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          413.43268223676336,
+          785.394093288701
+        ],
+        "double_open": [
+          451.22535945800007,
+          852.7352960933674
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        413.43268223676336,
+        852.7352960933674
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 2,
+      "games_per_card_candidates": [
+        64,
+        80,
+        96
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.2
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          228.54708840039885,
+          554.4123199783453
+        ],
+        "double_open": [
+          249.60794740741565,
+          602.8888780138934
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        228.54708840039885,
+        602.8888780138934
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 4,
+      "games_per_card_candidates": [
+        64,
+        80,
+        96
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.2
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          114.27362809434122,
+          277.2063277774562
+        ],
+        "double_open": [
+          124.80405281025593,
+          301.44459722004297
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        114.27362809434122,
+        301.44459722004297
+      ]
+    },
+    {
+      "hardware": "RTX PRO 6000 Blackwell Workstation 96GB",
+      "cards": 8,
+      "games_per_card_candidates": [
+        64,
+        80,
+        96
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.2
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          57.136897941312384,
+          138.60333167701165
+        ],
+        "double_open": [
+          62.402105511676076,
+          150.72245682311768
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        57.136897941312384,
+        150.72245682311768
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 1,
+      "games_per_card_candidates": [
+        64,
+        80
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.2
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          292.132570116965,
+          624.7769143938937
+        ],
+        "double_open": [
+          317.25825528933746,
+          677.4126849972138
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        292.132570116965,
+        677.4126849972138
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 2,
+      "games_per_card_candidates": [
+        64,
+        80
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.2
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          160.93056038081096,
+          439.6857636249115
+        ],
+        "double_open": [
+          174.96718872864685,
+          477.65844151664083
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        160.93056038081096,
+        477.65844151664083
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 4,
+      "games_per_card_candidates": [
+        64,
+        80
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.2
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          80.46544797868904,
+          219.8430496007393
+        ],
+        "double_open": [
+          87.48375257741965,
+          238.82937897141662
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        80.46544797868904,
+        238.82937897141662
+      ]
+    },
+    {
+      "hardware": "H100 SXM 80GB",
+      "cards": 8,
+      "games_per_card_candidates": [
+        64,
+        80
+      ],
+      "inference_speedup_assumption_unmeasured": [
+        1.0,
+        1.2
+      ],
+      "calendar_days_by_mode": {
+        "four_dark": [
+          40.232807883486295,
+          109.9216925886532
+        ],
+        "double_open": [
+          43.74195539525794,
+          119.41484769880454
+        ]
+      },
+      "one_mode_calendar_days_envelope": [
+        40.232807883486295,
+        119.41484769880454
+      ]
+    }
+  ],
+  "assumptions": {
+    "inference_gains_are_sensitivity_parameters_not_fits_or_predictions": true,
+    "old_hardware_speedups_and_70_to_90_percent_multigpu_efficiency_remain_unmeasured": true,
+    "maintained_samples_per_game_per_outer_update": 256,
+    "optimizer_minibatch": 512,
+    "policy_epochs": 3,
+    "critic_epochs": 3,
+    "one_checkpoint_per_outer_update_with_baseline_single_card_latency": true,
+    "one_mode_budget_not_both_modes_combined": true,
+    "formula": "days=[T/S*(other+inference/gain)/(cards*hardware_speedup*efficiency)+(ceil(T/(256*games*cards))+1)*save]/86400/0.8",
+    "limitations": [
+      "short random-weight probes, no convergence claim",
+      "larger-game cold prefill capacity unmeasured except the 24-game probe",
+      "same relative hardware utilization assumed",
+      "larger pools/checkpoints and distributed gathers may take longer to save",
+      "selection matches and periodic layout training excluded",
+      "same data reuse does not prove same learning dynamics"
+    ]
+  },
+  "input_sha256": {
+    "docs/benchmarks/action_linear_hardware_eta_20260910.json": "c28af9a38272ae5f0d05793d51c37b2805a9526b90916138cd05b0a9ca44b4ee",
+    "docs/benchmarks/actor_batch_4090_20260911.json": "a4df144e7b2209c5f654c658162b7ccfc7a2ed4a29214ff3f3a2bb74d3e54660",
+    "tools/estimate_parallel_games_eta.py": "035c7308b3b678501c2c1d0f3cece9fd0964aeaa55dff4d23b7432b31523516c",
+    "docs/benchmarks/action_linear_real_four_dark_4090_20260910.json": "266dc617ffdd5809c8be6c2dd9caf89c7b882f5a5922dfedcdee6e8f7c32f876",
+    "docs/benchmarks/action_linear_real_double_open_4090_20260910.json": "d2f707bfe6581be87e1daf55ef766f729dec10976a60d7b474aa69a74adc3a0e",
+    "docs/benchmarks/parallel_games_24_four_dark_4090_20260911.json": "444b31a48ffedd0863fc3dcf9d1bea0597aed731f2cb5262b1f69872df7b9b65"
+  }
+}

@@ -1,0 +1,100 @@
+{
+  "device": "NVIDIA GeForce RTX 4090",
+  "config_revision": 21,
+  "cached_streams": 80,
+  "prefill_batch": 20,
+  "measured_context_range": [
+    985,
+    1000
+  ],
+  "actual_environment_steps": 0,
+  "all_training_models_and_adam_states_resident": true,
+  "post_prefill_cleanup": "release unused allocator blocks, run four warm incremental waves, release unused blocks again",
+  "source_sha256": {
+    "/mnt/e/agent/siguozero/tools/benchmark_actor_batch.py": "2bcd391867e7c158e69ef8802428b13294831e4cc730e2a4a47a5a06ceb934ee",
+    "src/junqi/training/models.py": "de75fe9eef124d002296305870318daee5b813bd1ff8fbc3a2b99c7eecf5c2d6"
+  },
+  "rows": [
+    {
+      "inference_batch": 20,
+      "model_decisions": 1280,
+      "seconds": 9.901653725999893,
+      "median_80_stream_wave_seconds": 0.61856882699999,
+      "model_decisions_per_second": 129.27133541733127,
+      "peak_allocated_gib": 15.312358856201172,
+      "peak_reserved_gib": 15.46875,
+      "individual_wave_seconds": [
+        0.619271910000009,
+        0.6131225959999824,
+        0.5999784799999475,
+        0.6247134730000425,
+        0.6232337349999852,
+        0.6253075440000089,
+        0.6178657439999711,
+        0.6358461479999846,
+        0.6092292369999655,
+        0.6109318709999911,
+        0.6161533500000473,
+        0.632998133000001,
+        0.6235904929999947,
+        0.6382852059999777,
+        0.6128304339999886,
+        0.5982953719999955
+      ]
+    },
+    {
+      "inference_batch": 40,
+      "model_decisions": 1280,
+      "seconds": 8.826273963999995,
+      "median_80_stream_wave_seconds": 0.5547836354999731,
+      "model_decisions_per_second": 145.02155781938978,
+      "peak_allocated_gib": 15.389297008514404,
+      "peak_reserved_gib": 15.623046875,
+      "individual_wave_seconds": [
+        0.5428736129999834,
+        0.5369850939999878,
+        0.5401522220000174,
+        0.545260920999965,
+        0.5406713099999934,
+        0.5675131180000221,
+        0.5611184059999914,
+        0.5524900350000053,
+        0.5361339890000067,
+        0.5592654990000483,
+        0.556219265999971,
+        0.5587627450000241,
+        0.5564499160000196,
+        0.5603001439999957,
+        0.5533480049999753,
+        0.5587296809999884
+      ]
+    },
+    {
+      "inference_batch": 80,
+      "model_decisions": 1280,
+      "seconds": 8.346376529999986,
+      "median_80_stream_wave_seconds": 0.5205110680000189,
+      "model_decisions_per_second": 153.35996350023308,
+      "peak_allocated_gib": 15.542751789093018,
+      "peak_reserved_gib": 15.853515625,
+      "individual_wave_seconds": [
+        0.5192617659999996,
+        0.51860016400002,
+        0.5185900860000174,
+        0.523034736999989,
+        0.5177272479999715,
+        0.5312956900000358,
+        0.532093107000037,
+        0.5243744889999675,
+        0.5237176919999911,
+        0.5266728209999769,
+        0.5192629969999984,
+        0.511940195999955,
+        0.5217591390000393,
+        0.5236893350000287,
+        0.5152377889999684,
+        0.5191192739999906
+      ]
+    }
+  ]
+}

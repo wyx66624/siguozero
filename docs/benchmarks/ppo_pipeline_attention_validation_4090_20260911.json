@@ -1,0 +1,44 @@
+{
+  "checkpoint": "runs/benchmarks/compact128_g40_exclusive_four_dark_20260911/four_dark/with_dead_rules/checkpoints/latest.pt",
+  "device": "NVIDIA GeForce RTX 4090",
+  "checks": [
+    {
+      "model": "policy",
+      "dtype": "torch.float32",
+      "queries": 96,
+      "max_context_absolute_error": 2.2649765014648438e-06,
+      "max_output_absolute_error": 9.5367431640625e-07,
+      "decode_tokens": 256,
+      "graph_replays": 8
+    },
+    {
+      "model": "critic",
+      "dtype": "torch.float32",
+      "queries": 96,
+      "max_context_absolute_error": 2.2649765014648438e-06,
+      "max_output_absolute_error": 5.238689482212067e-10,
+      "decode_tokens": 256,
+      "graph_replays": 8
+    },
+    {
+      "model": "policy",
+      "dtype": "torch.bfloat16",
+      "queries": 96,
+      "max_context_absolute_error": 0.022823482751846313,
+      "max_output_absolute_error": 0.005124807357788086,
+      "decode_tokens": 256,
+      "graph_replays": 8
+    },
+    {
+      "model": "critic",
+      "dtype": "torch.bfloat16",
+      "queries": 96,
+      "max_context_absolute_error": 0.018775343894958496,
+      "max_output_absolute_error": 7.62939453125e-06,
+      "decode_tokens": 256,
+      "graph_replays": 8
+    }
+  ],
+  "checkpoint_stat_unchanged": true,
+  "complete": true
+}

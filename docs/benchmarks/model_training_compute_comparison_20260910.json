@@ -1,0 +1,50 @@
+{
+  "kind": "arithmetic_from_existing_profile_and_primary_architectures_not_new_training",
+  "multiply_add_flops": 2,
+  "current_parameters": {
+    "policy": 144157704,
+    "critic": 143698441,
+    "layout": 17292288,
+    "trainable_total": 305148433
+  },
+  "douzero_public_architecture": {
+    "landlord": 1457665,
+    "farmer_each": 1514497,
+    "three_roles_total": 4486659,
+    "source": "https://raw.githubusercontent.com/kwai/DouZero/main/douzero/dmc/models.py"
+  },
+  "go_parameters_from_paper_architecture": {
+    "twenty_block": 22827877,
+    "forty_block": 46441317,
+    "assumptions": "one stem convolution then 19 or 39 residual blocks; no conv bias with BN; affine BN; biased dense heads; weights, not BN running buffers",
+    "source": "https://dsbrown1331.github.io/advanced-ai/readings/alphaGoZero.pdf"
+  },
+  "current_board_forward_flops": 2319482880,
+  "profiled_512_sample_epoch": {
+    "board_encodings": 5330,
+    "board_point_tokens": 692900,
+    "board_forward_flops": 12362843750400,
+    "board_fraction_of_block_forward_including_replays": 0.8792943423553943,
+    "block_forward_plus_backward_estimate": 56239842131968,
+    "assumption": "hooks count forward plus checkpoint replay; approximately 2x that sum includes backward (about 4x unreplayed forward)"
+  },
+  "profiled_128_sample_epoch": {
+    "recognized_flops": 12757939724350,
+    "recognized_flops_per_sample": 99671404096.48438,
+    "learning_flops_per_environment_action_two_models_three_epochs": 598028424578.9062,
+    "example_3b_learning_flops": 1.7940852737367188e+21,
+    "limitation": "one short-history subset; profiler omits fused attention and other operators; extrapolation is not a full-run lower bound"
+  },
+  "alphazero_2018": {
+    "optimizer_updates": 700000,
+    "batch_positions": 4096,
+    "training_position_presentations": 2867200000,
+    "go_days": 13,
+    "self_play_tpus_v1": 5000,
+    "training_tpus_v2": 16,
+    "self_play_go_games": 140000000,
+    "simulations_per_search": 800,
+    "source": "https://storage.googleapis.com/deepmind-media/DeepMind.com/Blog/alphazero-shedding-new-light-on-chess-shogi-and-go/alphazero_preprint.pdf"
+  },
+  "source_profile": "docs/benchmarks/2026-09-10_ppo_compute_profile_4090.json"
+}

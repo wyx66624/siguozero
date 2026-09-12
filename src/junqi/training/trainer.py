@@ -31,13 +31,16 @@ from .accelerator import (
 from .checkpoint import (
     CheckpointManager,
     capture_rng_state,
+    require_current_checkpoint,
     restore_rng_state,
     restore_training_state,
 )
 from .distributed import DistributedContext
 from .losses import layout_grpo_loss, policy_grpo_loss
+from .learning_metrics import ppo_signal_metrics, ppo_signal_sums
 from .metrics import MetricLogger
 from .model_selection import ModelSelection
+from .inference_snapshot import export_inference_snapshot
 from .models import (
     GamePolicyTransformer,
     GameValueTransformer,
@@ -150,6 +153,8 @@ class SelfPlayTrainer:
         )
         self.stop_requested = False
         self.update = 0
+        self.ppo_rollout_metrics: dict[str, float] = {}
+        self._ppo_environment = None
         self.phase = "initializing"
         self.effective_policy_microbatch = min(
             settings.policy_microbatch, self.local_anchor_batch
@@ -230,6 +235,7 @@ class SelfPlayTrainer:
             betas=(0.9, 0.95),
             eps=1e-8,
             weight_decay=0.05,
+            fused=True if settings.algorithm == 'ppo' and settings.ppo_fused_optimizer and self.device.type == 'cuda' else None,
         )
         self.layout_optimizer = torch.optim.AdamW(
             self.layout.parameters(),
@@ -237,11 +243,13 @@ class SelfPlayTrainer:
             betas=(0.9, 0.95),
             eps=1e-8,
             weight_decay=0.05,
+            fused=True if settings.algorithm == 'ppo' and settings.ppo_fused_optimizer and self.device.type == 'cuda' else None,
         )
         self.critic_optimizer = (
             torch.optim.AdamW(
                 self.critic.parameters(), lr=settings.critic_learning_rate,
                 betas=(0.9, 0.95), eps=1e-8, weight_decay=0.05,
+                fused=True if settings.ppo_fused_optimizer and self.device.type == 'cuda' else None,
             ) if self.critic is not None else None
         )
         self.amp_dtype = self._amp_dtype()
@@ -262,6 +270,7 @@ class SelfPlayTrainer:
             max_game_plies=settings.max_game_plies,
             dead_rules_enabled=settings.dead_rules_enabled,
             seed=settings.seed + 17 + 1_000_003 * self.distributed.rank,
+            layout_prefetch_games=settings.layout_prefetch_games,
         )
         try:
             if self.initialize_from is not None:
@@ -276,10 +285,19 @@ class SelfPlayTrainer:
         except BaseException:
             self.logger.close()
             raise
+        self._configure_optimizer_backend()
         self._write_run_config()
+        self._export_live_inference()
         self._install_signal_handlers()
-        if not resumed:
+        if not resumed and settings.checkpoint_policy == "periodic":
             self.save_checkpoint(reason="initialized", archive=False)
+        if settings.checkpoint_policy == "evaluation":
+            self.logger.event(
+                "checkpoint policy=evaluation: save only at scheduled matches; "
+                "stopping between matches retains the last evaluation checkpoint"
+            )
+            if not settings.arena_enabled:
+                self.logger.event("model selection disabled; no automatic checkpoints will be written")
         self.logger.event(
             "initialized mode=%s device=%s policy_params=%d layout_params=%d "
             "resume_update=%d dead_rules_enabled=%s step_budget=%s:%s "
@@ -310,7 +328,8 @@ class SelfPlayTrainer:
             self.logger.event(
                 f"model selection enabled: milestones={self.model_selection.milestones} "
                 f"games={settings.arena_games} best_update={self.model_selection.state['best_update']} "
-                f"best_checkpoint={self.model_selection.best_path}"
+                f"best_checkpoint={self.model_selection.best_path} "
+                f"baseline_pending_in_memory={self.model_selection.state['best_sha256'] is None}"
             )
         if settings.grpo_equivalent_plies is not None:
             self.logger.event(
@@ -350,6 +369,33 @@ class SelfPlayTrainer:
             interval_seconds=settings.resource_monitor_interval_seconds,
         )
         self.phase = "ready"
+
+    def _export_live_inference(self) -> None:
+        if self.settings.inference_snapshot_every_updates and self.distributed.primary:
+            started = time.perf_counter()
+            try:
+                path = export_inference_snapshot(
+                    self.run_directory, self.policy, self.layout, self.settings, self.update,
+                )
+                self.logger.event(f"CPU play snapshot update={self.update} path={path} seconds={time.perf_counter()-started:.3f}")
+            except Exception as error:
+                self.logger.event(f"CPU play snapshot export failed: {type(error).__name__}: {error}")
+
+    def _configure_optimizer_backend(self) -> None:
+        # Loading an old state restores its old param-group flags. Reapply the
+        # requested backend and migrate only scalar step counters, not moments.
+        if self.settings.algorithm != 'ppo':
+            return
+        fused = self.settings.ppo_fused_optimizer and self.device.type == 'cuda'
+        for optimizer in (self.policy_optimizer, self.critic_optimizer, self.layout_optimizer):
+            if optimizer is None:
+                continue
+            for group in optimizer.param_groups:
+                group['fused'], group['foreach'] = (True, False) if fused else (None, None)
+                for parameter in group['params']:
+                    state = optimizer.state.get(parameter, {})
+                    if 'step' in state:
+                        state['step'] = state['step'].to(self.device if fused else 'cpu')
 
     def _seed_runtime(self) -> None:
         runtime_seed = self.settings.seed + 1_000_003 * self.distributed.rank
@@ -400,6 +446,7 @@ class SelfPlayTrainer:
 
     def _initialize_weights(self, path: Path) -> None:
         payload = torch.load(path, map_location="cpu", weights_only=False)
+        require_current_checkpoint(payload)
         if payload.get("mode") != self.settings.mode.value:
             raise RuntimeError("initialization checkpoint mode does not match")
         if payload.get("dead_rules_enabled") is not self.settings.dead_rules_enabled:
@@ -452,6 +499,9 @@ class SelfPlayTrainer:
         )
         if restored_microbatch < self.settings.minimum_policy_microbatch:
             raise RuntimeError("checkpoint effective microbatch is below configured minimum")
+        saved_microbatch = int(payload.get('config', {}).get('policy_microbatch', restored_microbatch))
+        if restored_microbatch == saved_microbatch and self.settings.policy_microbatch > saved_microbatch:
+            restored_microbatch = self.settings.policy_microbatch
         self.effective_policy_microbatch = min(
             restored_microbatch,
             self.settings.policy_microbatch,
@@ -555,6 +605,10 @@ class SelfPlayTrainer:
                 ]
                 start = sum(sizes[: self.distributed.rank])
                 repartitioned_pool = dict(saved_pools[0])
+                # Rank RNG streams restart after repartition; never duplicate
+                # rank 0's unused random layouts across every new rank.
+                repartitioned_pool.pop('layout_queue', None)
+                repartitioned_pool.pop('layout_queue_version', None)
                 repartitioned_pool["pool_size"] = self.local_base_game_pool_size
                 repartitioned_pool["slots"] = all_slots[
                     start : start + self.local_base_game_pool_size
@@ -573,6 +627,8 @@ class SelfPlayTrainer:
             # its global pool without duplicating unfinished games.  New rank
             # RNG streams are deliberately made independent.
             raw_pool = dict(trainer_state["base_game_pool"])
+            raw_pool.pop('layout_queue', None)
+            raw_pool.pop('layout_queue_version', None)
             if int(raw_pool["pool_size"]) != self.settings.base_game_pool_size:
                 raise RuntimeError(
                     "legacy checkpoint pool size does not match configured global pool"
@@ -612,7 +668,12 @@ class SelfPlayTrainer:
     def _install_signal_handlers(self) -> None:
         def request_stop(signum: int, _frame: Any) -> None:
             self.stop_requested = True
-            self.logger.event(f"received signal {signum}; saving after current update")
+            action = (
+                "stopping after current update; retaining the last evaluation checkpoint"
+                if self.settings.checkpoint_policy == "evaluation"
+                else "saving after current update"
+            )
+            self.logger.event(f"received signal {signum}; {action}")
 
         for signum in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -665,6 +726,7 @@ class SelfPlayTrainer:
         self.policy_optimizer.zero_grad(set_to_none=True)
         epoch_metrics: dict[str, float] = {}
         chunks = self._learner_chunks(groups)
+        varlen_before = getattr(self.policy, '_varlen_calls', 0)
         token_lengths = [
             [len(chunk[group[0]].state.records) for group in
              history_prefix_groups([item.state for item in chunk])]
@@ -697,6 +759,7 @@ class SelfPlayTrainer:
                             clip_epsilon=self.settings.clip_epsilon,
                             entropy_coefficient=self.settings.entropy_coefficient,
                             sequence_training=self._sequence_training_enabled(),
+                            defer_metrics=True,
                         )
                     else:
                         output = policy_grpo_loss(
@@ -711,7 +774,18 @@ class SelfPlayTrainer:
                 epoch_metrics[key] = epoch_metrics.get(key, 0.0) + value * (
                     len(chunk) / len(groups)
                 )
-        return epoch_metrics
+        if getattr(self.policy, '_varlen_calls', 0) - varlen_before == len(chunks):
+            epoch_metrics['optimizer/temporal_padding_fraction'] = 0.0
+        return self._materialize_metrics(epoch_metrics)
+
+    @staticmethod
+    def _materialize_metrics(metrics):
+        """One device transfer per optimizer batch, after all microbatch backward."""
+        keys = [key for key, value in metrics.items() if isinstance(value, torch.Tensor)]
+        if keys:
+            values = torch.stack([metrics[key] for key in keys]).detach().cpu().tolist()
+            metrics.update(zip(keys, values, strict=True))
+        return metrics
 
     def _sequence_training_enabled(self) -> bool:
         return (self.settings.algorithm == "ppo" and self.settings.ppo_sequence_training
@@ -853,17 +927,14 @@ class SelfPlayTrainer:
         return aggregate
 
     def _normalize_ppo_batch(self, samples: Sequence[PPOSample]) -> list[PPOSample]:
-        count = self.distributed.reduce_int(len(samples))
-        total = self.distributed.reduce_float(
-            sum(item.advantage for item in samples), operation="sum"
+        # Reduce moments globally: averaging per-microbatch/rank EV is incorrect.
+        self.ppo_rollout_metrics = ppo_signal_metrics(
+            self.distributed.sum_metrics(ppo_signal_sums(samples))
         )
-        squares = self.distributed.reduce_float(
-            sum(item.advantage ** 2 for item in samples), operation="sum"
-        )
-        mean = total / count
-        std = math.sqrt(max(0.0, squares / count - mean * mean))
         return normalize_advantages(
-            samples, mean=mean, std=std, epsilon=self.settings.advantage_epsilon,
+            samples, mean=self.ppo_rollout_metrics["ppo/raw_advantage_mean"],
+            std=self.ppo_rollout_metrics["ppo/raw_advantage_std"],
+            epsilon=self.settings.advantage_epsilon,
         )
 
     def _backward_critic_epoch(self, samples: Sequence[PPOSample]) -> dict[str, float]:
@@ -885,12 +956,13 @@ class SelfPlayTrainer:
                         clip_epsilon=self.settings.value_clip_epsilon,
                         value_coefficient=self.settings.value_coefficient,
                         sequence_training=self._sequence_training_enabled(),
+                        defer_metrics=True,
                     )
                     loss = output.loss * len(chunk) / len(samples)
                 self.critic_grad_scaler.scale(loss).backward()
             for key, value in output.metrics.items():
                 metrics[key] = metrics.get(key, 0.0) + value * len(chunk) / len(samples)
-        return metrics
+        return self._materialize_metrics(metrics)
 
     def _update_critic(self, samples: Sequence[PPOSample]) -> dict[str, float]:
         if len(samples) > self.settings.ppo_minibatch_samples:
@@ -963,6 +1035,7 @@ class SelfPlayTrainer:
         )
         self.layout_grad_scaler.step(self.layout_optimizer)
         self.layout_grad_scaler.update()
+        self.pool.invalidate_layout_queue()
         output.metrics["optimizer/layout_grad_norm"] = float(grad_norm)
         self.layout_optimizer.zero_grad(set_to_none=True)
         output.metrics["layout/buffer_remaining"] = float(len(self.layout_buffer))
@@ -1014,6 +1087,9 @@ class SelfPlayTrainer:
         return state
 
     def save_checkpoint(self, *, reason: str, archive: bool) -> Path:
+        # Automatic saves in evaluation mode only reach here at a match. A
+        # manual save must also persist its initial opponent for exact resume.
+        self.model_selection.persist_baseline()
         gathered = self.distributed.gather_object(self._local_rank_state())
         path = self.checkpoints.latest_path
         if self.distributed.primary:
@@ -1064,7 +1140,7 @@ class SelfPlayTrainer:
         self.save_checkpoint(reason="before_model_selection", archive=False)
         self.phase = "model_selection"
         self.logger.event(
-            f"model selection {milestone}%: update={self.update} versus "
+            f"model selection {self.model_selection.milestone_label(milestone)}: update={self.update} versus "
             f"best_update={self.model_selection.state['best_update']} "
             f"games={self.settings.arena_games} parallel_games_per_rank={self.settings.arena_parallel_games} "
             f"inference_batch={self.settings.arena_inference_batch_size}"
@@ -1081,7 +1157,8 @@ class SelfPlayTrainer:
             return None
         if result is not None:
             self.logger.log(self.update, {
-                "arena/milestone_percent": milestone,
+                f"arena/{self.model_selection.milestone_key}": milestone,
+                "arena/environment_plies": self.cumulative["environment_plies"],
                 "arena/progress_percent": result["progress_percent"],
                 "arena/games": result["games"], "arena/wins": result["wins"],
                 "arena/draws": result["draws"], "arena/losses": result["losses"],
@@ -1099,7 +1176,7 @@ class SelfPlayTrainer:
                 "arena/games_per_second": result.get("games_per_second", 0.0),
             })
             self.logger.event(
-                f"model selection {milestone}% complete: "
+                f"model selection {self.model_selection.milestone_label(milestone)} complete: "
                 f"W/D/L={result['wins']}/{result['draws']}/{result['losses']} "
                 f"score={result['score']:.3%} decision={result['decision']} "
                 f"best_update={result['best_update']} strength={result['strength_verdict']}"
@@ -1143,6 +1220,13 @@ class SelfPlayTrainer:
         )
         aggregated.environment_step_seconds = self.distributed.reduce_float(
             metrics.environment_step_seconds, operation="max"
+        )
+        aggregated.environment_workers = self.distributed.reduce_int(metrics.environment_workers)
+        aggregated.environment_worker_seconds = self.distributed.reduce_float(
+            metrics.environment_worker_seconds, operation="sum"
+        )
+        aggregated.environment_sync_seconds = self.distributed.reduce_float(
+            metrics.environment_sync_seconds, operation="max"
         )
         return aggregated
 
@@ -1215,18 +1299,25 @@ class SelfPlayTrainer:
                 base_collection_started = time.perf_counter()
                 if self.settings.algorithm == "ppo":
                     self.phase = "ppo_trajectory_collection"
+                    if self.settings.rollout_environment_workers > 1 and self._ppo_environment is None:
+                        from .ppo_environment import ParallelPPOEnvironment
+                        self._ppo_environment = ParallelPPOEnvironment(self.settings.rollout_environment_workers)
                     assert self.critic is not None
                     value_actor = FrozenValueActor(
                         self.critic, amp_dtype=self.amp_dtype,
                         max_batch_size=self.effective_actor_inference_batch,
+                        deferred=self.settings.ppo_deferred_values,
                     )
                     samples, layout_outcomes, rollout_metrics = collect_ppo_samples(
                         self.pool, actor, value_actor, self.layout,
                         count=self._ppo_collection_count(), behavior_version=self.update,
+                        environment=self._ppo_environment,
+                        pipeline_groups=self.settings.ppo_pipeline_groups,
                         discount=self.settings.discount, gae_lambda=self.settings.gae_lambda,
                     )
                     groups = self._normalize_ppo_batch(samples)
-                    actor.max_batch_size = min(actor.max_batch_size, value_actor.max_batch_size)
+                    if not self.settings.ppo_deferred_values:
+                        actor.max_batch_size = min(actor.max_batch_size, value_actor.max_batch_size)
                     base_collection_seconds = 0.0
                 else:
                     anchors, layout_outcomes, base_plies, completed_games = (
@@ -1252,7 +1343,7 @@ class SelfPlayTrainer:
                     rollout_metrics.wall_seconds += base_collection_seconds
                 rollout_metrics = self._aggregate_rollout_metrics(rollout_metrics)
                 encoding_metrics = self.distributed.mean_metrics(
-                    self.policy.board_encoding_metrics()
+                    self.policy._rollout_cache_snapshot or self.policy.board_encoding_metrics()
                 )
                 previous_actor_batch = self.effective_actor_inference_batch
                 self.effective_actor_inference_batch = self.distributed.reduce_int(
@@ -1369,6 +1460,7 @@ class SelfPlayTrainer:
                     **encoding_metrics,
                     **policy_metrics,
                     **critic_metrics,
+                    **(self.ppo_rollout_metrics if self.settings.algorithm == "ppo" else {}),
                     **layout_metrics,
                 }
                 metrics.update(
@@ -1381,7 +1473,12 @@ class SelfPlayTrainer:
                     self.logger.log(self.update, metrics)
 
                 selection_result = self._maybe_evaluate_model()
-                if selection_result is None and self.update % self.settings.checkpoint_every_updates == 0:
+                if (self.settings.inference_snapshot_every_updates
+                        and self.update % self.settings.inference_snapshot_every_updates == 0):
+                    self.phase = "inference_snapshot"
+                    self._export_live_inference()
+                if (self.settings.checkpoint_policy == "periodic" and selection_result is None
+                        and self.update % self.settings.checkpoint_every_updates == 0):
                     self.phase = "checkpoint"
                     self.save_checkpoint(
                         reason="periodic",
@@ -1390,14 +1487,21 @@ class SelfPlayTrainer:
                         ),
                     )
                 self.phase = "ready"
-            self.phase = "checkpoint"
-            self.save_checkpoint(reason="completed_or_stopped", archive=True)
+            if self.settings.checkpoint_policy == "periodic":
+                self.phase = "checkpoint"
+                self.save_checkpoint(reason="completed_or_stopped", archive=True)
+            else:
+                self.logger.event(
+                    "training completed or stopped; no extra checkpoint outside evaluation; "
+                    + ("resume uses the last saved checkpoint" if self.checkpoints.latest_path.exists()
+                       else "no checkpoint is available; this progress cannot be resumed")
+                )
         except BaseException:
-            # Preserve the last fully applied optimizer update before surfacing the
-            # exception.  SIGKILL and power loss cannot be intercepted, hence the
-            # frequent atomic latest checkpoint above.
+            # Never save partial PPO/distributed updates or write an extra
+            # checkpoint outside evaluation when that policy is selected.
             self.phase = "emergency_checkpoint"
-            if self.distributed.enabled or self.settings.algorithm == "ppo":
+            if (self.settings.checkpoint_policy == "evaluation"
+                    or self.distributed.enabled or self.settings.algorithm == "ppo"):
                 self.logger.event(
                     "training exception: retaining the last completed atomic checkpoint; "
                     "partial actor/critic updates are not saved"
@@ -1407,4 +1511,7 @@ class SelfPlayTrainer:
             raise
         finally:
             self.phase = "stopped"
+            if self._ppo_environment is not None:
+                self._ppo_environment.close()
+                self._ppo_environment = None
             self.logger.close()

@@ -1,0 +1,117 @@
+{
+  "mode": "four_dark",
+  "environment_step_target": 3000000000,
+  "device": "NVIDIA GeForce RTX 4090",
+  "games": 48,
+  "transitions_per_update": 12288,
+  "sources": [
+    {
+      "path": "docs\\benchmarks\\ppo_pipeline_g48_before_4090_20260911.json",
+      "sha256": "33f5b94fcb6b90c01ab845c158a08d0ff4db4170c830ae4887238a8208871005"
+    },
+    {
+      "path": "docs\\benchmarks\\ppo_pipeline_g48_after_4090_20260911.json",
+      "sha256": "191ac873ea9c71e46edee6865c5520f152c54b81ff457c2563251dde92d13e73"
+    }
+  ],
+  "matched_first_update": {
+    "before_wall_seconds": 172.65126887500003,
+    "after_wall_seconds": 46.682933494,
+    "speedup": 3.6983808846800583,
+    "wall_reduction_percent": 72.96114080238902,
+    "before_extrapolation": {
+      "steps_per_second": 71.17237006173725,
+      "continuous_days": 487.8609802104809,
+      "calendar_days_at_80_percent": 609.826225263101
+    },
+    "after_extrapolation": {
+      "steps_per_second": 263.2225329537043,
+      "continuous_days": 131.9120435191967,
+      "calendar_days_at_80_percent": 164.89005439899586
+    }
+  },
+  "measured_updated_window": {
+    "steps_per_second": 236.77877792041224,
+    "continuous_days": 146.64414829395437,
+    "calendar_days_at_80_percent": 183.30518536744296
+  },
+  "observed_layout_updates": 1,
+  "layout_seconds_total": 1.141786350000018,
+  "layout_seconds_per_update_at_configured_interval": 0.14272329375000226,
+  "cadence_adjusted_updated_window": {
+    "steps_per_second": 237.43175092509068,
+    "continuous_days": 146.24085484328094,
+    "calendar_days_at_80_percent": 182.80106855410116
+  },
+  "observed_round_projections": [
+    {
+      "update": 5,
+      "wall_seconds": 46.682933494,
+      "history": {
+        "update": 5,
+        "samples": 12288,
+        "mean_tokens": 317.4658203125,
+        "max_tokens": 811,
+        "window_limit_fraction": 0.0
+      },
+      "steps_per_second": 263.2225329537043,
+      "continuous_days": 131.9120435191967,
+      "calendar_days_at_80_percent": 164.89005439899586
+    },
+    {
+      "update": 6,
+      "wall_seconds": 49.973476041000005,
+      "history": {
+        "update": 6,
+        "samples": 12288,
+        "mean_tokens": 398.4164225260417,
+        "max_tokens": 886,
+        "window_limit_fraction": 0.0
+      },
+      "steps_per_second": 245.8904397588531,
+      "continuous_days": 141.21013511657716,
+      "calendar_days_at_80_percent": 176.51266889572145
+    },
+    {
+      "update": 7,
+      "wall_seconds": 58.237057306999986,
+      "history": {
+        "update": 7,
+        "samples": 12288,
+        "mean_tokens": 382.5786946614583,
+        "max_tokens": 960,
+        "window_limit_fraction": 0.0
+      },
+      "steps_per_second": 210.99967217133076,
+      "continuous_days": 164.56055056819204,
+      "calendar_days_at_80_percent": 205.70068821024003
+    },
+    {
+      "update": 8,
+      "wall_seconds": 52.65812621800001,
+      "history": {
+        "update": 8,
+        "samples": 12288,
+        "mean_tokens": 359.3365885416667,
+        "max_tokens": 971,
+        "window_limit_fraction": 0.0
+      },
+      "steps_per_second": 233.35429652640434,
+      "continuous_days": 148.79615562721537,
+      "calendar_days_at_80_percent": 185.9951945340192
+    }
+  ],
+  "target_15_days_steps_per_second": {
+    "continuous": 2314.814814814815,
+    "availability_80_percent": 2893.5185185185187
+  },
+  "evaluation_events_for_target": 60,
+  "limitations": [
+    "Projection of bounded measured gameplay, not a long-run guarantee or strength measurement.",
+    "No PRO 6000 measurement; no assumed cross-hardware speed ratio.",
+    "Scheduled evaluation/save latency must be added; ordinary update saves are disabled.",
+    "Observed round variation is not a confidence interval.",
+    "First-update comparison shares checkpoint and initial setup, but BF16 can change later sampled actions."
+  ],
+  "complete": true
+}

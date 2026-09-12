@@ -1,0 +1,112 @@
+{
+  "timestamp_unix": 1789186995.2775304,
+  "before": {
+    "id": "four-dark-local",
+    "status": "running",
+    "update": 38,
+    "steps": 3735552,
+    "processes": [
+      {
+        "pid": 1268,
+        "started": 1789183943.31
+      }
+    ],
+    "cycle_rate": 1216.065561800945,
+    "eta_seconds": 2463900.419614425
+  },
+  "properties_before": {
+    "MainPID": "3677",
+    "NRestarts": "0",
+    "ExecStart": "{ path=/root/anaconda3/envs/siguozero/bin/python ; argv[]=/root/anaconda3/envs/siguozero/bin/python -m junqi.web.server --root /mnt/e/agent/siguozero --config /mnt/e/agent/siguozero/configs/local_console.json --port 8765 ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }",
+    "WorkingDirectory": "/mnt/e/agent/siguozero",
+    "LoadState": "loaded",
+    "ActiveState": "active",
+    "SubState": "running",
+    "FragmentPath": "/etc/systemd/system/siguozero-monitor.service",
+    "UnitFileState": "enabled"
+  },
+  "trainer_cgroups": {
+    "1268": "0::/init.scope"
+  },
+  "crash_recovery": {
+    "seconds": 3.293143493000116,
+    "old_monitor_pid": 3677,
+    "new_monitor_pid": 3994,
+    "health": {
+      "ok": true,
+      "pid": 3994,
+      "gpu_inference": false,
+      "managed_by": "siguozero-monitor.service"
+    },
+    "cpu_model": {
+      "checkpoint": "policy_000000030_82049370.pt",
+      "update": 30,
+      "mode": "four_dark",
+      "device": "cpu",
+      "cuda_initialized": false,
+      "cuda_visible_devices": "",
+      "pid": 3967,
+      "threads": 2,
+      "seed": 20260911,
+      "dead_rules_enabled": true
+    },
+    "cpu_cgroup": "0::/system.slice/siguozero-monitor.service",
+    "cpu_game_plies": 4,
+    "cpu_worker_reaped": true
+  },
+  "complete": true,
+  "after": {
+    "id": "four-dark-local",
+    "status": "running",
+    "update": 39,
+    "steps": 3833856,
+    "processes": [
+      {
+        "pid": 1268,
+        "started": 1789183943.31
+      }
+    ],
+    "cycle_rate": 1228.527361530136,
+    "eta_seconds": 2438827.361784
+  },
+  "properties_after": {
+    "MainPID": "3994",
+    "NRestarts": "1",
+    "ExecStart": "{ path=/root/anaconda3/envs/siguozero/bin/python ; argv[]=/root/anaconda3/envs/siguozero/bin/python -m junqi.web.server --root /mnt/e/agent/siguozero --config /mnt/e/agent/siguozero/configs/local_console.json --port 8765 ; ignore_errors=no ; start_time=[Fri 2026-09-11 21:23:21 PDT] ; stop_time=[n/a] ; pid=3994 ; code=(null) ; status=0/0 }",
+    "WorkingDirectory": "/mnt/e/agent/siguozero",
+    "LoadState": "loaded",
+    "ActiveState": "active",
+    "SubState": "running",
+    "FragmentPath": "/etc/systemd/system/siguozero-monitor.service",
+    "UnitFileState": "enabled"
+  },
+  "training_process_unchanged": true,
+  "training_progress_advanced": true,
+  "windows_login_task": {
+    "name": "SiguoZero Monitor",
+    "state": "Running",
+    "trigger_type": "MSFT_TaskLogonTrigger",
+    "trigger_enabled": true,
+    "execution_time_limit": "PT0S",
+    "restart_count": 3,
+    "restart_interval": "PT1M",
+    "multiple_instances_policy": "IgnoreNew",
+    "last_run_time": "2026-09-11T21:22:22.0000000-07:00",
+    "last_result_code": 267009,
+    "action": "-NoProfile -NonInteractive -WindowStyle Hidden -File \"E:\\agent\\siguozero\\scripts\\monitor_service_windows.ps1\" -Run -Distribution \"Ubuntu-24.04\"",
+    "hidden": true,
+    "user_logon_type": "Interactive",
+    "lifetime_anchor_started": true,
+    "reboot_tested": false
+  },
+  "tests": {
+    "monitor_service_console_tests.log": {
+      "passed": true,
+      "count": 12
+    },
+    "monitor_service_unit_tests.log": {
+      "passed": true,
+      "count": 4
+    }
+  }
+}

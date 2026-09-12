@@ -1,0 +1,191 @@
+{
+  "mode": "four_dark",
+  "device": "NVIDIA GeForce RTX 4090",
+  "torch": "2.11.0+cu130",
+  "model_config": {
+    "board_dim": 128,
+    "board_encoder_type": "whole_board_one_hot_linear",
+    "action_encoder_type": "coordinates_player_linear",
+    "temporal_dim": 256,
+    "temporal_layers": 32,
+    "temporal_heads": 8,
+    "temporal_ffn_dim": 1024,
+    "layout_dim": 256,
+    "layout_layers": 16,
+    "layout_heads": 8,
+    "layout_ffn_dim": 1024,
+    "max_transitions": 1000,
+    "dropout": 0.0,
+    "board_chunk_size": 128,
+    "inference_board_cache_entries": 65536,
+    "inference_temporal_cache_entries": 96,
+    "incremental_inference": true,
+    "paged_kv_cache": true,
+    "paged_kv_length_bucket_tokens": 1001,
+    "activation_checkpointing": true,
+    "dead_rules_enabled": true
+  },
+  "fresh_random_weights": true,
+  "checkpoint_loaded": false,
+  "synthetic_fixed_histories": true,
+  "policy_only": true,
+  "optimizer_step_included": false,
+  "ppo_epochs_measured": 1,
+  "sequence_microbatch": 8,
+  "samples_per_prefix": 64,
+  "repeats": 2,
+  "source_sha256": {
+    "src/junqi/training/models.py": "de75fe9eef124d002296305870318daee5b813bd1ff8fbc3a2b99c7eecf5c2d6",
+    "src/junqi/training/encoding.py": "389318decf6ccecdb1dedb2910ed9c852e00f20c3d26979a7ca1d54ac057a878",
+    "src/junqi/training/ppo.py": "9a84c3b4a50accefce01f79db1a427be892aa662c2fd5923ed229e3e40786f95",
+    "configs/bootstrap.yaml": "eb8fcb3d0dba1ae7ec29c55d445d1f79b5f7d89c1b198ea987d8d8c0406944c5",
+    "tools/benchmark_history_window.py": "873da056457a49f5480ef373e061b6de14ed0e39b2b34a79730b85ff0b7898a7"
+  },
+  "limitations": [
+    "Fixed synthetic histories are not legal self-play trajectories.",
+    "Policy phases exclude critic, environments, optimizer step, layout and checkpoints.",
+    "Phase ratios must not be applied directly to the 3-billion-step budget.",
+    "No existing model or training configuration is modified."
+  ],
+  "cases": [
+    {
+      "max_transitions": 1000,
+      "measurements": [
+        {
+          "phase": "eight_independent_full_histories_backward",
+          "seconds": [
+            0.5401374780000019,
+            0.5490710320000005
+          ],
+          "median_seconds": 0.5446042550000012,
+          "peak_allocated_gib": 1.262028694152832
+        },
+        {
+          "phase": "same_512_rolling_decisions_backward",
+          "seconds": [
+            0.5365288489999998,
+            0.4866102689999998
+          ],
+          "median_seconds": 0.5115695589999998,
+          "peak_allocated_gib": 0.9162917137145996
+        },
+        {
+          "phase": "rolling_inference_160_decisions",
+          "seconds": [
+            1.6186609619999999,
+            1.5639183639999992
+          ],
+          "median_seconds": 1.5912896629999995,
+          "peak_allocated_gib": 1.5226531028747559
+        }
+      ],
+      "rolling_structure": {
+        "decision_samples": 512,
+        "exact_prefix_groups": 8,
+        "microbatches": 1,
+        "packed_history_tokens": 6032,
+        "min_history_tokens": 502,
+        "max_history_tokens": 754
+      },
+      "inference_encoding_metrics": {
+        "encoding/history_input_states": 160.0,
+        "encoding/history_unique_states": 160.0,
+        "encoding/raw_board_tokens": 84480.0,
+        "encoding/board_input_tokens": 4528.0,
+        "encoding/board_unique_tokens": 4528.0,
+        "encoding/board_encoder_tokens": 4528.0,
+        "encoding/within_batch_history_saved_fraction": 0.0,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.0,
+        "encoding/board_encoder_saved_fraction": 0.9464015151515152,
+        "encoding/board_cache_entries": 3920.0,
+        "encoding/temporal_cache_entries": 96.0,
+        "encoding/paged_kv_enabled": 1.0,
+        "encoding/paged_kv_pages": 376.0,
+        "encoding/paged_kv_peak_pages": 392.0,
+        "encoding/paged_kv_capacity_pages": 2400.0,
+        "encoding/paged_kv_allocated_gib": 1.171875,
+        "encoding/temporal_cache_hits": 152.0,
+        "encoding/temporal_cold_states": 8.0,
+        "encoding/temporal_incremental_tokens": 608.0,
+        "encoding/temporal_incremental_batches": 76.0,
+        "encoding/temporal_incremental_batch_mean": 8.0,
+        "encoding/temporal_incremental_batch_max": 8.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.9426605537370821
+      }
+    },
+    {
+      "max_transitions": 500,
+      "measurements": [
+        {
+          "phase": "eight_independent_full_histories_backward",
+          "seconds": [
+            0.2810445040000005,
+            0.3089442800000022
+          ],
+          "median_seconds": 0.2949943920000013,
+          "peak_allocated_gib": 0.6229348182678223
+        },
+        {
+          "phase": "same_512_rolling_decisions_backward",
+          "seconds": [
+            14.229589021999995,
+            13.947780777000006
+          ],
+          "median_seconds": 14.0886848995,
+          "peak_allocated_gib": 0.6417899131774902
+        },
+        {
+          "phase": "rolling_inference_160_decisions",
+          "seconds": [
+            4.577620670000002,
+            4.781561526999994
+          ],
+          "median_seconds": 4.679591098499998,
+          "peak_allocated_gib": 1.173579216003418
+        }
+      ],
+      "rolling_structure": {
+        "decision_samples": 512,
+        "exact_prefix_groups": 512,
+        "microbatches": 64,
+        "packed_history_tokens": 256512,
+        "min_history_tokens": 501,
+        "max_history_tokens": 501
+      },
+      "inference_encoding_metrics": {
+        "encoding/history_input_states": 160.0,
+        "encoding/history_unique_states": 160.0,
+        "encoding/raw_board_tokens": 79992.0,
+        "encoding/board_input_tokens": 72120.0,
+        "encoding/board_unique_tokens": 72120.0,
+        "encoding/board_encoder_tokens": 4592.0,
+        "encoding/within_batch_history_saved_fraction": 0.0,
+        "encoding/within_batch_dedup_saved_fraction": 0.0,
+        "encoding/cross_step_cache_hit_fraction": 0.9363283416528009,
+        "encoding/board_encoder_saved_fraction": 0.9425942594259425,
+        "encoding/board_cache_entries": 4528.0,
+        "encoding/temporal_cache_entries": 24.0,
+        "encoding/paged_kv_enabled": 1.0,
+        "encoding/paged_kv_pages": 768.0,
+        "encoding/paged_kv_peak_pages": 1296.0,
+        "encoding/paged_kv_capacity_pages": 1408.0,
+        "encoding/paged_kv_allocated_gib": 0.6875,
+        "encoding/temporal_cache_hits": 16.0,
+        "encoding/temporal_cold_states": 144.0,
+        "encoding/temporal_incremental_tokens": 64.0,
+        "encoding/temporal_incremental_batches": 8.0,
+        "encoding/temporal_incremental_batch_mean": 8.0,
+        "encoding/temporal_incremental_batch_max": 8.0,
+        "encoding/paged_kv_padding_fraction": 0.0,
+        "encoding/temporal_attention_saved_fraction": 0.0968466544064509
+      }
+    }
+  ],
+  "phase_time_ratios_500_over_1000": {
+    "eight_independent_full_histories_backward": 0.5416674388634747,
+    "same_512_rolling_decisions_backward": 27.54011580954919,
+    "rolling_inference_160_decisions": 2.940753784372443
+  }
+}

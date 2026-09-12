@@ -1,4 +1,8 @@
-"""Build the Chinese SiguoZero architecture and training-system PDF."""
+"""Build the historical rev.15 SiguoZero architecture PDF.
+
+This frozen report describes the old spatial board encoder. Current rev.20
+architecture and validation live in docs/whole_board_linear_zh.md.
+"""
 
 from __future__ import annotations
 
