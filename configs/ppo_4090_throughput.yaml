@@ -2,8 +2,8 @@
 # Full configuration snapshot for a NEW run: same model/rules/epochs, larger frozen rollout.
 # See docs/ppo20_optimization_zh.md for measured ETA and schedule changes.
 schema_version: 1
-config_revision: 22
-experiment_name: siguozero_v22_four_player_128_ppo_environment_budget_3b
+config_revision: 24
+experiment_name: siguozero_v24_draw_penalty_countdown
 rules:
   game_modes:
   - two_player
@@ -17,10 +17,11 @@ rules:
   intermediate_reward: 0
   terminal_reward:
     win: 1
-    draw: 0
+    draw: -0.15
     loss: -1
   gamma: 1.0
-  no_interaction_draw_plies: 60
+  no_capture_draw_plies: 70
+  max_passes_per_player: 4
 board_piece_codes:
   empty: 0
   unknown_previous_player: 1
@@ -180,7 +181,7 @@ models:
     architecture: board_encoder_plus_causal_transition_transformer
     action_encoder:
       architecture: coordinates_player_linear
-      input_dim: 5
+      input_dim: 6
       output_dim: 256
       coordinate_system: viewer_relative_board_wide_cartesian
       normalization: none
@@ -193,6 +194,7 @@ models:
       - destination_x
       - destination_y
       - actor
+      - remaining_no_capture_plies
     board_encoder:
       architecture: whole_board_one_hot_linear
       input: player_visible_integer_chain_plus_optional_exact_casualty_prior
@@ -337,6 +339,10 @@ learner:
     minimum: 0.005
     maximum: 0.02
     adaptive_to_target_entropy: true
+    target_ratio: 0.6
+    adaptation_rate: 0.1
+    ema_decay: 0.9
+    opening_plies: 16
   kl:
     initial_coefficient: 0.02
     target_per_action: 0.015
@@ -355,8 +361,9 @@ model_selection:
   four_player:
     interval_environment_plies: 50000000
     games: 100
-    checkpoint_policy: evaluation
-  max_plies: 2000
+    checkpoint_policy: periodic
+    checkpoint_interval_environment_plies: 25000000
+  max_plies: null
   seed: 20260910
   temporal_cache_entries: 8
   parallel_games: 32
@@ -386,7 +393,7 @@ runtime:
     four_dark: 32
     double_open: 32
     two_player: 64
-  max_game_plies: 2000
+  max_game_plies: null
   policy_microbatch:
     bootstrap: 16
     main: 8
@@ -401,7 +408,7 @@ runtime:
   layout_learning_rate: 5.0e-05
   warmup_updates: 250
   reference_refresh_updates: 6250
-  checkpoint_every_updates: 10
+  checkpoint_every_updates: 5
   archive_every_updates: 500
   keep_checkpoint_archives: 10
   metrics_every_updates: 1

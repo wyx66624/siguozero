@@ -44,16 +44,41 @@ button:focus-visible,a:focus-visible,select:focus-visible{outline:2px solid var(
 .status-line.stale,.status-line.starting{background:#30291e;border-color:#635332;color:var(--amber)}
 .status-dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 0 5px #ffffff0a}
 .status-line small{display:block;font-size:11px}
-.progress{height:9px;overflow:hidden;border-radius:9px;background:#26313f;margin:20px 0 7px}
+.progress{display:flex;height:9px;overflow:hidden;border-radius:9px;background:#26313f;margin:20px 0 7px}
 .progress>div{height:100%;background:linear-gradient(90deg,#629fe9,#55d8a5);border-radius:9px;min-width:0}
 .progress-label{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-bottom:17px}
 .progress-label b{color:var(--text)}
+.progress>.pending-progress{border-radius:0;background:repeating-linear-gradient(135deg,#cda962 0px,#cda962 4px,#796746 4px,#796746 8px)}
+.progress>.saved-progress{border-radius:0}
+.progress-detail{color:var(--muted);font-size:12px;line-height:1.7;margin-top:-7px}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
 .stat{border:1px solid var(--line);border-radius:6px;padding:12px 14px;background:#101823;min-width:0}
 .stat span{display:block;color:var(--muted);font-size:11px}
 .stat strong{font-size:21px;line-height:1.6;display:block;font-variant-numeric:tabular-nums}
 .stat .good{color:var(--green)}
 .stat .warn{color:var(--amber)}
+.outcome-section{margin:20px 0 23px;padding-bottom:19px;border-bottom:1px solid var(--line)}
+.outcome-heading,.outcome-caption{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.outcome-heading{margin-bottom:11px}
+.outcome-heading h3{font-size:14px;font-weight:600;margin:0}
+.outcome-heading span,.outcome-caption,.outcome-latest{font-size:11px;color:var(--muted)}
+.outcome-section .win{color:var(--green)}
+.outcome-section .draw{color:var(--blue)}
+.outcome-section .loss{color:#ee9b98}
+.outcome-bar{height:7px;display:flex;overflow:hidden;border-radius:4px;background:var(--line);margin:12px 0 6px}
+.outcome-bar .win{background:var(--green)}
+.outcome-bar .draw{background:#5f94c7}
+.outcome-bar .loss{background:#c17b78}
+.outcome-latest{margin:8px 0 0}
+.outcome-history{margin-top:11px;padding-top:9px}
+.table-scroll{overflow-x:auto}
+.outcome-history table{width:100%;min-width:440px;border-collapse:collapse;margin-top:9px;font-variant-numeric:tabular-nums}
+.outcome-history th,.outcome-history td{text-align:right;padding:6px 10px;border-bottom:1px solid var(--line);font-weight:400}
+.outcome-history th:first-child,.outcome-history td:first-child{text-align:left}
+.outcome-history td{color:var(--text)}
+.evaluation-summary{font-size:11px;color:var(--muted);margin-top:13px}
+.evaluation-summary h4{font-size:12px;font-weight:500;color:var(--text);margin:0}
+.evaluation-summary p{margin:4px 0 0}
 .charts{display:grid;grid-template-columns:1fr 1fr;gap:25px;margin-top:24px}
 .chart-title{font-size:12px;display:flex;justify-content:space-between;color:var(--muted)}
 .chart{width:100%;height:135px;overflow:visible}
@@ -90,6 +115,14 @@ dt{color:var(--muted)}
 dd{margin:0;text-align:right;overflow-wrap:anywhere}
 .moves ol{padding:0;list-style:none;margin:0;max-height:230px;overflow:auto}
 .moves li{padding:7px 0;border-bottom:1px solid #243244;font-size:12px}
+.review-panel{border-color:#47636e}
+.play-grid:has(#review-controls:not([hidden]))>aside>.panel:first-child{display:none}
+.review-position{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin:12px 0 4px}
+.review-position strong{color:var(--text);font-variant-numeric:tabular-nums}
+#review-seek{width:100%;accent-color:#88c9ff;cursor:pointer;margin:8px 0 14px}
+.review-buttons{display:grid;grid-template-columns:1fr 1fr 1.7fr 1fr 1fr;gap:6px}
+.review-buttons button{padding:8px 3px;min-width:0}
+#review-exit{margin-top:14px}
 .quiet-link{font-size:12px}
 .point{cursor:pointer}
 .point:focus{outline:none}

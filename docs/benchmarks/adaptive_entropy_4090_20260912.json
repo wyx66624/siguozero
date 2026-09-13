@@ -1,0 +1,252 @@
+{
+  "device": "NVIDIA GeForce RTX 4090",
+  "checkpoint_update": 935,
+  "checkpoint_sha256": "f9ae5067175a6d919447a75420f68e37adec8447654850473f5a50a065daff78",
+  "samples": 512,
+  "microbatch": 32,
+  "optimizer_steps": 0,
+  "scope": "Short-history policy forward/backward only; fixed coefficients matched; no optimizer, rollout, layout or end-to-end ETA measurement.",
+  "precision": "BF16 autocast, FP32 entropy reductions",
+  "compile_mode": "off",
+  "iterations_per_variant": 6,
+  "median_seconds": {
+    "fixed": 0.5175938959946507,
+    "adaptive": 0.5275205275029293
+  },
+  "relative_overhead": 0.019178416872947857,
+  "source_head_gradient_max_difference": 0.0,
+  "observed_entropy_ratios": {
+    "opening": 0.4472074508666992,
+    "other": 0.6478087902069092
+  },
+  "controller_after_one_observation": {
+    "opening": {
+      "version": 1,
+      "enabled": true,
+      "coefficient": 0.0101539657951122,
+      "entropy_ema": 0.4472074508666992,
+      "updates": 1
+    },
+    "other": {
+      "version": 1,
+      "enabled": true,
+      "coefficient": 0.00995230531190559,
+      "entropy_ema": 0.6478087902069092,
+      "updates": 1
+    }
+  },
+  "results": {
+    "fixed": [
+      {
+        "seconds": 0.5181669449957553,
+        "peak_allocated_mib": 422.4462890625,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787017345428467,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787015557289124
+        }
+      },
+      {
+        "seconds": 0.517020846993546,
+        "peak_allocated_mib": 422.4462890625,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787017345428467,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787013694643974
+        }
+      },
+      {
+        "seconds": 0.5033276720059803,
+        "peak_allocated_mib": 422.4462890625,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787017345428467,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787013694643974
+        }
+      },
+      {
+        "seconds": 0.5009471770026721,
+        "peak_allocated_mib": 422.4462890625,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787017345428467,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787015557289124
+        }
+      },
+      {
+        "seconds": 0.5521506829973077,
+        "peak_allocated_mib": 422.4462890625,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787017345428467,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787013694643974
+        }
+      },
+      {
+        "seconds": 0.5334991709969472,
+        "peak_allocated_mib": 422.4462890625,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787017345428467,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787013694643974
+        }
+      }
+    ],
+    "adaptive": [
+      {
+        "seconds": 0.5273046280053677,
+        "peak_allocated_mib": 422.44921875,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787014961242676,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787013694643974,
+          "policy/opening_entropy_ratio_mass": 0.2236037254333496,
+          "policy/opening_entropy_mass": 0.839140772819519,
+          "policy/opening_entropy_fraction": 0.5,
+          "policy/other_entropy_ratio_mass": 0.3239043951034546,
+          "policy/other_entropy_mass": 1.2395609617233276,
+          "policy/other_entropy_fraction": 0.5
+        }
+      },
+      {
+        "seconds": 0.5243836330046179,
+        "peak_allocated_mib": 422.44921875,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787017345428467,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787013694643974,
+          "policy/opening_entropy_ratio_mass": 0.2236037254333496,
+          "policy/opening_entropy_mass": 0.8391407132148743,
+          "policy/opening_entropy_fraction": 0.5,
+          "policy/other_entropy_ratio_mass": 0.3239043951034546,
+          "policy/other_entropy_mass": 1.2395609617233276,
+          "policy/other_entropy_fraction": 0.5
+        }
+      },
+      {
+        "seconds": 0.527736427000491,
+        "peak_allocated_mib": 422.44921875,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787014961242676,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787013694643974,
+          "policy/opening_entropy_ratio_mass": 0.2236037254333496,
+          "policy/opening_entropy_mass": 0.839140772819519,
+          "policy/opening_entropy_fraction": 0.5,
+          "policy/other_entropy_ratio_mass": 0.3239043951034546,
+          "policy/other_entropy_mass": 1.2395609617233276,
+          "policy/other_entropy_fraction": 0.5
+        }
+      },
+      {
+        "seconds": 0.5281362270034151,
+        "peak_allocated_mib": 422.44921875,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787017345428467,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787013694643974,
+          "policy/opening_entropy_ratio_mass": 0.2236037254333496,
+          "policy/opening_entropy_mass": 0.839140772819519,
+          "policy/opening_entropy_fraction": 0.5,
+          "policy/other_entropy_ratio_mass": 0.3239043951034546,
+          "policy/other_entropy_mass": 1.2395609617233276,
+          "policy/other_entropy_fraction": 0.5
+        }
+      },
+      {
+        "seconds": 0.5283497270138469,
+        "peak_allocated_mib": 422.44921875,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787017345428467,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787013694643974,
+          "policy/opening_entropy_ratio_mass": 0.2236037254333496,
+          "policy/opening_entropy_mass": 0.839140772819519,
+          "policy/opening_entropy_fraction": 0.5,
+          "policy/other_entropy_ratio_mass": 0.3239043951034546,
+          "policy/other_entropy_mass": 1.2395609617233276,
+          "policy/other_entropy_fraction": 0.5
+        }
+      },
+      {
+        "seconds": 0.5189285450032912,
+        "peak_allocated_mib": 422.44921875,
+        "metrics": {
+          "loss/policy_ppo": 0.0004824995994567871,
+          "loss/policy_total": -0.02030450850725174,
+          "policy/approx_kl_old": 6.327294249786064e-05,
+          "policy/entropy": 2.0787017345428467,
+          "policy/clip_fraction": 0.0,
+          "policy/importance_ratio_mean": 1.000476360321045,
+          "policy/nonzero_advantage_fraction": 1.0,
+          "loss/policy_entropy": -0.020787013694643974,
+          "policy/opening_entropy_ratio_mass": 0.2236037254333496,
+          "policy/opening_entropy_mass": 0.839140772819519,
+          "policy/opening_entropy_fraction": 0.5,
+          "policy/other_entropy_ratio_mass": 0.3239043951034546,
+          "policy/other_entropy_mass": 1.2395609617233276,
+          "policy/other_entropy_fraction": 0.5,
+          "policy/opening_entropy_ratio": 0.4472074508666992,
+          "policy/opening_entropy": 1.678281545639038,
+          "policy/other_entropy_ratio": 0.6478087902069092,
+          "policy/other_entropy": 2.4791219234466553
+        }
+      }
+    ]
+  }
+}

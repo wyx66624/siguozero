@@ -1,0 +1,26 @@
+{
+  "checkpoint_update": 1336,
+  "cache_capacity": 512,
+  "results": [
+    {
+      "iteration": 0,
+      "states": 64,
+      "full_window": 1001,
+      "maximum_context_error": 0.05213665962219238,
+      "relative_context_l2": 0.008424762636423111,
+      "max_prefill_padded_tokens": 8192,
+      "peak_allocated_gib": 16.10138463973999,
+      "peak_reserved_gib": 16.345703125
+    },
+    {
+      "iteration": 1,
+      "states": 64,
+      "full_window": 1001,
+      "maximum_context_error": 0.05102384090423584,
+      "relative_context_l2": 0.008635259233415127,
+      "max_prefill_padded_tokens": 8192,
+      "peak_allocated_gib": 16.10138463973999,
+      "peak_reserved_gib": 16.369140625
+    }
+  ]
+}

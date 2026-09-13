@@ -193,7 +193,10 @@ class SequencePPOTests(unittest.TestCase):
                 self.assertEqual(settings.total_updates, 244_141)
                 self.assertEqual(settings.warmup_updates, 2000)
                 self.assertEqual(3_000_000_000 - 244_140 * settings.anchor_batch, 7680)
-                schedule = SimpleNamespace(settings=settings, policy_lr_scale=1.0)
+                schedule = SelfPlayTrainer.__new__(SelfPlayTrainer)
+                schedule.settings = settings
+                schedule.policy_lr_scale = 1.0
+                schedule.lr_controller = None
                 # The former 200K limit must neither stop training nor exhaust LR.
                 self.assertGreater(SelfPlayTrainer._learning_rate(schedule, 200_000),
                                    2 * settings.minimum_learning_rate)

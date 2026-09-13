@@ -126,6 +126,7 @@ class CenterPoint:
 PhysicalPoint: TypeAlias = ArmPoint | CenterPoint
 RelativeArm: TypeAlias = FourPlayerRelativeArm | TwoPlayerRelativeArm
 Action: TypeAlias = tuple[int, int]
+PASS_ACTION: Action = (0, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,7 +195,7 @@ class StaticActionSpace:
                     raise BoardEncodingError(
                         f"action target must be in 0..{point_count - 1}: {end}"
                     )
-                if start == end:
+                if start == end and (start, end) != PASS_ACTION:
                     raise BoardEncodingError(
                         f"static action space cannot contain ({start}, {end})"
                     )
@@ -642,7 +643,7 @@ class _EncodedBoard:
 
         self._validate_code(start)
         self._validate_code(end)
-        if start == end:
+        if start == end and (start, end) != PASS_ACTION:
             raise BoardEncodingError("a move action requires different endpoints")
         return (start, end)
 
@@ -858,6 +859,9 @@ def _build_static_action_space(
         if point.kind is PointKind.HEADQUARTERS:
             targets[point.code].clear()
 
+    # Only (0, 0) is a no-op. Other actions involving board point 0 remain moves.
+    # Sorted endpoints reserve flat action ID 0 without changing point codes.
+    targets[0].add(0)
     return StaticActionSpace(targets)
 
 

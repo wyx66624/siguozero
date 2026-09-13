@@ -30,6 +30,7 @@ from .encoding import (
     CASUALTY_SLOTS_PER_PLAYER,
     MAX_BOARD_POINTS,
     MAX_CASUALTY_BITS,
+    NO_CAPTURE_COUNTER_MAX,
     PolicyState,
     StateTokenRecord,
     history_prefix_groups,
@@ -265,9 +266,10 @@ class PreNormEncoderBlock(nn.Module):
         valid_mask: Tensor,
         attention_mask: Tensor | None = None,
         is_causal: bool = False,
+        unmasked: bool = False,
     ) -> Tensor:
         normalized = self.attention_norm(inputs)
-        if is_causal:
+        if is_causal or unmasked:
             # Temporal batches have valid prefixes and right padding. A valid
             # causal query cannot see a padded key, so no B*H*S*S mask is needed.
             if attention_mask is not None:
@@ -278,13 +280,13 @@ class PreNormEncoderBlock(nn.Module):
             q, k, v = [item.view(batch, tokens, heads, width // heads).transpose(1, 2)
                        for item in qkv.chunk(3, dim=-1)]
             attended = F.scaled_dot_product_attention(
-                q, k, v, is_causal=True,
+                q, k, v, is_causal=is_causal,
                 dropout_p=self.attention.dropout if self.training else 0.)
             attended = attended.transpose(1, 2).contiguous().view(batch, tokens, width)
             attended = F.linear(attended, self.attention.out_proj.weight, self.attention.out_proj.bias)
             outputs = inputs + self.dropout(attended)
             outputs = outputs + self.dropout(self.ffn(self.ffn_norm(outputs)))
-            return outputs.masked_fill(~valid_mask.unsqueeze(-1), 0.)
+            return outputs if unmasked else outputs.masked_fill(~valid_mask.unsqueeze(-1), 0.)
         key_padding_mask = torch.zeros(
             valid_mask.shape,
             dtype=normalized.dtype,
@@ -402,13 +404,23 @@ class WholeBoardEncoder(nn.Module):
         self.board_feature_dim = MAX_BOARD_POINTS * BOARD_CODE_VOCAB_SIZE
         self.mode_feature_dim = len(MODE_SPECS)
         self.casualty_feature_dim = MAX_CASUALTY_BITS if config.dead_rules_enabled else 0
+        self.pass_feature_dim = 4
         self.input_dim = (
-            self.board_feature_dim + self.mode_feature_dim + self.casualty_feature_dim
+            self.board_feature_dim + self.mode_feature_dim + self.casualty_feature_dim + self.pass_feature_dim
         )
         self.projection = nn.Linear(self.input_dim, config.board_dim)
         # Sparse input: approximately one active feature per real board point.
         nn.init.normal_(self.projection.weight, std=MAX_BOARD_POINTS ** -0.5)
         nn.init.zeros_(self.projection.bias)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        key = prefix + "projection.weight"
+        weight = state_dict.get(key)
+        if weight is not None and weight.shape == (self.projection.out_features, self.input_dim - 4):
+            state_dict[key] = torch.cat((weight, weight.new_zeros((weight.shape[0], 4))), dim=1)
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
 
     def encode_vector(
         self,
@@ -416,6 +428,7 @@ class WholeBoardEncoder(nn.Module):
         point_mask: Tensor,
         mode_ids: Tensor,
         casualty_bits: Tensor | None,
+        passes_remaining: Tensor | None = None,
     ) -> Tensor:
         """Build [boards, features] directly; never allocate [boards, points, d]."""
         if board_codes.ndim != 2:
@@ -451,7 +464,13 @@ class WholeBoardEncoder(nn.Module):
         )
         vector.scatter_(1, mode_indices, 1.0)
         if casualty_bits is not None:
-            vector[:, self.board_feature_dim + self.mode_feature_dim:] = casualty_bits.to(dtype)
+            vector[:, self.board_feature_dim + self.mode_feature_dim:-4] = casualty_bits.to(dtype)
+        if passes_remaining is None:
+            passes_remaining = torch.full((batch, 4), 4, device=board_codes.device)
+            passes_remaining[:, 2:] *= (mode_ids != MODE_SPECS[TrainingMode.TWO_PLAYER].mode_index)[:, None]
+        if passes_remaining.shape != (batch, 4):
+            raise ValueError("passes_remaining must have shape [batch, 4]")
+        vector[:, -4:] = passes_remaining.to(dtype)
         return vector
 
     def forward(
@@ -460,20 +479,31 @@ class WholeBoardEncoder(nn.Module):
         point_mask: Tensor,
         mode_ids: Tensor,
         casualty_bits: Tensor | None,
+        passes_remaining: Tensor | None = None,
     ) -> Tensor:
-        return self.projection(self.encode_vector(board_codes, point_mask, mode_ids, casualty_bits))
+        return self.projection(self.encode_vector(board_codes, point_mask, mode_ids, casualty_bits, passes_remaining))
 
 
 class PublicActionEncoder(nn.Module):
-    """Project five endpoint/actor numbers into one action history vector."""
+    """Project endpoints, actor and remaining draw moves into a history vector."""
 
     def __init__(self, output_dim: int) -> None:
         super().__init__()
         self.projection = nn.Linear(ACTION_FEATURE_DIM, output_dim)
 
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        key = prefix + "projection.weight"
+        weight = state_dict.get(key)
+        if weight is not None and weight.shape == (self.projection.out_features, 5):
+            # Preserve every old prediction until the countdown column learns.
+            state_dict[key] = torch.cat((weight, weight.new_zeros((weight.shape[0], 1))), dim=1)
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
+
     def forward(self, fields: Tensor, present: Tensor) -> Tensor:
         if fields.ndim < 1 or fields.shape[-1] != ACTION_FEATURE_DIM:
-            raise ValueError("action field tensor must end with 5 coordinate/player values")
+            raise ValueError("action field tensor must end with 6 coordinate/player/countdown values")
         if present.shape != fields.shape[:-1] or present.dtype != torch.bool:
             raise ValueError("action presence mask must match the leading dimensions")
         values = fields.to(self.projection.weight.dtype).masked_fill(~present.unsqueeze(-1), 0)
@@ -500,6 +530,7 @@ class PolicyTensorBatch:
     current_player: Tensor
     mode_ids: Tensor
     valid_indices: Tensor
+    passes_remaining: Tensor
 
 
 def collate_policy_states(
@@ -522,7 +553,7 @@ def collate_policy_states(
     pin_memory = supports_pinned_memory(requested_device)
     # One compact upload for observations, one for all integer indices. The
     # tensor's NumPy view lets whole history blocks fill pinned memory directly.
-    raw_cpu = torch.empty((packed, width + 10), dtype=torch.int16, pin_memory=pin_memory)
+    raw_cpu = torch.empty((packed, width + 14), dtype=torch.int16, pin_memory=pin_memory)
     rows = raw_cpu.numpy()
     offset = 0
     for state, length in zip(states, lengths, strict=True):
@@ -547,7 +578,7 @@ def collate_policy_states(
     fields = torch.zeros((batch * time_steps, 10), dtype=torch.long, device=requested_device)
     # Padding's current-player embedding remains the established PAD index.
     fields[:, -1] = ACTION_PLAYER_PAD
-    fields = fields.index_copy(0, valid_indices, raw[:, width:].long()).view(batch, time_steps, 10)
+    fields = fields.index_copy(0, valid_indices, raw[:, width:width + 10].long()).view(batch, time_steps, 10)
     return PolicyTensorBatch(
         states=states,
         board_codes=raw[:, :spec.point_count].long(),
@@ -555,12 +586,20 @@ def collate_policy_states(
         token_owner=owner_tensor,
         point_mask=torch.ones((batch, spec.point_count), dtype=torch.bool, device=requested_device),
         token_mask=torch.arange(time_steps, device=requested_device)[None, :] < length_tensor[:, None],
-        action_fields=fields[..., :5].float(), action_present=fields[..., 5].bool(),
+        action_fields=_action_fields_with_countdown(fields), action_present=fields[..., 5].bool(),
         no_interaction=fields[..., 6], active_mask=fields[..., 7],
         revealed_mask=fields[..., 8], current_player=fields[..., 9],
         mode_ids=torch.full((batch,), spec.mode_index, dtype=torch.long, device=requested_device),
         valid_indices=valid_indices,
+        passes_remaining=raw[:, width + 10:width + 14].float(),
     )
+
+
+def _action_fields_with_countdown(fields: Tensor) -> Tensor:
+    """Expand the compact replay fields to six public model inputs."""
+    remaining = (NO_CAPTURE_COUNTER_MAX - fields[..., 6:7]).clamp(min=0)
+    return torch.cat((fields[..., :5], remaining), dim=-1).float().masked_fill(
+        ~fields[..., 5:6].bool(), 0)
 
 
 @dataclass(slots=True)
@@ -584,6 +623,20 @@ class _TemporalStateCache:
     context: Tensor
 
 
+class NoCaptureEmbedding(nn.Embedding):
+    """Extend legacy 0..60 counter weights without changing their predictions."""
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        key = prefix + "weight"
+        weight = state_dict.get(key)
+        if (weight is not None and weight.shape == (61, self.embedding_dim)
+                and self.num_embeddings == 71):
+            state_dict[key] = torch.cat((weight, weight[-1:].expand(10, -1)), dim=0)
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
+
+
 class GamePolicyTransformer(nn.Module):
     """Board encoder plus causal transition Transformer and two-stage action head."""
 
@@ -597,7 +650,7 @@ class GamePolicyTransformer(nn.Module):
             self.config.max_sequence_tokens, temporal_dim
         )
         self.mode_embedding = nn.Embedding(3, temporal_dim)
-        self.no_interaction_embedding = nn.Embedding(61, temporal_dim)
+        self.no_interaction_embedding = NoCaptureEmbedding(NO_CAPTURE_COUNTER_MAX + 1, temporal_dim)
         self.active_embedding = nn.Embedding(16, temporal_dim)
         self.revealed_embedding = nn.Embedding(16, temporal_dim)
         self.current_player_embedding = nn.Embedding(5, temporal_dim)
@@ -736,6 +789,13 @@ class GamePolicyTransformer(nn.Module):
                 else self._fixed_kv_store.storage.numel() * self._fixed_kv_store.storage.element_size() / 2**30),
             "encoding/fixed_kv_direct_attention": float(
                 self._fixed_kv_store is not None and self._fixed_kv_store.kernels is not None),
+            "encoding/fixed_kv_allocator_trimmed_gib": float(
+                0 if self._fixed_kv_store is None
+                else self._fixed_kv_store.allocator_trimmed_bytes / 2**30),
+            "encoding/fixed_kv_prefill_padded_tokens": float(
+                0 if self._fixed_kv_store is None else self._fixed_kv_store.prefill_padded_tokens),
+            "encoding/fixed_kv_prefill_max_padded_tokens": float(
+                0 if self._fixed_kv_store is None else self._fixed_kv_store.prefill_max_padded_tokens),
             "encoding/cuda_graph_captures": float(0 if self._fixed_kv_store is None else self._fixed_kv_store.graph_captures),
             "encoding/cuda_graph_replays": float(0 if self._fixed_kv_store is None else self._fixed_kv_store.graph_replays),
             "encoding/history_input_states": float(self._history_input_states),
@@ -971,7 +1031,10 @@ class GamePolicyTransformer(nn.Module):
         self._board_unique_tokens += len(records)
         self._board_encoder_tokens += len(records)
         board_globals = self.board_encoder(
-            codes, point_mask, mode_ids, casualties
+            codes, point_mask, mode_ids, casualties,
+            torch.tensor([record.passes_remaining[:2] + (0, 0) if mode is TrainingMode.TWO_PLAYER
+                          else record.passes_remaining for record in records],
+                         dtype=torch.float32, device=requested_device),
         )
         return board_globals, point_mask
 
@@ -1002,7 +1065,7 @@ class GamePolicyTransformer(nn.Module):
         for index, record in enumerate(records):
             if record.action is not None:
                 fields[index, 0] = torch.tensor(
-                    record.action.as_vector(mode), dtype=torch.float32
+                    record.action.as_vector(mode, no_capture_plies=record.no_interaction_plies), dtype=torch.float32
                 )
                 present[index, 0] = True
         fields = fields.to(self.device, non_blocking=pin_memory)
@@ -1448,7 +1511,7 @@ class GamePolicyTransformer(nn.Module):
                     for position in range(view.window_start, view.window_start + len(view) - 1)
                 )]
             else:
-                record_keys = [(state.mode, record.board_codes, record.known_casualty_bits)
+                record_keys = [(state.mode, record.board_codes, record.known_casualty_bits, record.passes_remaining)
                                for record in state.records]
             for record_key in record_keys:
                 key: object
@@ -1502,6 +1565,7 @@ class GamePolicyTransformer(nn.Module):
                     if flat_casualties is None
                     else flat_casualties.index_select(0, chunk_sources)
                 ),
+                batch.passes_remaining.index_select(0, chunk_sources),
             )
             if not cache_active:
                 # Keep [boards, width] throughout the learner. Unbinding each
@@ -1700,7 +1764,7 @@ class GamePolicyTransformer(nn.Module):
         # Small alignment padding stabilizes kernels without truncating history.
         times = min(self.config.max_sequence_tokens, ((times + 31) // 32) * 32)
         spec = mode_spec(states[0].mode)
-        width = spec.point_count + (MAX_CASUALTY_BITS if self.config.dead_rules_enabled else 0) + 10
+        width = spec.point_count + (MAX_CASUALTY_BITS if self.config.dead_rules_enabled else 0) + 14
         pin = supports_pinned_memory(self.device)
         raw_cpu = torch.zeros((len(groups), times, width), dtype=torch.int16, pin_memory=pin)
         raw_numpy = raw_cpu.numpy()
@@ -1771,9 +1835,10 @@ class GamePolicyTransformer(nn.Module):
             torch.ones((batch * times, spec.point_count), dtype=torch.bool, device=rows.device),
             torch.full((batch * times,), spec.mode_index, dtype=torch.long, device=rows.device),
             flat[:, spec.point_count:width].float() if self.config.dead_rules_enabled else None,
+            flat[:, width + 10:width + 14].float(),
         ).view(batch, times, -1)
         fields = rows[:, :, width:]
-        actions = self.action_encoder(fields[..., :5].float(), fields[..., 5].bool())
+        actions = self.action_encoder(_action_fields_with_countdown(fields), fields[..., 5].bool())
         hidden = (torch.cat((actions, board), dim=-1) + self.position_embedding(positions)
                 + self.mode_embedding(torch.full((batch, 1), spec.mode_index, dtype=torch.long, device=rows.device))
                 + self.no_interaction_embedding(fields[..., 6].long())
@@ -1840,18 +1905,25 @@ class GamePolicyTransformer(nn.Module):
         """
 
         pin_memory = supports_pinned_memory(self.device)
-        destination_masks = torch.zeros(
+        destination_masks = torch.empty(
             (len(states), point_count, point_count),
             dtype=torch.bool,
             pin_memory=pin_memory,
         )
+        source_masks = torch.empty((len(states), point_count), dtype=torch.bool, pin_memory=pin_memory)
         lengths = [len(state.legal_actions) for state in states]
         if not all(lengths):
             raise ValueError("a non-terminal policy state needs a legal action")
         pairs = np.concatenate([state.legal_array for state in states])
         owners = np.repeat(np.arange(len(states)), lengths)
-        destination_masks.numpy()[owners, pairs[:, 0], pairs[:, 1]] = True
-        source_masks = destination_masks.any(dim=-1)
+        # Both masks come from the same sparse legal moves. Avoid launching CPU
+        # tensor workers to zero/reduce the whole dense destination grid at every
+        # online wave; keep both upload sources in pinned memory on CUDA.
+        destinations, sources = destination_masks.numpy(), source_masks.numpy()
+        destinations.fill(False)
+        sources.fill(False)
+        destinations[owners, pairs[:, 0], pairs[:, 1]] = True
+        sources[owners, pairs[:, 0]] = True
         return (
             source_masks.to(self.device, non_blocking=pin_memory),
             destination_masks.to(self.device, non_blocking=pin_memory),
@@ -2123,7 +2195,7 @@ class GamePolicyTransformer(nn.Module):
 
 
 class GameValueTransformer(GamePolicyTransformer):
-    """Independent policy-sized critic with one scalar per player-view history.
+    """Independent critic with team outcome and shared draw-penalty values.
 
     The board and causal history encoders are identical to the policy's.  Only
     the two action queries are replaced; no policy parameters or caches are
@@ -2137,6 +2209,11 @@ class GameValueTransformer(GamePolicyTransformer):
         self.value_head = nn.Linear(self.config.temporal_dim, 1)
         nn.init.zeros_(self.value_head.weight)
         nn.init.zeros_(self.value_head.bias)
+        # A common draw penalty must not flip sign when the opposing team acts.
+        # Both heads share one critic encoder pass, independent of the policy.
+        self.draw_value_head = nn.Linear(self.config.temporal_dim, 1)
+        nn.init.zeros_(self.draw_value_head.weight)
+        nn.init.zeros_(self.draw_value_head.bias)
 
     def initialize_from_policy(self, policy: GamePolicyTransformer) -> None:
         if policy.config != self.config:
@@ -2146,13 +2223,18 @@ class GameValueTransformer(GamePolicyTransformer):
             if not key.startswith(("source_query.", "destination_query."))
         }
         missing, unexpected = self.load_state_dict(backbone, strict=False)
-        if set(missing) != {"value_head.weight", "value_head.bias"} or unexpected:
+        if set(missing) != {"value_head.weight", "value_head.bias",
+                            "draw_value_head.weight", "draw_value_head.bias"} or unexpected:
             raise RuntimeError("policy and critic backbones do not match")
 
-    def forward(self, states: Sequence[PolicyState], *, pack_sequences: bool = False) -> Tensor:
+    def forward(self, states: Sequence[PolicyState], *, pack_sequences: bool = False,
+                return_components: bool = False) -> Tensor:
         features = (self._encode_full(states, pack_prefixes=True)
                     if pack_sequences else self.encode(states))
-        return self.value_head(features.context).squeeze(-1).float()
+        outcome = self.value_head(features.context).squeeze(-1).float()
+        common = self.draw_value_head(features.context).squeeze(-1).float()
+        total = outcome + common
+        return torch.stack((total, common), dim=-1) if return_components else total
 
 
 def _layout_rule_mask() -> Tensor:
@@ -2207,6 +2289,7 @@ class PieceConditionedLayoutPointerDecoder(nn.Module):
     def __init__(self, config: ModelConfig | None = None) -> None:
         super().__init__()
         self.config = config or ModelConfig()
+        self._layout_sampling_graphs = OrderedDict()
         dim = self.config.layout_dim
         self.point_embedding = nn.Embedding(25, dim)
         self.occupant_embedding = nn.Embedding(len(PieceType) + 1, dim)
@@ -2253,7 +2336,16 @@ class PieceConditionedLayoutPointerDecoder(nn.Module):
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
-    def logits(self, occupants: Tensor, steps: Tensor, mode_ids: Tensor) -> Tensor:
+    def __getstate__(self):
+        state = super().__getstate__()
+        state["_layout_sampling_graphs"] = OrderedDict()
+        return state
+
+    def _apply(self, fn, recurse=True):
+        self._layout_sampling_graphs.clear()
+        return super()._apply(fn, recurse=recurse)
+
+    def logits(self, occupants: Tensor, steps: Tensor, mode_ids: Tensor, *, validate_mask: bool = True) -> Tensor:
         batch = occupants.shape[0]
         if occupants.shape != (batch, 25):
             raise ValueError("occupants must have shape [batch, 25]")
@@ -2277,13 +2369,13 @@ class PieceConditionedLayoutPointerDecoder(nn.Module):
             if self.training and self.config.activation_checkpointing:
                 tokens = checkpoint(
                     lambda values, block=layer: block(
-                        values, valid_mask=valid
+                        values, valid_mask=valid, unmasked=True
                     ),
                     tokens,
                     use_reentrant=False,
                 )
             else:
-                tokens = layer(tokens, valid_mask=valid)
+                tokens = layer(tokens, valid_mask=valid, unmasked=True)
         tokens = self.final_norm(tokens)
         global_state, point_states = tokens[:, 0], tokens[:, 1:]
         piece_ids = self.piece_sequence[steps]
@@ -2304,22 +2396,12 @@ class PieceConditionedLayoutPointerDecoder(nn.Module):
             self.key_projection(point_states),
         ) / math.sqrt(self.config.layout_dim)
         legal = (occupants == 0) & self.piece_rule_mask[piece_ids]
-        if not torch.all(legal.any(dim=-1)):
+        if validate_mask and not torch.all(legal.any(dim=-1)):
             raise RuntimeError("layout hard mask has no legal position")
         return scores.masked_fill(~legal, float("-inf"))
 
     @torch.no_grad()
-    def sample_layouts(
-        self,
-        count: int,
-        mode: TrainingMode | str,
-        *,
-        temperature: float = 0.7,
-    ) -> list[LayoutSample]:
-        if count <= 0 or temperature <= 0:
-            raise ValueError("count and temperature must be positive")
-        normalized = normalize_mode(mode)
-        mode_id = mode_spec(normalized).mode_index
+    def _sample_layout_tensors(self, count, mode_id, temperature, uniforms=None):
         occupants = torch.zeros((count, 25), dtype=torch.long, device=self.device)
         choices: list[Tensor] = []
         old_logs: list[Tensor] = []
@@ -2328,16 +2410,66 @@ class PieceConditionedLayoutPointerDecoder(nn.Module):
         for step in range(25):
             steps = torch.full((count,), step, dtype=torch.long, device=self.device)
             log_probs = F.log_softmax(
-                self.logits(occupants, steps, mode_ids) / temperature, dim=-1
+                self.logits(occupants, steps, mode_ids, validate_mask=uniforms is None) / temperature, dim=-1
             )
-            selected = torch.multinomial(log_probs.exp(), 1).squeeze(-1)
-            piece_id = PIECE_TYPE_INDICES[DEPLOYMENT_PIECE_SEQUENCE[step]]
-            occupants[rows, selected] = piece_id + 1
+            selected = (torch.multinomial(log_probs.exp(), 1).squeeze(-1) if uniforms is None else
+                        _categorical_from_uniforms(log_probs.exp(), uniforms[:, step:step+1]).squeeze(-1))
+            occupants.scatter_(1, selected[:, None], (self.piece_sequence[step] + 1).expand(count, 1))
             choices.append(selected)
             old_logs.append(log_probs[rows, selected])
 
-        choice_tensor = torch.stack(choices, dim=1).cpu()
-        log_tensor = torch.stack(old_logs, dim=1).cpu()
+        return torch.stack(choices, dim=1), torch.stack(old_logs, dim=1)
+
+    @torch.no_grad()
+    def _sample_layout_graph(self, count, mode_id, temperature, uniforms):
+        from .cuda_graph_runtime import warmup_stream
+        key = (count, mode_id, temperature,
+               torch.get_autocast_dtype('cuda') if torch.is_autocast_enabled('cuda') else None)
+        entry = self._layout_sampling_graphs.get(key)
+        if entry is None:
+            static_uniforms = uniforms.clone()
+            stream = warmup_stream(self.device)
+            stream.wait_stream(torch.cuda.current_stream(self.device))
+            # Capture the weight casts themselves. Reusing autocast's warm-up
+            # cache would freeze old half-precision weights across Adam steps.
+            with torch.autocast('cuda', enabled=key[-1] is not None,
+                                dtype=key[-1] or torch.bfloat16, cache_enabled=False):
+                with torch.cuda.stream(stream):
+                    for _ in range(2):
+                        self._sample_layout_tensors(count, mode_id, temperature, static_uniforms)
+                torch.cuda.current_stream(self.device).wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                # All randomness is an input; warm-up/capture consume no extra RNG.
+                with torch.cuda.graph(graph):
+                    result = self._sample_layout_tensors(count, mode_id, temperature, static_uniforms)
+            entry = graph, static_uniforms, result
+            self._layout_sampling_graphs[key] = entry
+            while len(self._layout_sampling_graphs) > 4:
+                self._layout_sampling_graphs.popitem(last=False)
+        else:
+            self._layout_sampling_graphs.move_to_end(key)
+        graph, static_uniforms, result = entry
+        static_uniforms.copy_(uniforms)
+        graph.replay()
+        return result
+
+    @torch.no_grad()
+    def sample_layouts(
+        self, count: int, mode: TrainingMode | str, *, temperature: float = 0.7,
+    ) -> list[LayoutSample]:
+        if count <= 0 or temperature <= 0:
+            raise ValueError("count and temperature must be positive")
+        normalized = normalize_mode(mode)
+        mode_id = mode_spec(normalized).mode_index
+        if (self.device.type == 'cuda' and self.config.ppo_sampling_graphs
+                and self.config.dropout == 0. and not self.config.activation_checkpointing):
+            uniforms = torch.rand((count, 25), device=self.device)
+            choices, logs = self._sample_layout_graph(count, mode_id, temperature, uniforms)
+        else:
+            choices, logs = self._sample_layout_tensors(count, mode_id, temperature)
+        choice_tensor, log_tensor = choices.cpu(), logs.cpu()
+        if not torch.isfinite(log_tensor).all():
+            raise ValueError("layout sampler produced nonfinite or illegal choices")
         samples: list[LayoutSample] = []
         for sample_index in range(count):
             samples.append(
@@ -2361,25 +2493,23 @@ class PieceConditionedLayoutPointerDecoder(nn.Module):
         if position_indices.ndim != 2 or position_indices.shape[1] != 25:
             raise ValueError("position_indices must have shape [batch, 25]")
         batch = position_indices.shape[0]
-        occupants = torch.zeros((batch, 25), dtype=torch.long, device=self.device)
-        rows = torch.arange(batch, device=self.device)
-        selected_logs: list[Tensor] = []
-        entropies: list[Tensor] = []
-        for step in range(25):
-            steps = torch.full((batch,), step, dtype=torch.long, device=self.device)
-            log_probs = F.log_softmax(
-                self.logits(occupants, steps, mode_ids) / temperature, dim=-1
-            )
-            probabilities = log_probs.exp()
-            selected = position_indices[:, step]
-            if not torch.isfinite(log_probs[rows, selected]).all():
-                raise ValueError("layout replay contains an illegal position")
-            selected_logs.append(log_probs[rows, selected])
-            entropies.append(-(probabilities * log_probs.nan_to_num()).sum(dim=-1))
-            piece_id = PIECE_TYPE_INDICES[DEPLOYMENT_PIECE_SEQUENCE[step]]
-            occupants = occupants.clone()
-            occupants[rows, selected] = piece_id + 1
-        return torch.stack(selected_logs, dim=1), torch.stack(entropies, dim=1)
+        if mode_ids.shape != (batch,) or batch == 0 or temperature <= 0:
+            raise ValueError("layout replay needs nonempty matching modes and positive temperature")
+        if not (position_indices.sort(dim=1).values == torch.arange(25, device=self.device)).all():
+            raise ValueError("layout replay contains an illegal position")
+        # Teacher forcing: all chosen positions are known. Each prefix remains
+        # a separate 26-token attention sequence, with no access to later moves.
+        placed = F.one_hot(position_indices, 25) * (self.piece_sequence + 1)[None, :, None]
+        prefixes = torch.cat((torch.zeros_like(placed[:, :1]), placed.cumsum(1)[:, :-1]), dim=1)
+        steps = torch.arange(25, device=self.device).repeat(batch)
+        log_probs = F.log_softmax(self.logits(
+            prefixes.reshape(-1, 25), steps, mode_ids.repeat_interleave(25), validate_mask=False
+        ) / temperature, dim=-1)
+        selected = log_probs.gather(1, position_indices.reshape(-1, 1)).reshape(batch, 25)
+        if not torch.isfinite(selected).all():
+            raise ValueError("layout replay contains an illegal position")
+        entropy = -(log_probs.exp() * log_probs.nan_to_num()).sum(-1).reshape(batch, 25)
+        return selected, entropy
 
 
 class ModelBundle(nn.Module):

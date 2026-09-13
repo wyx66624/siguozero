@@ -33,7 +33,7 @@ def prepare(model, states):
     total = int(offsets[-1])
     mode = states[0].mode
     spec = mode_spec(mode)
-    width = spec.point_count + (MAX_CASUALTY_BITS if model.config.dead_rules_enabled else 0) + 10
+    width = spec.point_count + (MAX_CASUALTY_BITS if model.config.dead_rules_enabled else 0) + 14
     pin = supports_pinned_memory(model.device)
     raw_cpu = torch.empty((1, total, width), dtype=torch.int16, pin_memory=pin)
     raw_numpy = raw_cpu.numpy()[0]

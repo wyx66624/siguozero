@@ -1,0 +1,184 @@
+{
+  "date": "2026-09-13",
+  "kind": "bounded_diagnostic_not_strength_evaluation",
+  "device": "NVIDIA GeForce RTX 4090",
+  "torch": "2.11.0+cu130",
+  "matching_workload": {
+    "checkpoint": "/mnt/e/agent/siguozero/runs_local_4090/four_dark/with_dead_rules/checkpoints/latest.pt",
+    "checkpoint_update": 1320,
+    "environment_steps": 98304,
+    "policy_optimizer_steps": 576,
+    "critic_optimizer_steps": 576,
+    "layout_optimizer_steps": 1,
+    "games": 96,
+    "config_sha256": "2cbc5bb8fc0a6c13b2a4d2fe4961e9c1fa51ebe6aa7cbe17339403d658465245",
+    "benchmark_sha256": "d5c334735bae8f4b7ee075c58d2bc7539eb40bbfa9213ab0788dc1a8c9ca2423"
+  },
+  "source_hashes_match": true,
+  "checkpoint_read_only_in_all_trials": true,
+  "order": [
+    "off",
+    "on",
+    "on",
+    "off"
+  ],
+  "trials": [
+    {
+      "adaptive": false,
+      "repeat": false,
+      "raw_result": "docs/benchmarks/adaptive_lr_off_4090_20260913.json",
+      "wall_seconds": 99.1211628519959,
+      "probe_seconds": 0,
+      "policy_seconds": 33.5748798459972,
+      "critic_seconds": 30.443884911001078,
+      "rollout_seconds": 30.97751778399106,
+      "layout_seconds": 2.5974833860091167,
+      "peak_allocated_gib": 13.89186143875122,
+      "peak_reserved_gib": 13.96484375,
+      "actual_policy_lr": 0.000009969448032682107,
+      "final_kl": null,
+      "training_mean_kl": 0.009390209266484817,
+      "lr_reason": null,
+      "history": {
+        "update": 1321,
+        "samples": 98304,
+        "mean_tokens": 225.0326944986979,
+        "max_tokens": 935,
+        "window_limit_fraction": 0
+      }
+    },
+    {
+      "adaptive": true,
+      "repeat": false,
+      "raw_result": "docs/benchmarks/adaptive_lr_on_4090_20260913.json",
+      "wall_seconds": 106.89663161699718,
+      "probe_seconds": 0.16915830000652932,
+      "policy_seconds": 36.77053595300822,
+      "critic_seconds": 32.85227039999154,
+      "rollout_seconds": 33.25086040998576,
+      "layout_seconds": 2.6120951409975532,
+      "peak_allocated_gib": 13.89186143875122,
+      "peak_reserved_gib": 13.96484375,
+      "actual_policy_lr": 0.000009969448032682107,
+      "final_kl": 0.01609526202082634,
+      "training_mean_kl": 0.009154992064420893,
+      "lr_reason": "clip_guard",
+      "history": {
+        "update": 1321,
+        "samples": 98304,
+        "mean_tokens": 225.0326944986979,
+        "max_tokens": 935,
+        "window_limit_fraction": 0
+      }
+    },
+    {
+      "adaptive": true,
+      "repeat": true,
+      "raw_result": "docs/benchmarks/adaptive_lr_on_repeat_4090_20260913.json",
+      "wall_seconds": 106.6646624510031,
+      "probe_seconds": 0.1648432890069671,
+      "policy_seconds": 36.26662495700293,
+      "critic_seconds": 32.67149315000279,
+      "rollout_seconds": 33.549441134993685,
+      "layout_seconds": 2.6792649929993786,
+      "peak_allocated_gib": 13.89186143875122,
+      "peak_reserved_gib": 13.96484375,
+      "actual_policy_lr": 0.000009969448032682107,
+      "final_kl": 0.01547553576529026,
+      "training_mean_kl": 0.00947497782726714,
+      "lr_reason": "clip_guard",
+      "history": {
+        "update": 1321,
+        "samples": 98304,
+        "mean_tokens": 225.0326944986979,
+        "max_tokens": 935,
+        "window_limit_fraction": 0
+      }
+    },
+    {
+      "adaptive": false,
+      "repeat": true,
+      "raw_result": "docs/benchmarks/adaptive_lr_off_repeat_4090_20260913.json",
+      "wall_seconds": 105.4632697180059,
+      "probe_seconds": 0,
+      "policy_seconds": 36.24840980800218,
+      "critic_seconds": 32.73865647499042,
+      "rollout_seconds": 32.479155067005195,
+      "layout_seconds": 2.6165096769982483,
+      "peak_allocated_gib": 13.89186143875122,
+      "peak_reserved_gib": 13.96484375,
+      "actual_policy_lr": 0.000009969448032682107,
+      "final_kl": null,
+      "training_mean_kl": 0.00911907308725151,
+      "lr_reason": null,
+      "history": {
+        "update": 1321,
+        "samples": 98304,
+        "mean_tokens": 225.0326944986979,
+        "max_tokens": 935,
+        "window_limit_fraction": 0
+      }
+    }
+  ],
+  "summary": {
+    "disabled_mean_seconds": 102.2922162850009,
+    "enabled_mean_seconds": 106.78064703400014,
+    "enabled_wall_ratio": 1.0438785169782012,
+    "first_pair_wall_ratio": 1.078444083395302,
+    "reverse_pair_wall_ratio": 1.011391574869711,
+    "direct_probe_mean_seconds": 0.1670007945067482,
+    "peak_allocated_unchanged": true
+  },
+  "limitations": [
+    "One complete update per trial, only two trials per variant; insufficient for a precise long-run overhead estimate.",
+    "PPO early stopping disabled for these diagnostics only so both variants execute three complete actor and critic epochs; live training retains early stopping.",
+    "Four runs restore the same checkpoint, pool and RNG; CUDA numerical results need not be bitwise identical.",
+    "Measured end-to-end difference includes phase timing variation outside the new final probe; do not present only probe duration as the total overhead.",
+    "No evaluation, checkpoint saving or learning-strength comparison in the timed interval; not a full sliding-window benchmark."
+  ],
+  "validation": {
+    "python_regression_tests_run": 115,
+    "python_regression_skipped": 5,
+    "python_regression_failed": 0,
+    "final_lr_tests_rerun": 9,
+    "final_lr_tests_failed": 0,
+    "javascript_tests_passed": 33,
+    "coverage": [
+      "Repeated upper/lower bound hits, hidden multiplier saturation, cooldown and recovery guards",
+      "Controller checkpoint restore and legacy migration",
+      "Final probe math, unequal-rank weighted reduction, unchanged weights/gradients/RNG",
+      "One feedback per actual PPO update; adaptive-off omits probe and retains hard bounds",
+      "Dashboard missing metrics, boundaries and escaping"
+    ]
+  },
+  "live_resume_validation": {
+    "verified_at": "2026-09-13T09:12:00.571Z",
+    "status": "running",
+    "phase": "ppo_trajectory_collection",
+    "update": 1322,
+    "environment_steps": 129957888,
+    "metrics": {
+      "optimizer/policy_lr": 0.00000996939101178596,
+      "optimizer/policy_lr_next": 0.000009969333937893748,
+      "optimizer/policy_lr_min": 0.000001,
+      "optimizer/policy_lr_max": 0.00002,
+      "optimizer/critic_lr": 0.00000996939101178596,
+      "optimizer/lr_reason": "early_stop",
+      "optimizer/lr_direction": 0,
+      "optimizer/lr_stable_count": 0,
+      "optimizer/lr_cooldown": 0,
+      "optimizer/policy_early_stopped": 1,
+      "optimizer/policy_steps": 261,
+      "policy/final_probe_samples": 2048,
+      "policy/final_kl": 0.010510692372918129,
+      "policy/final_kl_ema": 0.011102819070219995,
+      "policy/final_clip_fraction": 0.11767578125,
+      "timing/lr_probe_seconds": 0.2542898239917122,
+      "timing/update_seconds": 67.3555312739918
+    },
+    "http_status": 200,
+    "static_http_status": 200,
+    "live_dashboard_render_passed": true,
+    "visual_browser_inspection": false
+  }
+}

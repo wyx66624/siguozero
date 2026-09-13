@@ -40,7 +40,7 @@ class WholeBoardEncoderTests(unittest.TestCase):
                         lambda module, args: seen.append(tuple(args[0].shape)))
                     output = encoder(batch.board_codes, batch.point_mask, batch.mode_ids, batch.casualty_bits)
                     handle.remove()
-                    width = MAX_BOARD_POINTS * BOARD_CODE_VOCAB_SIZE + 3 + (75 if dead_rules else 0)
+                    width = MAX_BOARD_POINTS * BOARD_CODE_VOCAB_SIZE + 3 + (75 if dead_rules else 0) + 4
                     self.assertEqual(seen, [(1, width)])
                     self.assertEqual(output.shape, (1, config.board_dim))
                     self.assertTrue(torch.isfinite(output).all())
@@ -58,6 +58,7 @@ class WholeBoardEncoderTests(unittest.TestCase):
             expected[row, first] = 1
             expected[row, BOARD_CODE_VOCAB_SIZE + second] = 1
             expected[row, encoder.board_feature_dim + row] = 1
+        expected[:, -4:] = 4
         torch.testing.assert_close(vector, expected)
         padded_codes = torch.nn.functional.pad(codes, (0, 126), value=BOARD_PAD_CODE)
         padded_mask = torch.nn.functional.pad(mask, (0, 126), value=False)
@@ -78,7 +79,7 @@ class WholeBoardEncoderTests(unittest.TestCase):
         dead = torch.zeros(1, 75)
         dead[0, 7] = 1
         vector = enabled.encode_vector(codes, mask, modes, dead)
-        torch.testing.assert_close(vector[:, -75:], dead)
+        torch.testing.assert_close(vector[:, -79:-4], dead)
         with self.assertRaisesRegex(ValueError, "absent"):
             disabled(codes, mask, modes, dead)
         with self.assertRaisesRegex(ValueError, "casualty_bits"):

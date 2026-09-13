@@ -1,5 +1,11 @@
 # 四国军棋 PPO、独立价值模型与 RTX 4090 显存实测
 
+后半程独立的 20% 冻结对手与 20% 冻结队友、各席位学习归属和内存优化见[历史对手、队友训练与评测](historical_opponents_zh.md)。
+
+revision 24：和棋训练奖励为 **-0.15**，动作输入增为六维；Critic 新增共同和棋惩罚
+价值头，和棋分量不随下一玩家队伍翻转。当前实现与格式 6/7 → 8 迁移说明见
+[和棋负奖励与步骤倒计时](draw_penalty_countdown_zh.md)。以下参数和计时为标注版本的历史记录。
+
 2026-09-11 补充：数组历史、批量动作损失、固定席位 KV 及 CUDA Graph 已默认启用，
 模型结构及检查点格式保持兼容。同检查点 4090 完整训练轮从 56.05 秒降至 19.16 秒，
 详见[数据路径优化与验证](ppo_pipeline_optimization_zh.md)。下文较早计时保留为历史基线。
@@ -62,13 +68,16 @@ main 可训练参数合计 **89,825,411**，加冻结 Layout 共 **107,117,699**
 与当前行动者同队时为 +1，异队时为 -1；终局令 `d_t=0`，其他情况为 1：
 
 ```text
-delta_t = r_t + gamma * d_t * sigma_t * V_old(h_next) - V_old(h_t)
-A_t     = delta_t + gamma * lambda * d_t * sigma_t * A_next
-R_t     = A_t + V_old(h_t)
+deltaZ = rZ + gamma * d * sigma * Z_next - Z
+deltaC = rC + gamma * d * C_next - C
+AZ = deltaZ + gamma * lambda * d * sigma * AZ_next
+AC = deltaC + gamma * lambda * d * AC_next
+A = AZ + AC; V = Z + C
 ```
 
 这样可以处理玩家出局后跳过座位的情况，不能机械地每步乘 -1。终局奖励为
-胜 +1、和 0、负 -1，仍没有人为中间奖励。采集批次结束不算终局；配置的
+胜 +1、和 -0.15、负 -1，仍没有人为中间奖励。胜负分量为 Z，共同和棋惩罚分量为 C，
+两者各自计算 clipped value loss，使用同一个 Critic 编码器前向。采集批次结束不算终局；配置的
 `max_game_plies` 仍按现有裁判规则判为和棋。
 
 Policy 使用 PPO clipped objective 和熵项，以相对采样旧策略的近似 KL 提前停止。
@@ -77,6 +86,9 @@ clip 都是 0.2，value coefficient 为 0.5；两者学习率默认 1e-4，分�
 3 个 epoch。每个 epoch 内有多个优化器小批，各小批由 microbatch 梯度累积
 组成；扩大采样批不会同步降低优化器更新频率。Critic 不参与 Policy 的反传，
 价值目标也不会随着本轮 Critic 更新而重算。
+
+本地 4090 覆盖上述策略裁剪默认值，启用[阶段与优势自适应上界](adaptive_clipping_and_resume_zh.md)，
+在预算 1/3、1/2、3/4 等节点间平滑收窄。Critic 的 0.2 value clip 保留原值。
 
 **本次替换的是行棋优势估计。** 独立的 25 步布阵模型继续根据完整对局的真实
 终局结果做已有的 clipped terminal-return 更新；布阵训练没有新增模拟分支。
@@ -145,9 +157,9 @@ NUM_GPUS=4 \
 
 脚本默认使用 `/root/anaconda3/envs/siguozero/bin/python`，可通过 `PYTHON_BIN`
 覆盖。输出进入 `runs_four_player_ppo_128_3b/<mode>/<dead_rule_variant>`。
-默认仅在每 5000 万环境步的评测前后保存模型和完整续训状态，然后与此前最优旧版本
-对弈 100 局；平时及退出时不保存。首次比较基线先留在 CPU 内存，到首次评测再写盘。
-中途停止从最近评测保存点恢复，首次评测前没有可恢复快照。保存与比较规则详见
+当前本地配置每 1000 万环境步保存完整续训状态，正常停止时也保存。前半程每 5000 万步
+与此前最优版本对弈 100 局；从 15 亿步起取消冠军比较，仍每 5000 万步评测固定历史对手集。
+评测前后保存完整状态，并保留该轮推理快照；评测结果不阻止继续使用最新模型。保存与比较规则详见
 [自动最优模型选择](best_model_selection_zh.md)。
 `--transition-batch` 是 `--anchor-batch` 的别名，PPO 的单位是实际动作；
 `--target-environment-plies` 设置累计训练环境交互目标，含采样对局和实际模拟分支，
@@ -193,8 +205,9 @@ PPO 的 `rollout/root_candidates` 与 `rollout/terminal_continuations` 应为零
 [序列训练优化与预算报告](four_player_ppo_optimization_zh.md)中，
 同一批真实样本的历史反传约快 10.4 倍。但新预算是 30 亿环境交互步，按短基准
 外推训练本体约需 2.5～4.2 年连续运行，80% 可用率约 3.1～5.2 个日历年；
-自动选优现为每 5000 万步 100 局，30 亿步共 6000 局；旧 1.5 万局串行评测的
-7 天估计已失效，最新并行评测条件估算见[时间重估](four_player_ppo_eta_budget_zh.md)。旧百万步预算的按天排期已失效。
+本地自动选优只在前半程进行，共 29 轮、2900 局；从 15 亿步起为 31 轮固定历史对手评测，
+6 个对手时每轮 2400 局。此前只按冠军比较局数估计的总工期不包含这部分新增评测成本，
+需按实际完整周期重新估算。并行资源条件见[时间重估](four_player_ppo_eta_budget_zh.md)。
 这些不是长期实测或上界。满长窗口大量滑动时，
 前缀复用比例可能降低，需要用实际训练曲线修正。此前独立历史样本路径的
 [时间报告](four_player_ppo_timing_zh.md)仅保留为历史基线。

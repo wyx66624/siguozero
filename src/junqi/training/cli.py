@@ -129,6 +129,18 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
                         help="evaluation saves only for scheduled matches; periodic also saves at update intervals and on exit")
     parser.add_argument("--checkpoint-every", type=int, default=None,
                         help="update interval for the periodic checkpoint policy")
+    parser.add_argument("--checkpoint-interval-environment-plies", type=int, default=None,
+                        help="save every N global environment plies; 0 selects the update interval")
+    parser.add_argument("--adopt-draw-penalty", action="store_true",
+                        help="explicitly adopt the configured draw reward while preserving the complete latest checkpoint")
+    parser.add_argument("--adopt-pass-rule", action="store_true",
+                        help="explicitly resume a pre-evaluation legacy checkpoint with four voluntary passes per player")
+    parser.add_argument("--expand-game-pool", action="store_true",
+                        help="allow a single-rank checkpoint to grow its parallel pool while preserving every saved game and RNG")
+    parser.add_argument("--reset-oom-batch-limits", action="store_true",
+                        help="explicitly retry configured actor/learner batch limits after a memory optimization")
+    parser.add_argument("--adopt-current-draw-rules", action="store_true",
+                        help="resume a pre-evaluation 2000/60 run with unlimited/70 capture rules, preserving training state")
     parser.add_argument("--archive-every", type=int, default=None)
     parser.add_argument("--keep-checkpoint-archives", type=int, default=None)
     parser.add_argument(
@@ -144,8 +156,12 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
                         help="training progress between selections (default: 5 percentage points)")
     parser.add_argument("--arena-interval-environment-plies", type=int, default=None,
                         help="select every N global training environment transitions (four-player default: 50000000)")
+    parser.add_argument("--arena-after-half-interval-environment-plies", type=int, default=None,
+                        help="evaluation interval after half the environment budget; 0 disables the second interval")
+    parser.add_argument("--arena-after-half-historical-only", action=argparse.BooleanOptionalAction, default=None,
+                        help="use only the fixed historical panel after half; keep the latest model regardless of scores")
     parser.add_argument("--arena-max-plies", type=int, default=None,
-                        help="maximum moves per arena game before adjudicating a draw")
+                        help="maximum moves per arena game; 0 disables the cap (default: unlimited)")
     parser.add_argument("--arena-parallel-games", type=int, default=None,
                         help="active arena games per rank (default: 32)")
     parser.add_argument("--arena-inference-batch", dest="arena_inference_batch_size", type=int,
@@ -224,9 +240,12 @@ def main(
     if args.base_game_pool is not None:
         overrides["base_game_pool_size"] = args.base_game_pool
     if args.max_game_plies is not None:
-        overrides["max_game_plies"] = args.max_game_plies
+        overrides["max_game_plies"] = None if args.max_game_plies == 0 else args.max_game_plies
     if args.checkpoint_every is not None:
         overrides["checkpoint_every_updates"] = args.checkpoint_every
+        overrides["checkpoint_interval_environment_plies"] = None
+    if args.checkpoint_interval_environment_plies is not None:
+        overrides["checkpoint_interval_environment_plies"] = args.checkpoint_interval_environment_plies or None
     if args.checkpoint_policy is not None:
         overrides["checkpoint_policy"] = args.checkpoint_policy
     if args.archive_every is not None:
@@ -235,24 +254,33 @@ def main(
         overrides["keep_checkpoint_archives"] = args.keep_checkpoint_archives
     if args.no_model_selection:
         overrides["arena_enabled"] = False
-    if args.arena_interval_environment_plies is not None and (
+    if (args.arena_interval_environment_plies is not None or args.arena_after_half_interval_environment_plies not in (None, 0)
+            or args.arena_after_half_historical_only is True) and (
         args.arena_start_percent is not None or args.arena_interval_percent is not None
     ):
         parser.error("choose environment-step or percentage model selection, not both")
     if args.arena_start_percent is not None or args.arena_interval_percent is not None:
         overrides["arena_interval_environment_plies"] = None
+        overrides["arena_after_half_interval_environment_plies"] = None
+        overrides["arena_after_half_historical_only"] = False
     for name in (
         "arena_games", "arena_start_percent", "arena_interval_percent", "arena_max_plies",
         "arena_interval_environment_plies",
+        "arena_after_half_interval_environment_plies",
+        "arena_after_half_historical_only",
         "arena_parallel_games", "arena_inference_batch_size", "arena_environment_workers",
     ):
         value = getattr(args, name)
         if value is not None:
             overrides[name] = value
+    if args.arena_after_half_interval_environment_plies == 0:
+        overrides["arena_after_half_interval_environment_plies"] = None
     if args.resource_monitor_seconds is not None:
         overrides["resource_monitor_interval_seconds"] = (
             args.resource_monitor_seconds
         )
+    if args.arena_max_plies == 0:
+        overrides["arena_max_plies"] = None
     if args.no_auto_microbatch_fallback:
         overrides["auto_reduce_microbatch_on_oom"] = False
     if args.amp is not None:
@@ -323,6 +351,11 @@ def main(
             auto_resume=not args.no_resume,
             distributed=distributed,
             initialize_from=args.init_from,
+            adopt_current_draw_rules=args.adopt_current_draw_rules,
+            adopt_draw_penalty=args.adopt_draw_penalty,
+            adopt_pass_rule=args.adopt_pass_rule,
+            expand_game_pool=args.expand_game_pool,
+            reset_oom_batch_limits=args.reset_oom_batch_limits,
         )
         trainer.train()
     finally:

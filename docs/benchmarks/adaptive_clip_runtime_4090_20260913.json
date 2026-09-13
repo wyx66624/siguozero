@@ -1,0 +1,29 @@
+{
+  "verified_unix": 1789300911.114936,
+  "status": "running",
+  "update": 1372,
+  "completed_environment_plies": 134873088,
+  "checkpoint_environment_plies": 134676480,
+  "unsaved_environment_plies": 196608,
+  "next_checkpoint_steps": 140000000,
+  "metrics": {
+    "optimizer/learner_graph_fraction": 1.0,
+    "policy/adaptive_clip_enabled": 1.0,
+    "policy/clip_fraction": 0.04132161458333333,
+    "policy/clip_lower": 0.2432612608,
+    "policy/clip_maximum": 0.45,
+    "policy/clip_minimum": 0.1,
+    "policy/clip_progress": 0.044924928,
+    "policy/clip_upper_base": 0.2932612608,
+    "policy/clip_upper_max": 0.43989189119999994,
+    "policy/clip_upper_mean": 0.36667543450991313,
+    "policy/final_kl": 0.015259216539561749,
+    "policy/final_kl_ema": 0.012764683117893598
+  },
+  "tests": {
+    "python_passed": 409,
+    "python_skipped": 8,
+    "frontend_passed": 36,
+    "cuda_scenarios": 24
+  }
+}

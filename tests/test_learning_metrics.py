@@ -8,7 +8,8 @@ from junqi.training.learning_metrics import ppo_signal_metrics, ppo_signal_sums
 
 
 def samples(values, targets):
-    return [SimpleNamespace(old_value=value, value_target=target, advantage=target - value)
+    return [SimpleNamespace(old_value=value, value_target=target, advantage=target - value,
+                            old_draw_value=0., draw_value_target=0.)
             for value, target in zip(values, targets, strict=True)]
 
 

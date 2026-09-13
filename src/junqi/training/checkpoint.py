@@ -21,16 +21,28 @@ from .accelerator import (
 
 # Version 6 uses a five-number coordinate/player action projection and histories
 # without event outcome features. Version 5's action embeddings are incompatible.
-from .checkpoint_format import CHECKPOINT_FORMAT_VERSION
+from .checkpoint_format import CHECKPOINT_FORMAT_VERSION, SUPPORTED_CHECKPOINT_FORMAT_VERSIONS
 
 
 def require_current_checkpoint(payload: dict[str, Any]) -> None:
-    if payload.get("format_version") != CHECKPOINT_FORMAT_VERSION:
+    if payload.get("format_version") not in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS:
         raise ValueError(
             f"unsupported checkpoint format: {payload.get('format_version')!r}; "
-            "the whole-board linear and five-input action architecture requires version 6 weights. "
+            "the whole-board linear action architecture requires version 6, 7, 8 or 9 weights. "
             "Use a new run directory; old board/action encoder weights are incompatible."
         )
+    if payload.get("format_version") in (8, 9):
+        for name in ("policy", "critic", "reference_policy"):
+            weights = payload.get(name) or {}
+            action = weights.get("action_encoder.projection.weight")
+            if action is not None and (action.ndim != 2 or action.shape[1] != 6):
+                raise ValueError("version 8/9 checkpoint requires six action inputs")
+            board = weights.get("board_encoder.projection.weight")
+            if payload["format_version"] == 9 and board is not None:
+                from .encoding import BOARD_CODE_VOCAB_SIZE
+                expected = 129 * BOARD_CODE_VOCAB_SIZE + 3 + (75 if payload["dead_rules_enabled"] else 0) + 4
+                if board.ndim != 2 or board.shape[1] != expected:
+                    raise ValueError("version 9 checkpoint requires four pass inputs on the board encoder")
 
 
 def capture_rng_state(
@@ -159,27 +171,31 @@ class CheckpointManager:
         temporary = self.directory / ".latest.pt.tmp"
         torch.save(payload, temporary)
         os.replace(temporary, self.latest_path)
+        self.write_manifest(payload)
         if archive:
             archive_path = self.directory / f"update_{update:09d}.pt"
             archive_temporary = self.directory / f".{archive_path.name}.tmp"
             torch.save(payload, archive_temporary)
             os.replace(archive_temporary, archive_path)
             self._prune_archives()
+        return self.latest_path
+
+    def write_manifest(self, payload):
+        """Only the primary rank publishes counters read from the full payload."""
+        cumulative = payload.get("trainer_state", {}).get("cumulative", {})
         manifest = {
-            "format_version": CHECKPOINT_FORMAT_VERSION,
+            "format_version": payload["format_version"],
+            "environment_plies": cumulative.get("environment_plies"),
+            "cumulative": cumulative,
+            "saved_at_unix": self.latest_path.stat().st_mtime,
             "latest": self.latest_path.name,
-            "update": update,
-            "mode": mode,
-            "algorithm": algorithm,
-            "dead_rules_enabled": dead_rules_enabled,
-            "reason": reason,
+            **{name: payload.get(name) for name in ("update", "mode", "algorithm", "dead_rules_enabled", "reason")},
         }
         manifest_tmp = self.directory / ".manifest.json.tmp"
         manifest_tmp.write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         os.replace(manifest_tmp, self.directory / "manifest.json")
-        return self.latest_path
 
     def _prune_archives(self) -> None:
         if self.keep_archives <= 0:
@@ -202,6 +218,49 @@ class CheckpointManager:
         )
         require_current_checkpoint(payload)
         return payload
+
+
+def _extend_counter_optimizer_state(optimizer: torch.optim.Optimizer, model: nn.Module) -> None:
+    """Preserve old Adam moments; new input rows/columns have zero moments."""
+    for name, parameter in model.named_parameters():
+        if name not in ("no_interaction_embedding.weight", "action_encoder.projection.weight", "board_encoder.projection.weight"):
+            continue
+        state = optimizer.state.get(parameter, {})
+        for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
+            value = state.get(key)
+            if (name == "no_interaction_embedding.weight" and value is not None and value.shape == (61, parameter.shape[1])
+                    and parameter.shape[0] == 71):
+                state[key] = torch.cat((value, value.new_zeros((10, value.shape[1]))), dim=0)
+            elif (name == "action_encoder.projection.weight" and value is not None
+                  and value.shape == (parameter.shape[0], 5) and parameter.shape[1] == 6):
+                state[key] = torch.cat((value, value.new_zeros((value.shape[0], 1))), dim=1)
+            elif (name == "board_encoder.projection.weight" and value is not None
+                  and value.shape == (parameter.shape[0], parameter.shape[1] - 4)):
+                state[key] = torch.cat((value, value.new_zeros((value.shape[0], 4))), dim=1)
+
+
+def _legacy_critic_state(payload, critic):
+    """Only known pre-v8 checkpoints may omit the shared draw-value head."""
+    weights, optimizer = payload["critic"], payload["critic_optimizer"]
+    if payload["format_version"] not in (6, 7):
+        return weights, optimizer
+    added = [name for name, _ in critic.named_parameters() if name.startswith("draw_value_head.")
+             and name not in weights]
+    if not added:
+        return weights, optimizer
+    if set(added) != {"draw_value_head.weight", "draw_value_head.bias"}:
+        raise RuntimeError("legacy critic contains a partial draw-value head")
+    groups = optimizer["param_groups"]
+    if len(groups) != 1 or len(groups[0]["params"]) + len(added) != len(list(critic.parameters())):
+        raise RuntimeError("legacy critic optimizer parameter order is incompatible")
+    weights = dict(weights)
+    parameters = dict(critic.named_parameters())
+    for name in added:
+        weights[name] = torch.zeros_like(parameters[name], device="cpu")
+    next_id = max(groups[0]["params"], default=-1) + 1
+    optimizer = {**optimizer, "param_groups": [
+        {**groups[0], "params": [*groups[0]["params"], *range(next_id, next_id + len(added))]}]}
+    return weights, optimizer
 
 
 def restore_training_state(
@@ -246,9 +305,12 @@ def restore_training_state(
         reference_policy.load_state_dict(payload["reference_policy"], strict=True)
     reference_layout.load_state_dict(payload["reference_layout"], strict=True)
     policy_optimizer.load_state_dict(payload["policy_optimizer"])
+    _extend_counter_optimizer_state(policy_optimizer, policy)
     layout_optimizer.load_state_dict(payload["layout_optimizer"])
     if critic is not None and critic_optimizer is not None:
-        critic.load_state_dict(payload["critic"], strict=True)
-        critic_optimizer.load_state_dict(payload["critic_optimizer"])
+        critic_weights, critic_moments = _legacy_critic_state(payload, critic)
+        critic.load_state_dict(critic_weights, strict=True)
+        critic_optimizer.load_state_dict(critic_moments)
+        _extend_counter_optimizer_state(critic_optimizer, critic)
     restore_rng_state(payload["rng_state"], accelerator_device)
     return int(payload["update"]), dict(payload.get("trainer_state", {}))

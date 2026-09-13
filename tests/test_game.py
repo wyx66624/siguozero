@@ -38,7 +38,7 @@ def flags(player_count: int, *, first_flag_column: int = 2) -> dict[ArmPoint, Pi
 
 def two_config(
     *,
-    draw_plies: int = 60,
+    draw_plies: int = 70,
     max_plies: int | None = None,
     mode: InformationMode = InformationMode.OPEN,
     dead_rules_enabled: bool = True,
@@ -104,8 +104,8 @@ class GameInitializationTests(unittest.TestCase):
         self.assertEqual(len(two.pieces), 50)
         self.assertGreater(len(four.legal_actions()), 0)
         self.assertGreater(len(two.legal_actions()), 0)
-        self.assertEqual(len(four.legal_action_mask()), 5624)
-        self.assertEqual(len(two.legal_action_mask()), 1176)
+        self.assertEqual(len(four.legal_action_mask()), 5625)
+        self.assertEqual(len(two.legal_action_mask()), 1177)
         self.assertEqual(len(four.legal_origin_mask()), 121)
         self.assertEqual(len(two.legal_origin_mask()), 56)
         self.assertEqual(
@@ -346,7 +346,7 @@ class LifecycleAndTrainingTests(unittest.TestCase):
     def test_player_with_no_move_is_eliminated_when_turn_arrives(self) -> None:
         pieces = flags(2)
         pieces[ArmPoint(0, 2, 3)] = Piece(0, PieceType.ENGINEER)
-        game = JunqiGame.from_position(two_config(), pieces)
+        game = JunqiGame.from_position(two_config(), pieces, passes_remaining=(4, 0))
 
         result = game.step((7, 6))
         self.assertEqual(result.eliminated_players, (1,))
@@ -366,19 +366,19 @@ class LifecycleAndTrainingTests(unittest.TestCase):
         self.assertTrue(game.is_terminal)
         self.assertEqual(game.result.winner_team, 0)
 
-    def test_no_interaction_and_max_ply_draws(self) -> None:
+    def test_no_capture_and_explicit_diagnostic_max_ply_draws(self) -> None:
         pieces = flags(2)
         pieces[ArmPoint(0, 2, 3)] = Piece(0, PieceType.ENGINEER)
         pieces[ArmPoint(1, 2, 3)] = Piece(1, PieceType.ENGINEER)
 
         game = JunqiGame.from_position(
-            two_config(draw_plies=60),
+            two_config(),
             pieces,
-            no_interaction_plies=59,
+            no_interaction_plies=69,
         )
         game.step((7, 6))
         self.assertEqual(
-            game.result.reason, TerminationReason.NO_INTERACTION_DRAW
+            game.result.reason, TerminationReason.NO_CAPTURE_DRAW
         )
         self.assertEqual(game.rewards(), (0.0, 0.0))
 
@@ -389,13 +389,13 @@ class LifecycleAndTrainingTests(unittest.TestCase):
         game.step((7, 6))
         self.assertEqual(game.result.reason, TerminationReason.MAX_PLIES_DRAW)
 
-    def test_combat_resets_no_interaction_counter(self) -> None:
+    def test_capture_resets_counter(self) -> None:
         pieces = flags(2)
         pieces[ArmPoint(0, 2, 3)] = Piece(0, PieceType.COMMANDER)
         pieces[ArmPoint(0, 1, 3)] = Piece(1, PieceType.ENGINEER)
         pieces[ArmPoint(1, 2, 3)] = Piece(1, PieceType.COMMANDER)
         game = JunqiGame.from_position(
-            two_config(), pieces, no_interaction_plies=59
+            two_config(), pieces, no_interaction_plies=69
         )
 
         game.step((7, 2))
@@ -411,6 +411,40 @@ class LifecycleAndTrainingTests(unittest.TestCase):
 
         self.assertEqual(game.state_key(), original_key)
         self.assertNotEqual(clone.state_key(), original_key)
+
+    def test_60th_quiet_move_and_2000th_total_move_do_not_draw(self):
+        pieces = flags(2)
+        pieces[ArmPoint(0, 2, 3)] = Piece(0, PieceType.ENGINEER)
+        pieces[ArmPoint(1, 2, 3)] = Piece(1, PieceType.ENGINEER)
+        game = JunqiGame.from_position(two_config(), pieces, ply_count=1999,
+                                       no_interaction_plies=59)
+        game.step((7, 6))
+        self.assertEqual(game.ply_count, 2000)
+        self.assertEqual(game.no_interaction_plies, 60)
+        self.assertFalse(game.is_terminal)
+        for constructor in (JunqiGame.new_two_player, JunqiGame.new_four_player):
+            config = constructor(seed=7).config
+            self.assertEqual(config.no_interaction_draw_plies, 70)
+            self.assertIsNone(config.max_plies)
+
+    def test_capture_includes_attacker_loss_equal_ranks_and_bombs(self):
+        for attacker, defender in (
+            (PieceType.ENGINEER, PieceType.COMMANDER),
+            (PieceType.ENGINEER, PieceType.ENGINEER),
+            (PieceType.BOMB, PieceType.COMMANDER),
+        ):
+            with self.subTest(attacker=attacker, defender=defender):
+                pieces = flags(2)
+                pieces[ArmPoint(0, 2, 3)] = Piece(0, attacker)
+                pieces[ArmPoint(0, 1, 3)] = Piece(1, defender)
+                pieces[ArmPoint(0, 2, 1)] = Piece(0, PieceType.ENGINEER)
+                pieces[ArmPoint(1, 2, 3)] = Piece(1, PieceType.ENGINEER)
+                game = JunqiGame.from_position(two_config(), pieces, no_interaction_plies=69)
+                before = len(game.pieces)
+                game.step((7, 2))
+                self.assertLess(len(game.pieces), before)
+                self.assertEqual(game.no_interaction_plies, 0)
+                self.assertFalse(game.is_terminal)
 
     def test_illegal_and_terminal_actions_raise_clear_errors(self) -> None:
         game = JunqiGame.new_two_player(seed=7, max_plies=1)

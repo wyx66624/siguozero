@@ -20,6 +20,7 @@ from .modes import TrainingMode, mode_spec
 
 _IDENTITIES = count()
 BLOCK_ROWS = 256
+OBSERVATION_METADATA_DIM = 14
 
 
 def new_history_identity() -> int:
@@ -39,7 +40,7 @@ def record_array(record: StateTokenRecord, mode: TrainingMode, dead_rules: bool,
     if len(record.board_codes) != points:
         raise ValueError("history board length does not match its mode")
     width = points + (75 if dead_rules else 0)
-    row = np.empty(width + 10, dtype=np.int16) if out is None else out
+    row = np.empty(width + OBSERVATION_METADATA_DIM, dtype=np.int16) if out is None else out
     row.fill(0)
     row[:points] = record.board_codes
     if dead_rules:
@@ -61,10 +62,18 @@ def record_array(record: StateTokenRecord, mode: TrainingMode, dead_rules: bool,
     elif record.known_casualty_bits is not None:
         raise ValueError("non-dead-rule model must not receive casualty history")
     if record.action is not None:
-        row[width:width + 5] = record.action.as_vector(mode)
+        # The sixth model input is derived from the counter already in this
+        # row; retain the compact replay layout and all legacy histories.
+        row[width:width + 5] = record.action.as_vector(mode)[:5]
     # Scalars precede no tensor construction; int16 represents all fields exactly.
-    row[width + 5:] = (record.action is not None, record.no_interaction_plies,
+    row[width + 5:width + 10] = (record.action is not None, record.no_interaction_plies,
                       record.active_mask, record.revealed_mask, record.current_player)
+    if (len(record.passes_remaining) != 4 or any(
+            type(value) is not int or not 0 <= value <= 4 for value in record.passes_remaining)):
+        raise ValueError("history requires four remaining-pass counts in 0..4")
+    row[width + 10:width + 14] = record.passes_remaining
+    if mode is TrainingMode.TWO_PLAYER:
+        row[width + 12:width + 14] = 0
     return row
 
 
@@ -142,10 +151,14 @@ class HistoryArrayView(Sequence[StateTokenRecord]):
         if row[width + 5]:
             # Serialization/debugging only. Numerical model paths use copy_rows.
             coordinates = _coordinate_codes(self.mode)
-            action = ActionFeatures(coordinates[tuple(row[width:width + 2])],
-                                    coordinates[tuple(row[width + 2:width + 4])], int(row[width + 4]))
+            if not row[width:width + 4].any():
+                action = ActionFeatures(0, 0, int(row[width + 4]))
+            else:
+                action = ActionFeatures(coordinates[tuple(row[width:width + 2])],
+                                        coordinates[tuple(row[width + 2:width + 4])], int(row[width + 4]))
         return StateTokenRecord(tuple(map(int, row[:points])), bits, action,
-                                *map(int, row[width + 6:width + 10]))
+                                *map(int, row[width + 6:width + 10]),
+                                tuple(map(int, row[width + 10:width + 14])))
 
     def __iter__(self) -> Iterator[StateTokenRecord]:
         return (self[index] for index in range(len(self)))

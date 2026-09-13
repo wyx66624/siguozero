@@ -2,7 +2,23 @@
 
 本目录保存四国军棋与二人军棋的规则、棋盘编码、动作编码、可执行训练环境和自博弈方案。
 
-**revision 22 当前四国编码**：棋盘和动作各 128 维，时序 token 256 维，main 32 层、FFN 1024。
+[后半程历史对手、队友训练与评测](historical_opponents_zh.md)：15 亿步后独立启用 20% 历史对手和 20% 历史队友，配合冻结对手评测、回退检查及共享 KV / 批量权重传输。
+
+本地 4090 全程每 5000 万环境步评测一次，从 15 亿步起仅进行历史对手集评测，不再做冠军比较或按结果筛选模型，持续使用后续版本。完整断点每 1000 万步保存，正常停止额外保存，每次评测单独保留快照，详见[评测与保存日程](best_model_selection_zh.md)。
+
+[PPO 阶段与优势自适应裁剪、真实恢复进度](adaptive_clipping_and_resume_zh.md)：ACPO 上界调制、1/3 / 1/2 / 3/4 的平滑收窄、硬限制、CUDA Graph 与正常/异常停止行为。
+
+当前 revision 25：每人每局四次主动跳过，棋盘输入增加四个剩余次数，格式 9 保留旧进度继续训练，见[规则、输入与迁移](pass_action_zh.md)。
+
+此前优化的完整路线见[训练性能优化复盘：瓶颈、实现与验证](training_optimization_review_zh.md)：包括在线环境并行、数据与 GPU 学习优化、长历史限制、实测收益及距离 20 天的差距。
+
+[4090 本轮吞吐优化与剩余工期](throughput_optimization_4090_20260913_zh.md)：固定 PPO 工作量对照、128 局采样、学习图共享显存、完整周期验证及评测成本。
+
+[布局队列与计算优化](layout_queue_optimization_zh.md)说明样本时效、消费上限、紧凑缓冲和批量回放验证。
+[行棋自适应探索熵](adaptive_entropy_zh.md)说明开局与后续阶段的独立反馈、损失接入、断点恢复、监控指标及 4090 短批开销。
+下述工期来自 revision 22 性能基线；后续[规则迁移](draw_rule_migration_zh.md)和[revision 24 奖励与输入修改](draw_penalty_countdown_zh.md)后的工期需重新测量。
+
+**revision 22 四国性能基线**：棋盘和动作各 128 维，时序 token 256 维，main 32 层、FFN 1024。
 缩小模型阶段的参数与历史并行情景见[128＋128 并行训练核算](compact128_parallel_training_eta_zh.md)。
 实现及短轮诊断见[PPO 历史数组、批量学习和固定 KV 优化](ppo_pipeline_optimization_zh.md)：4090 的 2560 步诊断轮约 2.93 倍加速，包含数值、CUDA、分布式恢复验证。
 上一阶段的 4 进程并行和约 70 天测量见[并行环境与学习端优化](ppo_parallel_optimization_zh.md)。
@@ -30,6 +46,8 @@ revision 19 的[统一环境步定义](environment_step_budget_zh.md)：30 亿�
 
 本地运行入口见 [训练监控与 CPU 对弈控制台](local_console_zh.md)：真实进程与心跳、
 完整周期 ETA、固定版本人机对弈、训练快照发布和 WSL 启动方式。
+学习率的上下限、稳定回升、最终策略 KL 检测与断点恢复见
+[PPO 有界动态学习率](adaptive_learning_rate_zh.md)。
 
 建议按以下顺序阅读：
 

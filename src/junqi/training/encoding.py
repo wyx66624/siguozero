@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from ..game import JunqiGame, Observation, ObservedEvent
+from ..game import DEFAULT_NO_CAPTURE_DRAW_PLIES, JunqiGame, Observation, ObservedEvent
 from ..pieces import PieceType
 from .modes import TrainingMode, mode_spec, normalize_mode
 
@@ -17,10 +17,11 @@ EXACT_PIECE_CODE_STRIDE = 32
 BOARD_PAD_CODE = 138
 BOARD_CODE_VOCAB_SIZE = 139
 ACTION_PLAYER_PAD = 4
-ACTION_FEATURE_DIM = 5
+ACTION_FEATURE_DIM = 6
 ACTION_ENCODER_TYPE = "coordinates_player_linear"
 CASUALTY_SLOTS_PER_PLAYER = 25
 MAX_CASUALTY_BITS = 75
+NO_CAPTURE_COUNTER_MAX = DEFAULT_NO_CAPTURE_DRAW_PLIES
 
 OWN_PIECE_CODES: dict[PieceType, int] = {
     PieceType.FLAG: 30,
@@ -150,7 +151,7 @@ def encode_known_casualties(observation: Observation) -> tuple[int, ...]:
 
 @dataclass(frozen=True, slots=True)
 class ActionFeatures:
-    """Only the public endpoints and relative actor; no event outcome fields."""
+    """Public endpoints/actor, combined with the observed draw countdown."""
 
     source: int
     destination: int
@@ -165,15 +166,22 @@ class ActionFeatures:
         """Compact replay representation; point IDs retain the existing rules."""
         return (self.source, self.destination, self.actor)
 
-    def as_vector(self, mode: TrainingMode | str) -> tuple[float, ...]:
-        """Five numeric inputs: source x/y, destination x/y, relative actor."""
+    def as_vector(self, mode: TrainingMode | str, *, no_capture_plies: int = 0) -> tuple[float, ...]:
+        """Six inputs, ending with moves remaining after this recorded action.
+
+        The counter belongs to the post-action observation, already stored in
+        StateTokenRecord. It reveals no outcome of an unplayed candidate move.
+        """
         spec = mode_spec(mode)
         if (isinstance(self.actor, bool) or not isinstance(self.actor, int)
                 or not 0 <= self.actor < spec.player_count):
             raise ValueError("action actor does not belong to its training mode")
         source = action_point_coordinates(self.source, spec.mode)
         destination = action_point_coordinates(self.destination, spec.mode)
-        return (*map(float, source), *map(float, destination), float(self.actor))
+        if (self.source, self.destination) == (0, 0):
+            source = destination = (0, 0)
+        remaining = max(0, NO_CAPTURE_COUNTER_MAX - no_capture_plies)
+        return (*map(float, source), *map(float, destination), float(self.actor), float(remaining))
 
 
 def action_point_coordinates(code: int, mode: TrainingMode | str) -> tuple[int, int]:
@@ -211,6 +219,8 @@ class StateTokenRecord:
     active_mask: int
     revealed_mask: int
     current_player: int
+    # Public, viewer-relative seat order. Two-player records pad the final two slots with 0.
+    passes_remaining: tuple[int, ...] = (4, 4, 4, 4)
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,7 +252,8 @@ def _record_from_observation(
             else None
         ),
         action=action,
-        no_interaction_plies=min(observation.no_interaction_plies, 60),
+        no_interaction_plies=min(observation.no_interaction_plies, NO_CAPTURE_COUNTER_MAX),
+        passes_remaining=observation.passes_remaining + (0,) * (4 - len(observation.passes_remaining)),
         active_mask=_bit_mask(observation.active_players),
         revealed_mask=_bit_mask(observation.revealed_flags),
         current_player=(
@@ -408,6 +419,10 @@ class PlayerHistory:
         if not actions:
             raise ValueError("a non-terminal policy state must have legal actions")
         return PolicyState(self.mode, self.records, actions)
+
+    def as_value_state(self) -> PolicyState:
+        """Observe this seat while another seat acts, without inventing actions."""
+        return PolicyState(self.mode, self.records, ())
 
     def clone(self) -> PlayerHistory:
         if self._array_history is not None:
@@ -596,6 +611,7 @@ def _record_state_dict(record: StateTokenRecord) -> dict[str, Any]:
         "active_mask": record.active_mask,
         "revealed_mask": record.revealed_mask,
         "current_player": record.current_player,
+        "passes_remaining": record.passes_remaining,
     }
 
 
@@ -619,4 +635,6 @@ def _record_from_state_dict(state: Mapping[str, Any]) -> StateTokenRecord:
         active_mask=int(state["active_mask"]),
         revealed_mask=int(state["revealed_mask"]),
         current_player=int(state["current_player"]),
+        passes_remaining=tuple(state.get("passes_remaining", (4, 4, 0, 0)
+                                        if len(state["board_codes"]) == 60 else (4, 4, 4, 4))),
     )

@@ -1,0 +1,184 @@
+{
+  "complete": true,
+  "checked_at": "2026-09-12T06:05:49.8064611Z",
+  "run_id": "four-dark-local",
+  "checked_update": 115,
+  "source_records": 115,
+  "source_totals": {
+    "games": 18386,
+    "wins": 1285,
+    "draws": 15826,
+    "losses": 1275
+  },
+  "outcome_summary": {
+    "available": true,
+    "unit": "games",
+    "perspective": "team_0_2",
+    "totals": {
+      "games": 18386,
+      "wins": 1285,
+      "draws": 15826,
+      "losses": 1275,
+      "win_rate": 0.06989013379745458,
+      "draw_rate": 0.8607636244968998
+    },
+    "expected_games": 18386,
+    "unrecorded_games": 0,
+    "coverage_complete": true,
+    "recorded_updates": 115,
+    "first_update": 1,
+    "last_update": 115,
+    "latest": {
+      "update": 115,
+      "timestamp": 1789192724.5790095,
+      "games": 183,
+      "wins": 16,
+      "draws": 157,
+      "losses": 10,
+      "cumulative_games": 18386
+    },
+    "recent": [
+      {
+        "update": 115,
+        "timestamp": 1789192724.5790095,
+        "games": 183,
+        "wins": 16,
+        "draws": 157,
+        "losses": 10,
+        "cumulative_games": 18386
+      },
+      {
+        "update": 114,
+        "timestamp": 1789192643.5446029,
+        "games": 195,
+        "wins": 13,
+        "draws": 175,
+        "losses": 7,
+        "cumulative_games": 18203
+      },
+      {
+        "update": 113,
+        "timestamp": 1789192562.0913246,
+        "games": 179,
+        "wins": 5,
+        "draws": 166,
+        "losses": 8,
+        "cumulative_games": 18008
+      },
+      {
+        "update": 112,
+        "timestamp": 1789192479.1552117,
+        "games": 180,
+        "wins": 6,
+        "draws": 167,
+        "losses": 7,
+        "cumulative_games": 17829
+      },
+      {
+        "update": 111,
+        "timestamp": 1789192397.0578606,
+        "games": 177,
+        "wins": 7,
+        "draws": 162,
+        "losses": 8,
+        "cumulative_games": 17649
+      },
+      {
+        "update": 110,
+        "timestamp": 1789192316.3978717,
+        "games": 169,
+        "wins": 6,
+        "draws": 155,
+        "losses": 8,
+        "cumulative_games": 17472
+      },
+      {
+        "update": 109,
+        "timestamp": 1789192239.0572765,
+        "games": 175,
+        "wins": 9,
+        "draws": 163,
+        "losses": 3,
+        "cumulative_games": 17303
+      },
+      {
+        "update": 108,
+        "timestamp": 1789192159.3495853,
+        "games": 178,
+        "wins": 5,
+        "draws": 169,
+        "losses": 4,
+        "cumulative_games": 17128
+      },
+      {
+        "update": 107,
+        "timestamp": 1789192082.767602,
+        "games": 180,
+        "wins": 6,
+        "draws": 171,
+        "losses": 3,
+        "cumulative_games": 16950
+      },
+      {
+        "update": 106,
+        "timestamp": 1789192001.0167952,
+        "games": 171,
+        "wins": 4,
+        "draws": 163,
+        "losses": 4,
+        "cumulative_games": 16770
+      },
+      {
+        "update": 105,
+        "timestamp": 1789191928.0919316,
+        "games": 177,
+        "wins": 5,
+        "draws": 169,
+        "losses": 3,
+        "cumulative_games": 16599
+      },
+      {
+        "update": 104,
+        "timestamp": 1789191856.020381,
+        "games": 171,
+        "wins": 6,
+        "draws": 157,
+        "losses": 8,
+        "cumulative_games": 16422
+      }
+    ],
+    "catching_up": false,
+    "source_missing": false
+  },
+  "evaluation": {
+    "rounds": 0,
+    "unavailable_rounds": 0,
+    "totals": {
+      "games": 0,
+      "wins": 0,
+      "draws": 0,
+      "losses": 0
+    },
+    "latest": null,
+    "recent": []
+  },
+  "training_status": "stopped",
+  "training_steps": 11304960,
+  "monitor_health": {
+    "ok": true,
+    "pid": 7320,
+    "gpu_inference": false,
+    "managed_by": "siguozero-monitor.service"
+  },
+  "durable_index_exists": true,
+  "dashboard_asset_verified": true,
+  "tests": {
+    "statistics_passed": 9,
+    "console_regression_passed": 12,
+    "frontend_render_passed": 4
+  },
+  "visual_verification": {
+    "completed": false,
+    "reason": "Browser automation connection unavailable; headless-browser screenshot rejected by automatic approval review (blocked by policy)."
+  }
+}

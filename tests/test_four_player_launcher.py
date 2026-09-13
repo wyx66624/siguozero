@@ -50,7 +50,7 @@ class FourPlayerLauncherTests(unittest.TestCase):
                 self.assertEqual(int(value("--microbatch")), 32)
                 self.assertEqual(int(value("--environment-workers")), 4)
                 self.assertEqual(int(value("--target-environment-plies")), 3_000_000_000)
-                self.assertEqual(value("--checkpoint-policy"), "evaluation")
+                self.assertEqual(value("--checkpoint-policy"), "periodic")
                 self.assertNotIn("--checkpoint-every", args)
                 self.assertEqual("torch.distributed.run" in args, cards > 1)
                 if cards > 1:

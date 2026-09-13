@@ -248,9 +248,9 @@ class PPOTests(unittest.TestCase):
             self.assertEqual(trainer.cumulative["continuation_plies"], 0)
             metrics = json.loads(trainer.logger.latest_path.read_text(encoding="utf-8"))
             self.assertEqual(metrics["ppo/rollout_samples"], 8)
-            self.assertEqual(metrics["ppo/no_advantage_signal"], 1)
-            self.assertEqual(metrics["critic/rollout_explained_variance_defined"], 0)
-            self.assertNotIn("critic/rollout_explained_variance", metrics)
+            self.assertEqual(metrics["ppo/no_advantage_signal"], 0)
+            self.assertLess(metrics["critic/rollout_target_mean"], 0)
+            self.assertGreater(metrics["critic/rollout_nonzero_target_fraction"], 0)
 
 
 if __name__ == "__main__":

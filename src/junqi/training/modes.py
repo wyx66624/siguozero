@@ -73,6 +73,7 @@ def new_game(
     seed: int | None = None,
     max_plies: int | None = None,
     dead_rules_enabled: bool = True,
+    no_capture_draw_plies: int = 70,
 ) -> JunqiGame:
     """Create a rules-engine game whose information mode exactly matches profile."""
 
@@ -83,7 +84,7 @@ def new_game(
             seed=seed,
             information_mode=spec.information_mode,
             dead_rules_enabled=dead_rules_enabled,
-            no_interaction_draw_plies=60,
+            no_interaction_draw_plies=no_capture_draw_plies,
             max_plies=max_plies,
         )
     return JunqiGame.new_two_player(
@@ -91,6 +92,6 @@ def new_game(
         seed=seed,
         information_mode=spec.information_mode,
         dead_rules_enabled=dead_rules_enabled,
-        no_interaction_draw_plies=60,
+        no_interaction_draw_plies=no_capture_draw_plies,
         max_plies=max_plies,
     )

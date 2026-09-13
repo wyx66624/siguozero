@@ -1,9 +1,9 @@
-# RTX 4090 throughput profile, measured separately from the 48-game resume-compatible default.
-# Full configuration snapshot for a NEW run: same model/rules/epochs, larger frozen rollout.
-# See docs/ppo20_optimization_zh.md for measured ETA and schedule changes.
+# Local RTX 4090 profile: 128 games, unchanged 98,304 transitions per update.
+# Use --expand-game-pool when resuming a smaller pool; all saved games are retained.
+# See docs/throughput_optimization_4090_20260913_zh.md for matched-work measurements.
 schema_version: 1
-config_revision: 22
-experiment_name: siguozero_v22_four_player_128_ppo_environment_budget_3b
+config_revision: 24
+experiment_name: siguozero_v24_draw_penalty_countdown
 rules:
   game_modes:
   - two_player
@@ -17,10 +17,11 @@ rules:
   intermediate_reward: 0
   terminal_reward:
     win: 1
-    draw: 0
+    draw: -0.15
     loss: -1
   gamma: 1.0
-  no_interaction_draw_plies: 60
+  no_capture_draw_plies: 70
+  max_passes_per_player: 4
 board_piece_codes:
   empty: 0
   unknown_previous_player: 1
@@ -180,7 +181,7 @@ models:
     architecture: board_encoder_plus_causal_transition_transformer
     action_encoder:
       architecture: coordinates_player_linear
-      input_dim: 5
+      input_dim: 6
       output_dim: 256
       coordinate_system: viewer_relative_board_wide_cartesian
       normalization: none
@@ -193,6 +194,7 @@ models:
       - destination_x
       - destination_y
       - actor
+      - remaining_no_capture_plies
     board_encoder:
       architecture: whole_board_one_hot_linear
       input: player_visible_integer_chain_plus_optional_exact_casualty_prior
@@ -271,8 +273,8 @@ ppo:
   activation_checkpointing: false
   transition_batch: 98304
   target_environment_plies: 3000000000
-  base_game_pool_size: 96
-  actor_inference_batch: 96
+  base_game_pool_size: 128
+  actor_inference_batch: 128
   array_history: true
   fixed_kv: true
   cuda_graphs: true
@@ -286,6 +288,22 @@ ppo:
   deferred_values: true
   pipeline_groups: 2
   fused_optimizer: true
+  # Two bounded learner shapes share scratch memory; optimizer/finite guard stay eager.
+  learner_cuda_graphs: true
+  cuda_memory_fraction: 0.90
+  adaptive_clip:
+    enabled: true
+    minimum: 0.10
+    maximum: 0.45
+    advantage_scale: 0.5
+    # [fraction of environment-step budget, lower epsilon, upper baseline]
+    # Linear interpolation; upper epsilon adds up to 50% for high advantage.
+    schedule:
+      - [0.0, 0.25, 0.30]
+      - [0.3333333333333333, 0.20, 0.25]
+      - [0.50, 0.18, 0.20]
+      - [0.75, 0.15, 0.15]
+      - [1.0, 0.10, 0.10]
 grpo:
   strategy_grouping: sampled_root_candidate_slots
   root_candidate_count: 4
@@ -331,12 +349,25 @@ learner:
     initial: 0.0001
     adaptive: true
     minimum: 1.0e-06
+    maximum: 2.0e-05
+    increase_factor: 1.03
+    decrease_factor: 0.8
+    stable_updates: 5
+    cooldown_updates: 5
+    ema_decay: 0.8
+    probe_samples: 2048
+    recovery_clip_fraction: 0.1
   gradient_norm_clip: 1.0
   entropy_coefficient:
     initial: 0.01
     minimum: 0.005
     maximum: 0.02
+    opening_maximum: 0.04  # opening-only ceiling; resume the existing adaptive coefficient
     adaptive_to_target_entropy: true
+    target_ratio: 0.6  # H / log(number of legal actions), excluding forced moves
+    adaptation_rate: 0.1  # log-coefficient feedback once per completed update
+    ema_decay: 0.9
+    opening_plies: 16  # separate opening and later-play entropy controllers
   kl:
     initial_coefficient: 0.02
     target_per_action: 0.015
@@ -354,9 +385,14 @@ model_selection:
   games: 1000
   four_player:
     interval_environment_plies: 50000000
-    games: 100
-    checkpoint_policy: evaluation
-  max_plies: 2000
+    after_half_interval_environment_plies: 50000000
+    after_half_historical_only: true
+    observational_only: true
+    historical_teammate_fraction: 0.5
+    games: 500
+    checkpoint_policy: periodic
+    checkpoint_interval_environment_plies: 10000000
+  max_plies: null
   seed: 20260910
   temporal_cache_entries: 8
   parallel_games: 32
@@ -386,7 +422,7 @@ runtime:
     four_dark: 32
     double_open: 32
     two_player: 64
-  max_game_plies: 2000
+  max_game_plies: null
   policy_microbatch:
     bootstrap: 16
     main: 8
@@ -397,16 +433,20 @@ runtime:
   learner_length_bucketing: true
   policy_epochs: 3
   layout_update_interval: 1
-  layout_outcomes_per_update: 64
+  # Consume all available fresh outcomes up to this cap, with one Adam update.
+  layout_outcomes_per_update: 2048
+  layout_buffer_capacity: 8192
+  layout_max_behavior_age: 8
+  layout_microbatch_size: 32
   layout_learning_rate: 5.0e-05
   warmup_updates: 250
   reference_refresh_updates: 6250
-  checkpoint_every_updates: 10
+  checkpoint_every_updates: 5
   archive_every_updates: 500
   keep_checkpoint_archives: 10
   metrics_every_updates: 1
   resource_monitor_interval_seconds: 15
-  inference_snapshot_every_updates: 10
+  inference_snapshot_every_updates: 5
   auto_reduce_microbatch_on_oom: true
   minimum_policy_microbatch: 1
 scale_gate:
@@ -419,6 +459,17 @@ scale_gate:
   next_policy_temporal_layers: 32
   next_policy_temporal_d_model: 512
   next_policy_temporal_ffn_dim: 2048
+historical_opponents:
+  enabled: true
+  start_fraction: 0.5
+  training_fraction: 0.2
+  teammate_fraction: 0.2
+  snapshot_fractions: [0.05, 0.10, 0.20, 0.30, 0.40]
+  cohort_games: 1024
+  eval_total_games: 500  # Total across the frozen panel, allocated in four-game rotations.
+  uniform_fraction: 0.05
+  learning_rate: 0.01
+
 compute_budget:
   random_baseline:
     two_player_games: 100

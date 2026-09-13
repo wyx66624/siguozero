@@ -58,7 +58,7 @@ exec "${launcher[@]}" "junqi.training.train_${mode}" \
   --arena-inference-batch "${EVAL_INFERENCE_BATCH_SIZE:-32}" \
   --arena-environment-workers "${EVAL_ENVIRONMENT_WORKERS:-4}" \
   "${budget_args[@]}" \
-  --checkpoint-policy evaluation --archive-every 100 --keep-checkpoint-archives 4 \
+  --checkpoint-policy periodic --archive-every 100 --keep-checkpoint-archives 4 \
   --resource-monitor-seconds 15 \
   --run-dir "${RUN_DIR:-$default_run_dir}" \
   "$@"

@@ -1,8 +1,8 @@
 # 共享训练配置：同时定义 bootstrap/main/extended 三档；实际档位必须由
 # --model-scale 明确选择。正式启动脚本选 main，直接使用 Python CLI 默认 bootstrap。
 schema_version: 1
-config_revision: 22
-experiment_name: siguozero_v22_four_player_128_ppo_environment_budget_3b
+config_revision: 24
+experiment_name: siguozero_v24_draw_penalty_countdown
 
 rules:
   game_modes:
@@ -18,10 +18,11 @@ rules:
   intermediate_reward: 0
   terminal_reward:
     win: 1
-    draw: 0
+    draw: -0.15
     loss: -1
   gamma: 1.0
-  no_interaction_draw_plies: 60
+  no_capture_draw_plies: 70
+  max_passes_per_player: 4
 
 board_piece_codes:
   # 类别 ID 按点位顺序展开为整盘 one-hot 向量，不解释为连续军阶标量。
@@ -191,7 +192,7 @@ models:
     architecture: board_encoder_plus_causal_transition_transformer
     action_encoder:
       architecture: coordinates_player_linear
-      input_dim: 5
+      input_dim: 6
       output_dim: 256
       coordinate_system: viewer_relative_board_wide_cartesian
       normalization: none
@@ -204,6 +205,7 @@ models:
         - destination_x
         - destination_y
         - actor
+        - remaining_no_capture_plies
     board_encoder:
       architecture: whole_board_one_hot_linear
       input: player_visible_integer_chain_plus_optional_exact_casualty_prior
@@ -379,6 +381,10 @@ learner:
     minimum: 0.005
     maximum: 0.02
     adaptive_to_target_entropy: true
+    target_ratio: 0.6
+    adaptation_rate: 0.1
+    ema_decay: 0.9
+    opening_plies: 16
   kl:
     initial_coefficient: 0.02
     target_per_action: 0.015
@@ -400,9 +406,10 @@ model_selection:
   four_player:
     interval_environment_plies: 50000000
     games: 100
-    # 只在评测时保存；首次比较的初始参数先保留在 CPU 内存。
-    checkpoint_policy: evaluation
-  max_plies: 2000
+    # 完整续训断点每 2500 万环境步保存；评测仍为每 5000 万步。
+    checkpoint_policy: periodic
+    checkpoint_interval_environment_plies: 25000000
+  max_plies: null
   seed: 20260910
   temporal_cache_entries: 8
   # 每个 rank 的并发局数、单次推理上限与 CPU 环境 worker 数。
@@ -452,7 +459,7 @@ runtime:
     four_dark: 32
     double_open: 32
     two_player: 64
-  max_game_plies: 2000
+  max_game_plies: null
   # 1001-token BF16 实测安全起点；CLI --microbatch 可按本机复测覆盖。
   policy_microbatch:
     bootstrap: 16
@@ -469,7 +476,7 @@ runtime:
   layout_learning_rate: 5.0e-5
   warmup_updates: 2000
   reference_refresh_updates: 50000
-  checkpoint_every_updates: 10
+  checkpoint_every_updates: 5
   archive_every_updates: 500
   keep_checkpoint_archives: 10
   metrics_every_updates: 1

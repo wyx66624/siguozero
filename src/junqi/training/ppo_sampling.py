@@ -1,5 +1,6 @@
 """Small inference-only graphs for factorized categorical action sampling."""
 import torch
+from .cuda_graph_runtime import warmup_stream
 from torch.nn import functional as F
 
 
@@ -23,7 +24,7 @@ def sample_graph(model, contexts, source_masks, destination_masks, uniforms, tem
     entry = model._ppo_sampling_graphs.get(key)
     if entry is None:
         inputs = [x.clone() for x in (contexts, source_masks, destination_masks, uniforms)]
-        stream = torch.cuda.Stream(device=contexts.device)
+        stream = warmup_stream(contexts.device)
         stream.wait_stream(torch.cuda.current_stream(contexts.device))
         with torch.cuda.stream(stream):
             for _ in range(2):

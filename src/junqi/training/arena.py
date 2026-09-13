@@ -47,17 +47,28 @@ class MatchSettings:
     seed: int = 20260908
     temperature: float = 1.0
     layout_temperature: float = 0.7
-    max_plies: int = 2000
+    max_plies: int | None = None
+    no_capture_draw_plies: int = 70
+    max_passes_per_player: int = 4
     temporal_cache_entries: int = 8
     smoke_test: bool = False
     mode: str = TrainingMode.TWO_PLAYER.value
     parallel_games: int = 32
     inference_batch_size: int = 32
     environment_workers: int = 4
+    historical_teammate_fraction: float = 0.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", normalize_mode(self.mode).value)
-        for name in ("pairs", "max_plies", "temporal_cache_entries", "parallel_games",
+        if (type(self.historical_teammate_fraction) not in (int, float)
+                or self.historical_teammate_fraction not in (0, 0.5)
+                or (self.mode == TrainingMode.TWO_PLAYER.value and self.historical_teammate_fraction)):
+            raise ValueError("historical teammate evaluation requires four-player mode and fraction 0 or 0.5")
+        if type(self.max_passes_per_player) is not int or self.max_passes_per_player != 4:
+            raise ValueError("the current match protocol requires four passes per player")
+        if self.max_plies is not None and (type(self.max_plies) is not int or self.max_plies <= 0):
+            raise ValueError("max_plies must be a positive integer or None")
+        for name in ("pairs", "no_capture_draw_plies", "temporal_cache_entries", "parallel_games",
                      "inference_batch_size", "environment_workers"):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -80,8 +91,8 @@ class MatchSettings:
 
     @property
     def effective_temporal_cache_entries(self) -> int:
-        # Each checkpoint owns half the seats. Retain a few recent prefixes for
-        # each of its live players instead of thrashing an eight-entry cache.
+        # Bound both model caches by concurrency. Mixed allies share these same
+        # limits; they do not allocate a third model or enlarge the KV budget.
         return max(self.temporal_cache_entries,
                    self.parallel_games * (self.games_per_group // 2) * 3)
 
@@ -207,12 +218,16 @@ class _ArenaGame:
         self.game = new_game(
             normalize_mode(settings.mode), setups=spec["setups"], seed=spec["action_seed"],
             max_plies=settings.max_plies,
+            no_capture_draw_plies=settings.no_capture_draw_plies,
             dead_rules_enabled=candidate.policy.config.dead_rules_enabled,
         )
         seats = spec["candidate_seats"]
         self.candidate_team = self.game.team_of(seats[0])
-        if set(seats) != {seat for seat in range(self.game.config.player_count)
-                          if self.game.team_of(seat) == self.candidate_team}:
+        self.candidate_seats = set(seats)
+        team_seats = {seat for seat in range(self.game.config.player_count)
+                      if self.game.team_of(seat) == self.candidate_team}
+        mixed = bool(settings.historical_teammate_fraction and len(seats) == 1)
+        if self.candidate_seats != team_seats and not (mixed and self.candidate_seats < team_seats):
             raise ValueError("candidate must control exactly one complete team")
         # Same-window histories are identical referee records. Only state_for
         # the player to act is passed to a model, preserving private information.
@@ -228,7 +243,7 @@ class _ArenaGame:
         self.actions: list[dict[str, Any]] = []
 
     def observation(self):
-        index = 0 if self.game.team_of(self.game.current_player) == self.candidate_team else 1
+        index = 0 if self.game.current_player in self.candidate_seats else 1
         return index, self.histories[index].state_for(self.game)
 
     def step(self, action: tuple[int, int]) -> None:
@@ -247,7 +262,7 @@ class _ArenaGame:
                   else 1 if game.result.winner_team == self.candidate_team else -1)
         seats = self.spec["candidate_seats"]
         rewards = list(game.rewards())
-        if rewards != [reward if seat in seats else -reward
+        if rewards != [reward if game.team_of(seat) == self.candidate_team else -reward
                        for seat in range(game.config.player_count)]:
             raise ValueError("terminal rewards disagree with team outcome")
         return {
@@ -529,8 +544,10 @@ def run_match(
         try:
             summary = summarize_games([r for part in shards for r in part], settings, alpha=alpha)
             summary.update({
-                "arena_version": ARENA_VERSION, "evaluation_type": protocol.EVALUATION_TYPE,
-                "layout_protocol": protocol.LAYOUT_PROTOCOL,
+                "arena_version": ARENA_VERSION,
+                "evaluation_type": ("balanced_teammate_four_player" if settings.historical_teammate_fraction else protocol.EVALUATION_TYPE),
+                "layout_protocol": ("four_rotations_with_paired_current_and_historical_teammates_v1"
+                                    if settings.historical_teammate_fraction else protocol.LAYOUT_PROTOCOL),
                 "candidate_checkpoint": str(candidate_path), "opponent_checkpoint": str(opponent_path),
                 "candidate_update": candidate.checkpoint_update,
                 "opponent_update": opponent.checkpoint_update,

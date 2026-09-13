@@ -26,13 +26,15 @@ def main():
     parser.add_argument('--run-dir', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--parallel-streams', action='store_true')
+    parser.add_argument('--torch-threads', type=int, default=4)
     args = parser.parse_args()
     lock = open(Path(tempfile.gettempdir()) / 'siguozero-cuda-probe.lock', 'a+b')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    torch.set_num_threads(4)
+    torch.set_num_threads(args.torch_threads)
     torch.manual_seed(177)
     settings = TrainingSettings.from_yaml(args.config, 'four_dark', model_scale='main', overrides={
-        'device': 'cuda', 'arena_enabled': False, 'checkpoint_policy': 'evaluation'})
+        'device': 'cuda', 'arena_enabled': False, 'checkpoint_policy': 'evaluation',
+        'historical_enabled': False, 'arena_after_half_historical_only': False})
     with patch.object(MetricLogger, 'start_resource_monitor'):
         trainer = SelfPlayTrainer(settings, run_directory=args.run_dir, auto_resume=False)
     templates = diverse_states(settings.mode, settings.model, 769, 8)
@@ -42,7 +44,8 @@ def main():
         for j, length in enumerate(range(257 + i * 32, 513 + i * 32, 4)):
             samples.append(PPOSample(replace(state, records=history.view()[:length]),
                 state.legal_actions[0], -4., 0., .1 if j % 2 else -.1, .1 if j % 2 else -.1, 0))
-    result = dict(complete=False, cases=[], samples=len(samples), histories=8)
+    result = dict(complete=False, cases=[], samples=len(samples), histories=8,
+                  torch_threads=torch.get_num_threads(), synthetic_histories=True)
     output = Path(args.output)
     def save():
         output.write_text(json.dumps(result, indent=2) + '\n')

@@ -32,16 +32,27 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument('--config', default='configs/bootstrap.yaml')
     parser.add_argument('--microbatch', type=int)
+    parser.add_argument('--torch-threads', type=int, default=4)
     parser.add_argument('--environment-workers', type=int)
+    parser.add_argument('--samples-per-sequence', type=int)
+    parser.add_argument('--layout-microbatch', type=int)
     parser.add_argument('--tensor-learner', action='store_true')
     parser.add_argument('--varlen-attention', action='store_true')
     parser.add_argument('--low-precision-residual', action='store_true')
     parser.add_argument('--compile-mode', default=None)
+    parser.add_argument('--adaptive-learning-rate', choices=('on', 'off'), default=None,
+                        help='compare final-policy KL probe overhead on identical optimizer work')
     parser.add_argument('--deferred-values', action='store_true')
     parser.add_argument('--pipeline-groups', type=int)
     parser.add_argument('--fused-optimizer', action='store_true')
+    parser.add_argument('--learner-graphs', choices=('on', 'off'))
+    parser.add_argument('--adaptive-clip', choices=('on', 'off'))
     parser.add_argument('--sampling-graphs', action='store_true')
+    parser.add_argument('--full-policy-epochs', action='store_true',
+                        help='benchmark only: hold optimizer work fixed by disabling KL early exit')
     parser.add_argument("--moves-per-game", type=int, default=64)
+    parser.add_argument('--transitions-per-update', type=int,
+                        help='hold the exact global update size fixed for arbitrary pool sizes')
     parser.add_argument("--updates", type=int, default=1)
     parser.add_argument("--games", type=int,
                         help="optionally expand the saved pool in memory; preserves every saved game")
@@ -50,7 +61,9 @@ def main():
         parser.error("moves-per-game, updates and games must be positive")
     lock = open(Path(tempfile.gettempdir()) / "siguozero-cuda-probe.lock", "a+b")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    torch.set_num_threads(4)
+    if args.torch_threads <= 0:
+        parser.error('torch-threads must be positive')
+    torch.set_num_threads(args.torch_threads)
     torch.cuda.set_per_process_memory_fraction(.90)
     checkpoint = Path(args.checkpoint).resolve()
     before = checkpoint.stat()
@@ -59,8 +72,17 @@ def main():
     pool = state.get("base_game_pool")
     if pool is None:
         pool = state["distributed"]["rank_states"][0]["base_game_pool"]
+    if any(slot.get('opponent_id') is not None or slot.get('teammate_id') is not None
+           for slot in pool['slots']):
+        parser.error('this bounded probe requires a pre-activation self-play pool')
+    # The isolated probe has no historical snapshot files. Before activation,
+    # remove only this inactive controller metadata from the in-memory payload.
+    pool.pop('historical_opponents', None)
     saved_games, update = int(pool["pool_size"]), int(payload["update"])
     games = args.games or saved_games
+    transitions = args.transitions_per_update or games * args.moves_per_game
+    if transitions <= 0:
+        parser.error('transitions-per-update must be positive')
     if games < saved_games:
         parser.error("this probe only expands a saved pool; it never discards saved games")
     if "distributed" in state and len(state["distributed"]["rank_states"]) != 1:
@@ -80,20 +102,35 @@ def main():
     config_hash = hashlib.sha256((root / args.config).read_bytes()).hexdigest()
     overrides = {
         "device": "cuda", "base_game_pool_size": games,
-        "actor_inference_batch": games, "anchor_batch": games * args.moves_per_game,
+        "actor_inference_batch": games, "anchor_batch": transitions,
         "ppo_minibatch_samples": 512,
         "arena_enabled": False, "checkpoint_policy": "evaluation",
+        "inference_snapshot_every_updates": 0,
+        "historical_enabled": False,
+        "arena_after_half_historical_only": False,
     }
+    if args.full_policy_epochs:
+        overrides.update(early_stop_kl_multiple=1e12, early_stop_clip_fraction=1.0)
+    if args.adaptive_learning_rate is not None:
+        overrides['adaptive_learning_rate'] = args.adaptive_learning_rate == 'on'
+    if args.adaptive_clip is not None:
+        overrides['ppo_adaptive_clip'] = args.adaptive_clip == 'on'
     if args.microbatch is not None:
         overrides['policy_microbatch'] = args.microbatch
     if args.environment_workers is not None:
         overrides['rollout_environment_workers'] = args.environment_workers
+    if args.samples_per_sequence is not None:
+        overrides['ppo_max_samples_per_sequence'] = args.samples_per_sequence
+    if args.layout_microbatch is not None:
+        overrides['layout_microbatch_size'] = args.layout_microbatch
     if args.deferred_values:
         overrides['ppo_deferred_values'] = True
     if args.pipeline_groups is not None:
         overrides['ppo_pipeline_groups'] = args.pipeline_groups
     if args.fused_optimizer:
         overrides['ppo_fused_optimizer'] = True
+    if args.learner_graphs is not None:
+        overrides['ppo_learner_cuda_graphs'] = args.learner_graphs == 'on'
     settings = TrainingSettings.from_yaml(root / args.config, "four_dark", model_scale="main", overrides=overrides)
     if args.tensor_learner or args.varlen_attention or args.low_precision_residual or args.sampling_graphs or args.compile_mode is not None:
         from dataclasses import replace
@@ -106,6 +143,7 @@ def main():
     # The real resume path consumes the checkpoint in memory. No model file is
     # copied into or mutated inside the temporary benchmark run directory.
     with patch.object(CheckpointManager, "load_latest", return_value=payload), \
+            patch.object(CheckpointManager, "write_manifest"), \
             patch.object(MetricLogger, "start_resource_monitor"):
         trainer = SelfPlayTrainer(settings, run_directory=args.run_dir)
     del payload, state, pool
@@ -173,12 +211,14 @@ def main():
     steps = trainer.cumulative["environment_plies"] - counts_before["environment_plies"]
     result = dict(
         device=torch.cuda.get_device_name(), torch=torch.__version__, imported_source_root=str(source_root),
+        torch_threads=torch.get_num_threads(),
         source_sha256=source_hashes, source_hashes_captured='before_trainer_construction',
         benchmark_sha256=benchmark_hash,
         config_sha256=config_hash,
         settings=settings.serializable(),
         checkpoint=str(checkpoint), checkpoint_update=update, completed_update=trainer.update,
         games=games, saved_games=saved_games, added_games_before_timing=games - saved_games,
+        transitions_per_update=transitions,
         requested_updates=args.updates, environment_steps=steps, model_config=asdict(settings.model),
         policy_epochs=settings.policy_epochs, critic_epochs=settings.critic_epochs,
         ppo_minibatch_samples=settings.ppo_minibatch_samples,
@@ -209,7 +249,7 @@ def main():
         complete=True,
     )
     assert result["checkpoint_stat_unchanged"]
-    assert steps == games * args.moves_per_game * args.updates
+    assert steps == transitions * args.updates
     assert trainer.update == update + args.updates and len(records) == args.updates
     assert not list(trainer.run_directory.rglob("*.pt"))
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

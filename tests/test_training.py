@@ -39,8 +39,8 @@ class ObservationEncodingTests(unittest.TestCase):
             self.assertEqual(policy.board_encoder.projection.out_features, 128)
             self.assertEqual(policy.action_encoder.projection.out_features, 128)
             self.assertEqual(critic.value_head.in_features, 256)
-            self.assertEqual(sum(p.numel() for p in policy.parameters()), 36_324_226)
-            self.assertEqual(sum(p.numel() for p in critic.parameters()), 36_208_897)
+            self.assertEqual(sum(p.numel() for p in policy.parameters()), 36_327_426)
+            self.assertEqual(sum(p.numel() for p in critic.parameters()), 36_212_354)
         original = TrainingSettings.from_yaml(config_path, TrainingMode.TWO_PLAYER, model_scale="main")
         self.assertEqual((original.model.board_dim, original.model.temporal_dim,
                           original.model.temporal_ffn_dim), (256, 512, 2048))

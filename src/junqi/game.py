@@ -12,6 +12,7 @@ from typing import TypeAlias
 
 from .board import (
     Action,
+    PASS_ACTION,
     ArmPoint,
     BoardEncodingError,
     CenterPoint,
@@ -69,6 +70,7 @@ class InformationMode(str, Enum):
 
 
 class CombatOutcome(str, Enum):
+    PASS = "pass"
     MOVE = "move"
     ATTACKER_WINS = "attacker_wins"
     DEFENDER_WINS = "defender_wins"
@@ -77,8 +79,14 @@ class CombatOutcome(str, Enum):
 
 class TerminationReason(str, Enum):
     TEAM_ELIMINATED = "team_eliminated"
+    NO_CAPTURE_DRAW = "no_capture_draw"
+    # Retain the old value for historical game/checkpoint deserialization.
     NO_INTERACTION_DRAW = "no_interaction_draw"
     MAX_PLIES_DRAW = "max_plies_draw"
+
+
+DEFAULT_NO_CAPTURE_DRAW_PLIES = 70
+MAX_PASSES_PER_PLAYER = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +95,9 @@ class GameConfig:
     information_mode: InformationMode | None = None
     dead_rules_enabled: bool = True
     first_player: int = 0
-    no_interaction_draw_plies: int = 60
+    # Legacy storage/constructor name retained for saved GameConfig objects.
+    # The counter measures moves without a removed piece, across all seats.
+    no_interaction_draw_plies: int = DEFAULT_NO_CAPTURE_DRAW_PLIES
     max_plies: int | None = None
 
     def __post_init__(self) -> None:
@@ -189,8 +199,8 @@ class PublicEvent:
 
     ply: int
     actor: int
-    start: PhysicalPoint
-    end: PhysicalPoint
+    start: PhysicalPoint | None
+    end: PhysicalPoint | None
     was_attack: bool
     combat: CombatOutcome
     flag_captured_owner: int | None
@@ -230,13 +240,14 @@ class Observation:
     ply_count: int
     no_interaction_plies: int
     result: GameResult | None
+    passes_remaining: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class StepResult:
     player: int
     action: Action
-    attacker: Piece
+    attacker: Piece | None
     defender: Piece | None
     combat: CombatOutcome
     flag_captured_owner: int | None
@@ -284,7 +295,7 @@ class JunqiGame:
         information_mode: InformationMode = InformationMode.FOUR_DARK,
         dead_rules_enabled: bool = True,
         first_player: FourPlayerSeat = FourPlayerSeat.SOUTH,
-        no_interaction_draw_plies: int = 60,
+        no_interaction_draw_plies: int = DEFAULT_NO_CAPTURE_DRAW_PLIES,
         max_plies: int | None = None,
     ) -> JunqiGame:
         config = GameConfig(
@@ -306,7 +317,7 @@ class JunqiGame:
         information_mode: InformationMode = InformationMode.DARK,
         dead_rules_enabled: bool = True,
         first_player: TwoPlayerSeat = TwoPlayerSeat.SOUTH,
-        no_interaction_draw_plies: int = 60,
+        no_interaction_draw_plies: int = DEFAULT_NO_CAPTURE_DRAW_PLIES,
         max_plies: int | None = None,
     ) -> JunqiGame:
         config = GameConfig(
@@ -343,6 +354,7 @@ class JunqiGame:
         ]
         | None = None,
         public_history: Sequence[PublicEvent] = (),
+        passes_remaining: Sequence[int] | None = None,
     ) -> JunqiGame:
         """Restore a validated mid-game referee position.
 
@@ -361,6 +373,22 @@ class JunqiGame:
         if not all(isinstance(event, PublicEvent) for event in public_history):
             raise GameRuleError("public history must contain PublicEvent values")
         game._public_history = list(public_history)
+        recorded_passes = Counter(event.actor for event in public_history if event.combat is CombatOutcome.PASS)
+        if any(count > MAX_PASSES_PER_PLAYER for count in recorded_passes.values()):
+            raise GameRuleError("public history exceeds the per-player pass budget")
+        if passes_remaining is None:
+            passes_remaining = [MAX_PASSES_PER_PLAYER - recorded_passes[player]
+                                for player in range(config.player_count)]
+        if passes_remaining is not None:
+            if (len(passes_remaining) != config.player_count or any(
+                type(value) is not int or not 0 <= value <= MAX_PASSES_PER_PLAYER
+                for value in passes_remaining
+            )):
+                raise GameRuleError("remaining passes require one integer in 0..4 per player")
+            game._passes_remaining = list(passes_remaining)
+            if any(game._passes_remaining[player] + recorded_passes[player] > MAX_PASSES_PER_PLAYER
+                   for player in range(config.player_count)):
+                raise GameRuleError("remaining passes contradict public history")
         game._current_player = (
             config.first_player if current_player is None else current_player
         )
@@ -451,6 +479,7 @@ class JunqiGame:
             for _ in range(config.player_count)
         ]
         self._public_history: list[PublicEvent] = []
+        self._passes_remaining = [MAX_PASSES_PER_PLAYER] * config.player_count
         self._active = [True] * config.player_count
         self._flag_revealed = [False] * config.player_count
         self._current_player: int | None = config.first_player
@@ -723,6 +752,13 @@ class JunqiGame:
                 )
             previous_ply = event.ply
             self._validate_player(event.actor, "event actor")
+            if event.combat is CombatOutcome.PASS:
+                if (event.start is not None or event.end is not None or event.was_attack
+                        or event.flag_captured_owner is not None or event.newly_revealed_flags):
+                    raise GameRuleError("a pass event cannot move or attack a piece")
+                for owner in event.eliminated_players:
+                    self._validate_player(owner, "event player")
+                continue
             for point in (event.start, event.end):
                 try:
                     reference_board.encode(point)
@@ -741,7 +777,7 @@ class JunqiGame:
 
     def _apply_restored_draw_limits(self) -> None:
         if self.no_interaction_plies >= self.config.no_interaction_draw_plies:
-            self._finish_draw(TerminationReason.NO_INTERACTION_DRAW)
+            self._finish_draw(TerminationReason.NO_CAPTURE_DRAW)
         elif (
             self.config.max_plies is not None
             and self.ply_count >= self.config.max_plies
@@ -829,6 +865,7 @@ class JunqiGame:
             for owner_tables in self._known_casualties
         ]
         clone._public_history = list(self._public_history)
+        clone._passes_remaining = list(self._passes_remaining)
         clone._active = list(self._active)
         clone._flag_revealed = list(self._flag_revealed)
         clone._current_player = self._current_player
@@ -1239,7 +1276,8 @@ class JunqiGame:
             ObservedEvent(
                 ply=event.ply,
                 actor=relative_owner[event.actor],
-                action=(board.encode(event.start), board.encode(event.end)),
+                action=(PASS_ACTION if event.combat is CombatOutcome.PASS else
+                        (board.encode(event.start), board.encode(event.end))),
                 was_attack=event.was_attack,
                 combat=event.combat,
                 flag_captured_owner=(
@@ -1285,6 +1323,7 @@ class JunqiGame:
             ply_count=self.ply_count,
             no_interaction_plies=self.no_interaction_plies,
             result=self.result,
+            passes_remaining=tuple(self._passes_remaining[owner] for owner in order),
         )
 
     def _target_is_enterable(self, player: int, target: int, board: Board) -> bool:
@@ -1392,7 +1431,7 @@ class JunqiGame:
         )
         occupants = {code: piece for code, _point, piece in encoded_pieces}
         occupied = frozenset(occupants)
-        actions: list[Action] = []
+        actions: list[Action] = [PASS_ACTION] if self._passes_remaining[player] > 0 else []
         owned_starts = sorted(
             (
                 code,
@@ -1685,6 +1724,9 @@ class JunqiGame:
                 f"action is not legal for player {player}: {normalized}"
             )
 
+        if normalized == PASS_ACTION:
+            return self._step_pass(player)
+
         start, end = normalized
         start_point = board.decode(start)
         end_point = board.decode(end)
@@ -1800,13 +1842,13 @@ class JunqiGame:
 
         self.ply_count += 1
         self.no_interaction_plies = (
-            0 if defender is not None else self.no_interaction_plies + 1
+            0 if destroyed else self.no_interaction_plies + 1
         )
         self._invalidate_legal_actions()
 
         if not self._finish_if_team_eliminated():
             if self.no_interaction_plies >= self.config.no_interaction_draw_plies:
-                self._finish_draw(TerminationReason.NO_INTERACTION_DRAW)
+                self._finish_draw(TerminationReason.NO_CAPTURE_DRAW)
             elif (
                 self.config.max_plies is not None
                 and self.ply_count >= self.config.max_plies
@@ -1845,6 +1887,34 @@ class JunqiGame:
             game_result=self.result,
             rewards=self.rewards(),
         )
+
+    def _step_pass(self, player: int) -> StepResult:
+        """Consume one opportunity and one turn; leave all piece information intact."""
+        self._passes_remaining[player] -= 1
+        self.ply_count += 1
+        self.no_interaction_plies += 1
+        self._invalidate_legal_actions()
+        eliminated: tuple[int, ...] = ()
+        self._apply_restored_draw_limits()
+        if self.result is None:
+            self._current_player = (player + self.config.turn_step) % self.config.player_count
+            eliminated = tuple(self._resolve_current_turn())
+        self._public_history.append(PublicEvent(
+            ply=self.ply_count, actor=player, start=None, end=None,
+            was_attack=False, combat=CombatOutcome.PASS, flag_captured_owner=None,
+            newly_revealed_flags=(), eliminated_players=eliminated,
+        ))
+        return StepResult(
+            player=player, action=PASS_ACTION, attacker=None, defender=None,
+            combat=CombatOutcome.PASS, flag_captured_owner=None,
+            newly_revealed_flags=(), eliminated_players=eliminated,
+            next_player=self._current_player, game_result=self.result, rewards=self.rewards(),
+        )
+
+    @property
+    def passes_remaining(self) -> tuple[int, ...]:
+        """Public remaining opportunities, in absolute seat order."""
+        return tuple(self._passes_remaining)
 
     def state_key(self) -> tuple[object, ...]:
         """Return a deterministic, hashable referee-state key for tree search."""
@@ -1900,6 +1970,7 @@ class JunqiGame:
             self._current_player,
             tuple(self._active),
             tuple(self._flag_revealed),
+            self.passes_remaining,
             self.ply_count,
             self.no_interaction_plies,
             pieces,

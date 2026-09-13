@@ -116,10 +116,10 @@ class FourPlayerBoardTests(unittest.TestCase):
             if point.kind is PointKind.HEADQUARTERS
         }
 
-        self.assertEqual(space.action_count, 5624)
+        self.assertEqual(space.action_count, 5625)
         self.assertEqual(space.origin_count, 121)
         self.assertEqual(space.max_destination_count, 76)
-        self.assertEqual(len(board.actions), 5624)
+        self.assertEqual(len(board.actions), 5625)
         self.assertEqual(
             set(space.origin_codes), set(range(board.point_count)) - headquarters
         )
@@ -218,7 +218,7 @@ class TwoPlayerBoardTests(unittest.TestCase):
         board = TwoPlayerBoard()
         space = board.action_space
 
-        self.assertEqual(space.action_count, 1176)
+        self.assertEqual(space.action_count, 1177)
         self.assertEqual(space.origin_count, 56)
         self.assertEqual(space.max_destination_count, 35)
         self.assertEqual(board.action_targets(6), board.neighbors(6))

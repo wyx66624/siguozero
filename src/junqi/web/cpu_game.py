@@ -18,7 +18,9 @@ import traceback
 
 import torch
 
+from ..board import PASS_ACTION
 from ..training.inference import InferenceEngine
+from .replay import ReplayRecorder
 
 
 def board_geometry(board):
@@ -63,7 +65,7 @@ class CpuGame:
                 raise ValueError("模型包含非 CPU 参数或非有限数值")
         if torch.cuda.is_initialized():
             raise RuntimeError("CPU worker unexpectedly initialized CUDA")
-        self.game, self.history = self.engine.new_game(seed=self.seed, max_plies=2000)
+        self.game, self.history = self.engine.new_game(seed=self.seed)
         self.metadata = {"checkpoint": Path(request["checkpoint"]).name,
                          "update": self.engine.checkpoint_update, "mode": self.engine.mode.value,
                          "device": "cpu", "cuda_initialized": torch.cuda.is_initialized(),
@@ -72,24 +74,63 @@ class CpuGame:
                          "dead_rules_enabled": self.engine.policy.config.dead_rules_enabled}
         self.inference_seconds = 0.0
         self.ai_moves = 0
-        self._advance()
+        self.ended = False
+        self.review = ReplayRecorder(self.game, self.human, self.state())
+        self.opening_frames = [self.state(), *self._advance()]
+
+    def _spectator_reason(self):
+        if getattr(self, "ended", False) or self.game.is_terminal or self.game.config.player_count != 4:
+            return None
+        if not self.game.active_players[self.human]:
+            return "eliminated"
+        if not any(action != PASS_ACTION for action in self.game.legal_actions(self.human)):
+            return "no_legal_moves"
+        return None
 
     def _advance(self):
         # At most one round, including when the human has been eliminated.
         # A spectator can request further rounds without blocking the server.
         started = time.perf_counter()
+        frames = []
         for _ in range(self.game.config.player_count):
-            if self.game.is_terminal or self.game.current_player == self.human:
+            if self.ended or self.game.is_terminal:
                 break
-            self.engine.step(self.game, self.history, temperature=self.temperature)
-            self.ai_moves += 1
+            if self.game.current_player == self.human:
+                if self._spectator_reason() != "no_legal_moves":
+                    break
+                # A compulsory pass requires no human choice or model inference.
+                # Recheck each turn so a temporarily blocked player regains control.
+                self.game.step(PASS_ACTION)
+                self.history.append_after_step(self.game)
+            else:
+                self.engine.step(self.game, self.history, temperature=self.temperature)
+                self.ai_moves += 1
+            self.inference_seconds = time.perf_counter() - started
+            # Capture the human's observation now, before a later AI move can
+            # change the board or reveal information. The browser paces these
+            # snapshots without sleeping in the inference worker.
+            frames.append(self._record_frame())
         self.inference_seconds = time.perf_counter() - started
+        return frames
 
     def command(self, request):
+        # Also supports small rule-engine fixtures created without a model load.
+        if not hasattr(self, "review"):
+            self.ended = False
+            self.review = ReplayRecorder(self.game, self.human, self.state())
+        if self.ended and request["op"] in ("move", "advance"):
+            raise ValueError("棋局已经结束，只能查看复盘或开始新棋局")
+        if request["op"] == "replay" and request.get("finish") is True:
+            # Explicitly ending the game is irreversible for this session. A
+            # captured human flag alone must never unlock hidden identities.
+            self.ended = True
+        frames = []
         if request["op"] == "move":
             if request.get("expected_ply") != self.game.ply_count:
                 raise ValueError("棋局已变化，请刷新后再走棋")
             action = request.get("action")
+            if type(action) is int and action == 0:
+                action = [0, 0]
             if not isinstance(action, list) or len(action) != 2 or any(type(x) is not int for x in action):
                 raise ValueError("无效走法")
             if self.game.current_player != self.human or self.game.is_terminal:
@@ -99,28 +140,48 @@ class CpuGame:
                 raise ValueError("这一步不符合当前规则")
             self.game.step(action)
             self.history.append_after_step(self.game)
-            self._advance()
+            self.inference_seconds = 0.0
+            frames = [self._record_frame(), *self._advance()]
         elif request["op"] == "advance":
-            self._advance()
+            frames = [self.state(), *self._advance()]
         elif request["op"] not in ("state", "replay"):
             raise ValueError("未知操作")
-        return self.state(replay=request["op"] == "replay")
+        result = self.state(replay=request["op"] == "replay")
+        if request["op"] == "replay" and (self.game.is_terminal or self.ended):
+            result["review"] = self.review.export(result=result["result"],
+                                                  ended_early=not self.game.is_terminal)
+        if frames:
+            result["frames"] = frames
+        return result
+
+    def _record_frame(self):
+        frame = self.state()
+        self.review.append(self.game, frame)
+        return frame
 
     def state(self, *, replay=False):
         # Never serialize referee pieces, StepResult.attacker/defender, or the
         # full training history. Observation is the sole visibility boundary.
         observation = self.game.observe(self.human, history_limit=None if replay else 40,
                                         include_legal_masks=False, include_candidate_masks=False)
-        your_turn = self.game.current_player == self.human and not self.game.is_terminal
+        spectator_reason = self._spectator_reason()
+        ended = getattr(self, "ended", False)
+        your_turn = self.game.current_player == self.human and not self.game.is_terminal and not ended and spectator_reason is None
         result = None
         if self.game.result:
             reward = self.game.rewards()[self.human]
             result = {"reason": self.game.result.reason.value,
                       "outcome": "win" if reward > 0 else "loss" if reward < 0 else "draw"}
         return {"model": self.metadata, "human_seat": self.human, "ply": self.game.ply_count,
+                "review_supported": True, "ended": ended,
                 "current_player": observation.current_player, "your_turn": your_turn,
                 "active_players": list(observation.active_players), "result": result,
+                "spectator_reason": spectator_reason,
                 "no_interaction_plies": self.game.no_interaction_plies,
+                "no_capture_plies": self.game.no_interaction_plies,
+                "no_capture_draw_plies": self.game.config.no_interaction_draw_plies,
+                "passes_remaining": list(observation.passes_remaining),
+                "max_passes_per_player": 4,
                 "ai_moves": self.ai_moves, "inference_seconds": self.inference_seconds,
                 "board": board_geometry(self.game.board_for(self.human)),
                 "pieces": [None if p is None else {"owner": p.owner,
@@ -142,6 +203,8 @@ def main():
                 if request["op"] == "new":
                     game = CpuGame(request)
                     result = game.state()
+                    result["frames"] = game.opening_frames
+                    game.opening_frames = []
                 elif game is not None:
                     result = game.command(request)
                 else:

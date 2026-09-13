@@ -23,7 +23,7 @@ class InferenceCacheLifecycleTests(unittest.TestCase):
     @staticmethod
     def board_key(state, index=-1):
         record = state.records[index]
-        return state.mode, record.board_codes, record.known_casualty_bits
+        return state.mode, record.board_codes, record.known_casualty_bits, record.passes_remaining
 
     def board_fixture(self):
         from junqi.training.encoding import GameHistory

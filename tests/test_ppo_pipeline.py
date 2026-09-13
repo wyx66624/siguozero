@@ -35,7 +35,7 @@ class PipelineTests(unittest.TestCase):
         expected = [initial]
         held = []
         for step in range(BLOCK_ROWS * 2 + 19):
-            record = replace(initial, action=ActionFeatures(0, 1, step % 4), no_interaction_plies=step % 61)
+            record = replace(initial, action=ActionFeatures(0, 1, step % 4), no_interaction_plies=step % 71)
             store.append(record)
             expected = [initial, *expected[1:][-16:], record]
             if step in (6, 200, 301, 530):

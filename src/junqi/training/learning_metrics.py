@@ -25,6 +25,8 @@ def ppo_signal_sums(samples: Sequence[PPOSample]) -> dict[str, float]:
         "target_nonzero": float(sum(value != 0 for value in targets)),
         "error_sum": math.fsum(errors),
         "error_square_sum": math.fsum(value * value for value in errors),
+        "draw_target_sum": math.fsum(sample.draw_value_target for sample in samples),
+        "draw_value_sum": math.fsum(sample.old_draw_value for sample in samples),
     }
 
 
@@ -56,6 +58,8 @@ def ppo_signal_metrics(sums: Mapping[str, float]) -> dict[str, float]:
         "critic/rollout_nonzero_target_fraction": sums["target_nonzero"] / count,
         "critic/rollout_value_mse": sums["error_square_sum"] / count,
         "critic/rollout_explained_variance_defined": float(defined),
+        "critic/rollout_draw_target_mean": sums.get("draw_target_sum", 0.0) / count,
+        "critic/rollout_draw_value_mean": sums.get("draw_value_sum", 0.0) / count,
     }
     if defined:
         result["critic/rollout_explained_variance"] = 1 - variance("error") / target_variance

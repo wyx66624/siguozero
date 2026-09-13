@@ -23,6 +23,7 @@ from .arena import (
     ARENA_VERSION, MatchSettings, atomic_json, run_match, sha256_file, synchronized_error,
 )
 from .checkpoint import CHECKPOINT_FORMAT_VERSION
+from .checkpoint_format import SUPPORTED_CHECKPOINT_FORMAT_VERSIONS
 from .distributed import DistributedContext
 from .models import ModelConfig
 from .modes import TrainingMode, normalize_mode
@@ -92,7 +93,7 @@ def read_manifest(
 ) -> dict[str, Any]:
     mode = normalize_mode(mode).value
     manifest = json.loads((checkpoint_dir / "manifest.json").read_text(encoding="utf-8"))
-    if (manifest.get("format_version") != CHECKPOINT_FORMAT_VERSION
+    if (manifest.get("format_version") not in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS
             or manifest.get("latest") != "latest.pt"
             or manifest.get("mode") != mode
             or type(manifest.get("dead_rules_enabled")) is not bool
@@ -113,7 +114,7 @@ def pin_checkpoint(
     mode = normalize_mode(mode).value
     before = source.stat()
     payload = torch.load(source, map_location="cpu", mmap=True, weights_only=False)
-    if (payload.get("format_version") != CHECKPOINT_FORMAT_VERSION
+    if (payload.get("format_version") not in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS
             or payload.get("mode") != mode
             or type(payload.get("dead_rules_enabled")) is not bool
             or type(payload.get("update")) is not int or payload["update"] < 0):
@@ -143,7 +144,7 @@ def pin_checkpoint(
     if manifest is not None and read_manifest(source.parent, mode=mode) != manifest:
         raise PublicationInProgress("manifest advanced while being pinned")
     compact = {
-        "format_version": CHECKPOINT_FORMAT_VERSION,
+        "format_version": payload["format_version"],
         "checkpoint_kind": "inference_only_not_training_resume",
         "mode": payload["mode"], "dead_rules_enabled": payload["dead_rules_enabled"],
         "update": payload["update"], "config": {"model": asdict(config)},
@@ -414,7 +415,8 @@ def build_parser(
     parser.add_argument("--seed", type=int, default=20260908)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--layout-temperature", type=float, default=0.7)
-    parser.add_argument("--max-plies", type=int, default=2000)
+    parser.add_argument("--max-plies", type=int, default=None,
+                        help="optional diagnostic game cap; defaults to complete rules without a total-ply cap")
     parser.add_argument("--temporal-cache-entries", type=int, default=8)
     parser.add_argument("--parallel-games", type=int, default=32,
                         help="active games per rank; finished slots are refilled immediately")
@@ -440,7 +442,8 @@ def evaluate_history(
     if min(args.every_updates, args.poll_seconds, args.cpu_threads) < 1 or args.recent_opponents < 0:
         parser.error("intervals/threads must be positive; recent-opponents must be nonnegative")
     try:
-        settings = MatchSettings(**{key: getattr(args, key) for key in MatchSettings.__dataclass_fields__})
+        settings = MatchSettings(**{key: getattr(args, key) for key in MatchSettings.__dataclass_fields__
+                                    if hasattr(args, key)})
     except ValueError as exc:
         parser.error(str(exc))
     checkpoint_dir, root = args.checkpoint_dir.resolve(), args.output_dir.resolve()

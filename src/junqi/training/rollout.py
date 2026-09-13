@@ -21,6 +21,7 @@ from .models import (
     layout_sample_from_trace,
 )
 from .modes import TrainingMode, mode_spec, new_game, normalize_mode
+from .rewards import DEFAULT_DRAW_REWARD, terminal_utility
 
 
 ROOT_CANDIDATE_COUNT = 4
@@ -126,6 +127,30 @@ class BaseGameSlot:
     history: GameHistory
     layouts: tuple[LayoutSample, ...]
     layout_behavior_version: int
+    opponent_id: str | None = None
+    learner_team: int = 0
+    teammate_id: str | None = None
+    learner_seat: int | None = None
+    historical_scenario: str | None = None
+
+    @property
+    def primary_seat(self) -> int:
+        return self.learner_team if self.learner_seat is None else self.learner_seat
+
+    def frozen_id(self, seat: int) -> str | None:
+        if self.opponent_id is not None and seat % 2 != self.learner_team:
+            return self.opponent_id
+        if self.teammate_id is not None and seat == (self.primary_seat + 2) % 4:
+            return self.teammate_id
+        return None
+
+    def learner_owns(self, seat: int) -> bool:
+        return self.frozen_id(seat) is None
+
+    def value_seat(self, actor_seat: int) -> int:
+        # Frozen actions are temporal bridges, valued through the current
+        # anchor's private view. Every current seat keeps its own team/view.
+        return actor_seat if self.learner_owns(actor_seat) else self.primary_seat
 
 
 class FrozenPolicyActor:
@@ -227,7 +252,7 @@ class FrozenPolicyActor:
 
 
 class BaseGamePool:
-    """Persistent games whose seats all share one passed Policy/Layout pair."""
+    """Persistent games with current seats and optional pinned historical seats."""
 
     def __init__(
         self,
@@ -239,6 +264,7 @@ class BaseGamePool:
         dead_rules_enabled: bool = True,
         seed: int,
         layout_prefetch_games: int = 1,
+        no_capture_draw_plies: int = 70,
     ) -> None:
         if pool_size <= 0:
             raise ValueError("base game pool size must be positive")
@@ -246,6 +272,7 @@ class BaseGamePool:
         self.pool_size = pool_size
         self.max_transitions = max_transitions
         self.max_game_plies = max_game_plies
+        self.no_capture_draw_plies = no_capture_draw_plies
         if not isinstance(dead_rules_enabled, bool):
             raise ValueError("dead_rules_enabled must be a boolean")
         self.dead_rules_enabled = dead_rules_enabled
@@ -256,6 +283,7 @@ class BaseGamePool:
         self.layout_prefetch_games = layout_prefetch_games
         self._layout_queue: list[LayoutSample] = []
         self._layout_queue_version: int | None = None
+        self.historical = None
 
     def invalidate_layout_queue(self) -> None:
         self._layout_queue.clear()
@@ -267,26 +295,42 @@ class BaseGamePool:
         behavior_version: int,
     ) -> BaseGameSlot:
         spec = mode_spec(self.mode)
+        opponent_id, teammate_id, learner_seat = (self.historical.assignment() if self.historical is not None
+                                                else (None, None, 0))
+        learner_team = learner_seat % 2
+        frozen_seats = {seat for seat in range(spec.player_count)
+                        if (opponent_id is not None and seat % 2 != learner_team)
+                        or (teammate_id is not None and seat == (learner_seat + 2) % 4)}
+        needed = spec.player_count - len(frozen_seats)
         if self._layout_queue_version != behavior_version:
             self.invalidate_layout_queue()
             self._layout_queue_version = behavior_version
-        if not self._layout_queue:
-            self._layout_queue = layout.sample_layouts(
+        if len(self._layout_queue) < needed:
+            self._layout_queue.extend(layout.sample_layouts(
                 spec.player_count * self.layout_prefetch_games, self.mode, temperature=0.7,
-            )
-        samples = tuple(self._layout_queue[:spec.player_count])
-        del self._layout_queue[:spec.player_count]
+            ))
+        samples = tuple(self._layout_queue[:needed])
+        del self._layout_queue[:needed]
+        if frozen_seats:
+            current, frozen = iter(samples), iter(self.historical.old_layouts(len(frozen_seats)))
+            samples = tuple(next(frozen) if seat in frozen_seats else next(current) for seat in range(4))
         game = new_game(
             self.mode,
             setups=[sample.setup for sample in samples],
             seed=self.rng.randrange(2**63),
             max_plies=self.max_game_plies,
+            no_capture_draw_plies=self.no_capture_draw_plies,
             dead_rules_enabled=self.dead_rules_enabled,
         )
         history = GameHistory.initialize(
             game, self.mode, max_transitions=self.max_transitions
         )
-        return BaseGameSlot(game, history, samples, behavior_version)
+        scenario = None
+        if self.historical is not None and self.historical.active:
+            scenario = ("historical_both" if opponent_id and teammate_id else "historical_opponents" if opponent_id
+                        else "historical_teammate" if teammate_id else "self_play")
+        return BaseGameSlot(game, history, samples, behavior_version, opponent_id, learner_team,
+                            teammate_id, learner_seat, scenario)
 
     def fill(
         self,
@@ -302,11 +346,13 @@ class BaseGamePool:
         return {
             # Version 5 stores only endpoint/actor action histories.
             "format_version": 5,
+            "historical_opponents": self.historical.state_dict() if self.historical is not None and self.historical.enabled else None,
             "mode": self.mode.value,
             "dead_rules_enabled": self.dead_rules_enabled,
             "pool_size": self.pool_size,
             "max_transitions": self.max_transitions,
             "max_game_plies": self.max_game_plies,
+            "no_capture_draw_plies": self.no_capture_draw_plies,
             "rng_state": self.rng.getstate(),
             "slots": [self._slot_state_dict(slot) for slot in self.slots],
             "layout_queue_version": self._layout_queue_version,
@@ -314,7 +360,7 @@ class BaseGamePool:
                                   old_log_probs=s.old_log_probs) for s in self._layout_queue],
         }
 
-    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+    def load_state_dict(self, state: Mapping[str, Any], *, allow_expansion: bool = False) -> None:
         if int(state.get("format_version", -1)) != 5:
             raise ValueError("unsupported base-game-pool checkpoint format")
         if normalize_mode(state["mode"]) is not self.mode:
@@ -324,26 +370,34 @@ class BaseGamePool:
             raise ValueError("invalid base-game-pool dead-rule marker")
         if restored_dead_rules != self.dead_rules_enabled:
             raise ValueError("base-game-pool dead-rule variant changed across resume")
-        if int(state["pool_size"]) != self.pool_size:
+        saved_size = int(state["pool_size"])
+        if saved_size != self.pool_size and not (allow_expansion and 0 < saved_size < self.pool_size):
             raise ValueError("base-game-pool size changed across resume")
         if int(state["max_transitions"]) != self.max_transitions:
             raise ValueError("history window changed across resume")
         if state["max_game_plies"] != self.max_game_plies:
             raise ValueError("maximum game plies changed across resume")
+        if state.get("no_capture_draw_plies", 60) != self.no_capture_draw_plies:
+            raise ValueError("draw rule changed across resume; use --adopt-current-draw-rules")
         slots = [self._slot_from_state_dict(item) for item in state["slots"]]
-        if len(slots) > self.pool_size:
+        if len(slots) > saved_size:
             raise ValueError("checkpoint contains too many base-game slots")
         self.slots = slots
         self.rng.setstate(state["rng_state"])
         queue = [layout_sample_from_trace(item['mode'], item['position_indices'], item['old_log_probs'])
                  for item in state.get('layout_queue', [])]
-        if any(s.mode is not self.mode for s in queue) or len(queue) % mode_spec(self.mode).player_count:
+        unit = 1 if state.get("historical_opponents") is not None else mode_spec(self.mode).player_count
+        if any(s.mode is not self.mode for s in queue) or len(queue) % unit:
             raise ValueError("invalid saved layout prefetch queue")
         version = state.get('layout_queue_version')
         if queue and (type(version) is not int or version < 0):
             raise ValueError("invalid saved layout prefetch version")
         self._layout_queue = queue
         self._layout_queue_version = version
+        if state.get("historical_opponents") is not None:
+            if self.historical is None:
+                raise ValueError("historical game state requires the opponent scheduler")
+            self.historical.load_state_dict(state["historical_opponents"])
 
     @staticmethod
     def _slot_state_dict(slot: BaseGameSlot) -> dict[str, Any]:
@@ -359,6 +413,7 @@ class BaseGamePool:
                 "revealed_flags": game.revealed_flags,
                 "ply_count": game.ply_count,
                 "no_interaction_plies": game.no_interaction_plies,
+                "passes_remaining": game.passes_remaining,
                 "public_candidates": dict(game.public_candidates),
                 "known_identities": [
                     dict(known) for known in game.known_identities
@@ -379,6 +434,11 @@ class BaseGamePool:
                 for sample in slot.layouts
             ],
             "layout_behavior_version": slot.layout_behavior_version,
+            "opponent_id": slot.opponent_id,
+            "learner_team": slot.learner_team,
+            "teammate_id": slot.teammate_id,
+            "learner_seat": slot.learner_seat,
+            "historical_scenario": slot.historical_scenario,
         }
 
     def _slot_from_state_dict(self, state: Mapping[str, Any]) -> BaseGameSlot:
@@ -395,6 +455,7 @@ class BaseGamePool:
             known_identities=raw_game["known_identities"],
             known_casualties=raw_game["known_casualties"],
             public_history=raw_game["public_history"],
+            passes_remaining=raw_game.get("passes_remaining"),
         )
         if game.is_terminal:
             raise ValueError("checkpoint base-game slot unexpectedly terminal")
@@ -413,6 +474,15 @@ class BaseGamePool:
             for item in state["layouts"]
         )
         expected_players = mode_spec(self.mode).player_count
+        if state.get("opponent_id") is not None or state.get("teammate_id") is not None:
+            seat = state.get("learner_seat")
+            if (expected_players != 4 or state.get("learner_team") not in (0, 1)
+                    or (seat is not None and (type(seat) is not int or not 0 <= seat < 4
+                                             or seat % 2 != state["learner_team"]))
+                    or (state.get("teammate_id") is not None and seat is None)
+                    or (state.get("opponent_id") and state.get("teammate_id")
+                        and state["opponent_id"] != state["teammate_id"])):
+                raise ValueError("invalid historical game ownership")
         if len(layouts) != expected_players:
             raise ValueError("base-game checkpoint has the wrong layout count")
         return BaseGameSlot(
@@ -420,6 +490,11 @@ class BaseGamePool:
             history=history,
             layouts=layouts,
             layout_behavior_version=int(state["layout_behavior_version"]),
+            opponent_id=state.get("opponent_id"),
+            learner_team=state.get("learner_team", 0),
+            teammate_id=state.get("teammate_id"),
+            learner_seat=state.get("learner_seat"),
+            historical_scenario=state.get("historical_scenario"),
         )
 
     def collect_anchors(
@@ -429,6 +504,7 @@ class BaseGamePool:
         *,
         count: int,
         behavior_version: int,
+        draw_reward: float = DEFAULT_DRAW_REWARD,
     ) -> tuple[list[AnchorSnapshot], list[LayoutOutcome], int, int]:
         if count <= 0:
             raise ValueError("anchor count must be positive")
@@ -480,7 +556,7 @@ class BaseGamePool:
                         completed_layouts.append(
                             LayoutOutcome(
                                 sample=sample,
-                                reward=rewards[seat],
+                                reward=terminal_utility(rewards[seat], draw_reward=draw_reward),
                                 seat=seat,
                                 behavior_version=slot.layout_behavior_version,
                             )
@@ -565,6 +641,7 @@ def collect_policy_groups(
     advantage_epsilon: float = 1e-4,
     anchor_wave_size: int = 8,
     environment_workers: int = 2,
+    draw_reward: float = DEFAULT_DRAW_REWARD,
 ) -> tuple[list[PolicyGroup], RolloutMetrics]:
     """Run K=4/M=2 terminal rollouts in bounded copy-on-write KV waves."""
 
@@ -658,7 +735,7 @@ def collect_policy_groups(
             reward = branch.game.rewards()[branch.root_player]
             reward_cube[branch.anchor_index][branch.candidate_index][
                 branch.replica_index
-            ] = reward
+            ] = terminal_utility(reward, draw_reward=draw_reward)
             continuation_plies[branch.anchor_index] += (
                 branch.game.ply_count - branch.starting_ply
             )

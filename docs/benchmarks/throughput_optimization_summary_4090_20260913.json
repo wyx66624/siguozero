@@ -1,0 +1,14 @@
+{
+  "baseline_steady_seconds": 85.00477731099818,
+  "optimized_steady_seconds": 60.620232675995794,
+  "steady_throughput_improvement": 0.4022509244616954,
+  "cold_inclusive_throughput_improvement": 0.3701427781844413,
+  "environment_plies_each": 294912,
+  "policy_adam_steps_each": 1728,
+  "critic_adam_steps_each": 1728,
+  "layout_adam_steps_each": 3,
+  "baseline_peak_reserved_gib": 15.587890625,
+  "optimized_peak_allocated_gib": 17.95277738571167,
+  "optimized_peak_reserved_gib": 20.142578125,
+  "checkpoint_update": 1336
+}

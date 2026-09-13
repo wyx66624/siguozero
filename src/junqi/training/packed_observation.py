@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .encoding import ACTION_PLAYER_PAD, EXACT_PIECE_CODE_STRIDE, OWN_PIECE_CODES, ActionFeatures
+from .encoding import ACTION_PLAYER_PAD, EXACT_PIECE_CODE_STRIDE, NO_CAPTURE_COUNTER_MAX, OWN_PIECE_CODES, ActionFeatures
 from .modes import TrainingMode, mode_spec
 
 
@@ -16,7 +16,7 @@ def observation_rows(game, mode):
     points = mode_spec(mode).point_count
     dead = game.config.dead_rules_enabled
     width = points + (75 if dead else 0)
-    rows = np.zeros((game.config.player_count, width + 10), dtype=np.int16)
+    rows = np.zeros((game.config.player_count, width + 14), dtype=np.int16)
     event = game._public_history[-1] if game._public_history else None
     for viewer, row in enumerate(rows):
         board = game._boards[viewer]
@@ -41,10 +41,12 @@ def observation_rows(game, mode):
                 begin = points + slot * 25
                 row[begin:begin + 25] = game._casualty_bits(game._known_casualties[viewer][owner])
         if event is not None:
-            action = ActionFeatures(board.encode(event.start), board.encode(event.end), relative[event.actor])
-            row[width:width + 5] = action.as_vector(mode)
-        row[width + 5:] = (
-            event is not None, min(game.no_interaction_plies, 60),
+            action = (ActionFeatures(0, 0, relative[event.actor]) if event.start is None else
+                      ActionFeatures(board.encode(event.start), board.encode(event.end), relative[event.actor]))
+            row[width:width + 5] = action.as_vector(mode)[:5]
+        row[width + 10:width + 10 + len(order)] = [game._passes_remaining[owner] for owner in order]
+        row[width + 5:width + 10] = (
+            event is not None, min(game.no_interaction_plies, NO_CAPTURE_COUNTER_MAX),
             sum(1 << i for i, owner in enumerate(order) if game._active[owner]),
             sum(1 << i for i, owner in enumerate(order) if game._flag_revealed[owner]),
             ACTION_PLAYER_PAD if game.current_player is None else relative[game.current_player],

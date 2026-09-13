@@ -184,6 +184,24 @@ def empty_cache(device: torch.device | str) -> None:
         accelerator_module(resolved.type).empty_cache()
 
 
+def trim_cuda_cache(device: torch.device | str) -> int:
+    """Release unused allocator blocks at a high memory watermark.
+
+    Live tensors, KV slots and captured graph addresses remain reserved.
+    Call only at an inference-wave boundary, never during graph capture.
+    """
+    resolved = torch.device(device)
+    if resolved.type != 'cuda':
+        return 0
+    before = torch.cuda.memory_reserved(resolved)
+    total = torch.cuda.get_device_properties(resolved).total_memory
+    if (before <= .85 * total
+            or before - torch.cuda.memory_allocated(resolved) < 1024**3):
+        return 0
+    torch.cuda.empty_cache()
+    return max(0, before - torch.cuda.memory_reserved(resolved))
+
+
 def reset_peak_memory_stats(device: torch.device | str) -> None:
     resolved = torch.device(device)
     if is_accelerator(resolved):

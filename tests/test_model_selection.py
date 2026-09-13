@@ -96,7 +96,12 @@ class ModelSelectionTests(unittest.TestCase):
                 self.assertEqual(settings.arena_interval_environment_plies,
                                  None if mode is TrainingMode.TWO_PLAYER else 50_000_000)
                 self.assertEqual(settings.checkpoint_policy,
-                                 "periodic" if mode is TrainingMode.TWO_PLAYER else "evaluation")
+                                 "periodic")
+                self.assertEqual(settings.checkpoint_interval_environment_plies,
+                                 None if mode is TrainingMode.TWO_PLAYER else 25_000_000)
+                self.assertIsNone(settings.max_game_plies)
+                self.assertIsNone(settings.arena_max_plies)
+                self.assertEqual(settings.no_capture_draw_plies, 70)
                 self.assertEqual(TrainingSettings.from_yaml(CONFIG, mode, tiny=True).checkpoint_policy,
                                  "periodic")
                 self.assertFalse(TrainingSettings.from_yaml(CONFIG, mode, tiny=True).arena_enabled)
@@ -133,7 +138,7 @@ class ModelSelectionTests(unittest.TestCase):
         settings = trainer.call_args.args[0]
         self.assertFalse(settings.arena_enabled)
         self.assertEqual(settings.arena_games, 8)
-        self.assertEqual(settings.checkpoint_policy, "evaluation")
+        self.assertEqual(settings.checkpoint_policy, "periodic")
         self.assertEqual(settings.arena_start_percent, 35)
         self.assertEqual(settings.arena_interval_percent, 10)
         self.assertEqual(settings.arena_max_plies, 64)
@@ -148,7 +153,7 @@ class ModelSelectionTests(unittest.TestCase):
         settings = trainer.call_args.args[0]
         self.assertEqual(settings.arena_interval_environment_plies, 50_000_000)
         self.assertEqual(settings.arena_games, 100)
-        self.assertEqual(settings.checkpoint_policy, "evaluation")
+        self.assertEqual(settings.checkpoint_policy, "periodic")
         self.assertEqual(len(settings.arena_milestones), 60)
         self.assertEqual(settings.arena_milestones[-1], 3_000_000_000)
         with patch("junqi.training.cli.SelfPlayTrainer") as trainer, self.assertRaises(SystemExit):
@@ -335,6 +340,199 @@ class ModelSelectionTests(unittest.TestCase):
         self.assertIsNone(selection.due_milestone(update=2, cumulative={"environment_plies": 99_999_999}))
         self.assertEqual(selection.due_milestone(update=2, cumulative={"environment_plies": 100_000_000}), 100_000_000)
         self.assertEqual(selection.due_milestone(update=2, cumulative={"environment_plies": 3_000_000_005}), 3_000_000_000)
+
+    def test_local_after_half_schedule_boundaries_and_save_interval(self):
+        config = CONFIG.with_name("local_4090_training.yaml")
+        settings = TrainingSettings.from_yaml(config, "four_dark", model_scale="main")
+        self.assertEqual(settings.arena_after_half_interval_environment_plies, 50_000_000)
+        self.assertTrue(settings.arena_after_half_historical_only)
+        self.assertEqual(settings.arena_games, 500)
+        self.assertEqual(settings.historical_eval_total_games, 500)
+        for total in (True, 0, -1, 500.0, 502, 20):
+            with self.subTest(total=total), self.assertRaises(ValueError):
+                replace(settings, historical_eval_total_games=total).validate()
+        self.assertEqual(settings.checkpoint_interval_environment_plies, 10_000_000)
+        self.assertEqual(len(settings.arena_milestones), 60)
+        self.assertEqual(settings.arena_milestones[29:33],
+                         (1_500_000_000, 1_550_000_000, 1_600_000_000, 1_650_000_000))
+        self.assertEqual(settings.arena_milestones[-1], 3_000_000_000)
+        from junqi.training.model_selection import ModelSelection
+        selection = ModelSelection(settings, self.root, self.context)
+        for progress, expected in ((49_999_999, None), (50_000_000, 50_000_000),
+                (1_499_999_999, 1_450_000_000), (1_500_000_000, 1_500_000_000),
+                (1_524_999_999, 1_500_000_000), (1_525_000_000, 1_500_000_000),
+                (1_549_999_999, 1_500_000_000), (1_550_000_000, 1_550_000_000),
+                (3_000_000_099, 3_000_000_000)):
+            self.assertEqual(selection.due_milestone(update=10**9, cumulative={"environment_plies": progress}), expected)
+        for invalid in (True, 0, -1, 1.5, 50_000_001):
+            with self.assertRaises(ValueError):
+                replace(settings, arena_after_half_interval_environment_plies=invalid).validate()
+        self.assertIsNone(TrainingSettings.from_yaml(config, "two_player").arena_after_half_interval_environment_plies)
+        self.assertFalse(TrainingSettings.from_yaml(config, "two_player").arena_after_half_historical_only)
+        self.assertFalse(TrainingSettings.from_yaml(config, "four_dark", tiny=True).arena_after_half_historical_only)
+        for changes in ({"arena_after_half_historical_only": "true"}, {"historical_enabled": False},
+                        {"historical_start_fraction": .6}):
+            with self.assertRaises(ValueError):
+                replace(settings, **changes).validate()
+
+    def test_cli_after_half_interval_and_explicit_percentage_override(self):
+        from junqi.training.cli import main
+        config = str(CONFIG.with_name("local_4090_training.yaml"))
+        for options, expected in (([], 50_000_000),
+                (["--arena-after-half-interval-environment-plies", "10000000"], 10_000_000),
+                (["--arena-after-half-interval-environment-plies", "0"], None),
+                (["--arena-start-percent", "30"], None)):
+            with patch("junqi.training.cli.SelfPlayTrainer") as trainer:
+                main(["--config", config, "--mode", "four_dark", "--device", "cpu", *options])
+            self.assertEqual(trainer.call_args.args[0].arena_after_half_interval_environment_plies, expected)
+            self.assertEqual(trainer.call_args.args[0].arena_after_half_historical_only,
+                             "--arena-start-percent" not in options)
+        with patch("junqi.training.cli.SelfPlayTrainer") as trainer:
+            main(["--config", config, "--mode", "four_dark", "--device", "cpu", "--no-arena-after-half-historical-only"])
+        self.assertFalse(trainer.call_args.args[0].arena_after_half_historical_only)
+
+    def test_piecewise_matches_have_distinct_seeds_snapshots_and_resume_once(self):
+        settings = training_settings(target_environment_plies=400, arena_interval_environment_plies=100,
+                                     arena_after_half_interval_environment_plies=50)
+        selection, policy, layout = self.selection(settings=settings)
+        self.assertEqual(settings.arena_milestones, (100, 200, 250, 300, 350, 400))
+        with patch("junqi.training.model_selection.run_match", side_effect=lambda *a, **k: match_result()) as run:
+            for update, progress in enumerate(settings.arena_milestones, 1):
+                report = selection.evaluate(policy, layout, update=update, cumulative={"environment_plies": progress})
+                self.assertEqual(report["milestone_environment_plies"], progress)
+            seeds = [call.args[2].seed for call in run.call_args_list]
+            self.assertEqual(len(set(seeds)), 6)
+            self.assertTrue(all(call.kwargs["alpha"] == .05 / 6 for call in run.call_args_list))
+        self.assertEqual(len(list((selection.directory / "snapshots").glob("candidate_*.pt"))), 6)
+        resumed, _, _ = self.selection(settings=settings, update=6, cumulative={"environment_plies": 400})
+        self.assertIsNone(resumed.due_milestone(update=7, cumulative={"environment_plies": 400}))
+        self.assertEqual(resumed.state["rounds"], selection.state["rounds"])
+
+    def test_all_four_player_profiles_keep_fifty_million_step_evaluation_intervals(self):
+        for name in ("bootstrap.yaml", "local_4090_training.yaml", "ppo_4090_throughput.yaml"):
+            for mode in ("four_dark", "double_open"):
+                with self.subTest(config=name, mode=mode):
+                    settings = TrainingSettings.from_yaml(CONFIG.with_name(name), mode)
+                    self.assertEqual(tuple(settings.arena_milestones),
+                                     tuple(range(50_000_000, 3_000_000_001, 50_000_000)))
+
+    def test_reduced_schedule_preserves_completed_rounds_alpha_and_seed_slots(self):
+        old = training_settings(target_environment_plies=400, arena_interval_environment_plies=100,
+                                arena_after_half_interval_environment_plies=50)
+        selection, policy, layout = self.selection(settings=old)
+        with patch("junqi.training.model_selection.run_match", return_value=match_result()) as run:
+            for update, progress in enumerate((100, 200, 250), 1):
+                selection.evaluate(policy, layout, update=update, cumulative={"environment_plies": progress})
+        prior_seeds = [call.args[2].seed for call in run.call_args_list]
+        prior_state = copy.deepcopy(selection.state)
+        report_hashes = {name: file_sha256(selection.directory / name) for name in prior_state["rounds"]}
+        settings = replace(old, arena_after_half_interval_environment_plies=100)
+        resumed, policy, layout = self.selection(settings=settings, update=3, cumulative={"environment_plies": 250})
+        self.assertEqual(resumed.state["rounds"], prior_state["rounds"])
+        self.assertEqual(file_sha256(resumed.best_path), prior_state["best_sha256"])
+        self.assertEqual(resumed.state["last_completed_environment_plies"], 250)
+        self.assertEqual(resumed._round_alpha(), .05 / 6)
+        self.assertEqual(resumed.state["evaluation_seed_milestones"], list(old.arena_milestones))
+        self.assertEqual(report_hashes, {name: file_sha256(resumed.directory / name) for name in report_hashes})
+        self.assertIsNone(resumed.due_milestone(update=4, cumulative={"environment_plies": 299}))
+        with patch("junqi.training.model_selection.run_match", return_value=match_result()) as run:
+            resumed.evaluate(policy, layout, update=4, cumulative={"environment_plies": 300})
+            self.assertIsNone(resumed.evaluate(policy, layout, update=5, cumulative={"environment_plies": 350}))
+            resumed.evaluate(policy, layout, update=6, cumulative={"environment_plies": 400})
+        new_seeds = [call.args[2].seed for call in run.call_args_list]
+        self.assertTrue(set(prior_seeds).isdisjoint(new_seeds))
+        self.assertEqual(new_seeds, [old.arena_seed + 4 * 6, old.arena_seed + 6 * 6])
+        restarted, _, _ = self.selection(settings=settings, update=6, cumulative={"environment_plies": 400})
+        self.assertEqual(len(restarted.state["evaluation_schedule_migrations"]), 1)
+        self.assertEqual(restarted._round_alpha(), .05 / 6)
+        self.assertIsNone(restarted.due_milestone(update=7, cumulative={"environment_plies": 400}))
+
+    def test_reduced_schedule_does_not_allow_unrelated_protocol_changes(self):
+        old = training_settings(target_environment_plies=400, arena_interval_environment_plies=100,
+                                arena_after_half_interval_environment_plies=50)
+        selection, _, _ = self.selection(settings=old)
+        before = selection.state_path.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "schedule/budget changed"):
+            self.selection(settings=replace(old, arena_after_half_interval_environment_plies=100, arena_games=8))
+        self.assertEqual(selection.state_path.read_bytes(), before)
+
+    def test_game_budget_migration_keeps_reports_champion_alpha_and_uses_new_seeds(self):
+        old = training_settings(target_environment_plies=400, arena_interval_environment_plies=100,
+                                arena_games=100)
+        selection, policy, layout = self.selection(settings=old)
+        with patch("junqi.training.model_selection.run_match", return_value=match_result(58, 28, 14)):
+            selection.evaluate(policy, layout, update=1, cumulative={"environment_plies": 100})
+        state = selection.state_dict()
+        reports = {name: file_sha256(selection.directory / name) for name in state["rounds"]}
+        updated = replace(old, arena_games=500, historical_eval_total_games=500)
+        resumed, policy, layout = self.selection(settings=updated, update=1, cumulative={"environment_plies": 120})
+        for key in ("best_snapshot", "best_sha256", "best_update", "rounds", "last_evaluated_update"):
+            self.assertEqual(resumed.state[key], state[key])
+        self.assertEqual(resumed._round_alpha(), selection._round_alpha())
+        self.assertEqual(reports, {name: file_sha256(resumed.directory / name) for name in reports})
+        self.assertEqual(resumed.state["contract"]["games"], 500)
+        with patch("junqi.training.model_selection.run_match", return_value=match_result(300, 100, 100)) as run:
+            report = resumed.evaluate(policy, layout, update=2, cumulative={"environment_plies": 200})
+        self.assertEqual(run.call_args.args[2].pairs, 125)
+        old_reserved_end = old.arena_seed + (len(old.arena_milestones) + 1) * 6 * (old.historical_eval_games // 4)
+        self.assertGreater(run.call_args.args[2].seed, old_reserved_end)
+        self.assertEqual(report["games"], 500)
+        restarted, _, _ = self.selection(settings=updated, update=2, cumulative={"environment_plies": 200})
+        self.assertEqual(len(restarted.state["evaluation_game_budget_migrations"]), 1)
+        self.assertIsNone(restarted.due_milestone(update=3, cumulative={"environment_plies": 250}))
+        self.assertEqual(reports, {name: file_sha256(restarted.directory / name) for name in reports})
+
+    def test_game_budget_cannot_change_an_unfinished_evaluation(self):
+        old = training_settings(target_environment_plies=400, arena_interval_environment_plies=100)
+        selection, _, _ = self.selection(settings=old)
+        before = selection.state_path.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "finish the pending evaluation"):
+            self.selection(settings=replace(old, arena_games=500), update=1,
+                           cumulative={"environment_plies": 100})
+        self.assertEqual(selection.state_path.read_bytes(), before)
+
+    def test_frequency_migration_preserves_champion_and_spent_alpha_budget(self):
+        old = training_settings(target_environment_plies=400, arena_interval_environment_plies=100)
+        selection, policy, layout = self.selection(settings=old)
+        with patch("junqi.training.model_selection.run_match", return_value=match_result()):
+            selection.evaluate(policy, layout, update=1, cumulative={"environment_plies": 100})
+        best_hash, reports = file_sha256(selection.best_path), list(selection.state["rounds"])
+        settings = replace(old, arena_after_half_interval_environment_plies=50)
+        resumed, policy, layout = self.selection(settings=settings, update=1, cumulative={"environment_plies": 100})
+        self.assertEqual(file_sha256(resumed.best_path), best_hash)
+        self.assertEqual(resumed.state["rounds"], reports)
+        self.assertEqual(resumed._round_alpha(), (.05 - .05 / 4) / 5)
+        self.assertIsNone(resumed.due_milestone(update=100, cumulative={"environment_plies": 199}))
+        with patch("junqi.training.model_selection.run_match", side_effect=lambda *a, **k: match_result()) as run:
+            resumed.evaluate(policy, layout, update=2, cumulative={"environment_plies": 200})
+            resumed.evaluate(policy, layout, update=3, cumulative={"environment_plies": 250})
+        self.assertNotEqual(run.call_args_list[0].args[2].seed, run.call_args_list[1].args[2].seed)
+        self.assertEqual(len(resumed.state["rounds"]), 3)
+
+    def test_uniform_schedule_keeps_evaluation_and_checkpoint_boundaries_separate(self):
+        from junqi.training.trainer import SelfPlayTrainer
+        settings = training_settings(target_environment_plies=16, total_updates=8, anchor_batch=2,
+            checkpoint_interval_environment_plies=2, arena_interval_environment_plies=4,
+            arena_after_half_interval_environment_plies=4)
+        trainer = SelfPlayTrainer(settings, run_directory=self.root)
+        saved = []
+        save = trainer.save_checkpoint
+        def remember(**kwargs):
+            saved.append((trainer.cumulative["environment_plies"], kwargs["reason"]))
+            return save(**kwargs)
+        with patch.object(trainer, "save_checkpoint", side_effect=remember), \
+             patch("junqi.training.model_selection.run_match", side_effect=lambda *a, **k: match_result()):
+            trainer.train()
+        reports = [json.loads((trainer.model_selection.directory / path).read_text())
+                   for path in trainer.model_selection.state["rounds"]]
+        self.assertEqual([r["milestone_environment_plies"] for r in reports], [4, 8, 12, 16])
+        for progress in (4, 8, 12, 16):
+            self.assertIn((progress, "before_model_selection"), saved)
+            self.assertIn((progress, "after_model_selection"), saved)
+        self.assertIn((2, "periodic"), saved)
+        self.assertIn((6, "periodic"), saved)
+        self.assertIn((10, "periodic"), saved)
+        self.assertIn((14, "periodic"), saved)
 
     def test_environment_round_skips_missing_snapshots_and_is_not_repeated_on_resume(self):
         settings = training_settings(arena_interval_environment_plies=50_000_000,

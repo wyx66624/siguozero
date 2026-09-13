@@ -63,7 +63,7 @@ class ActionEncoderTests(unittest.TestCase):
         left, right = ActionFeatures.from_event(event), ActionFeatures.from_event(changed)
         self.assertEqual([field.name for field in fields(left)], ["source", "destination", "actor"])
         self.assertEqual(left, right)
-        self.assertEqual(left.as_vector("four_dark"), (-2., -3., -2., -2., 3.))
+        self.assertEqual(left.as_vector("four_dark"), (-2., -3., -2., -2., 3., 70.))
         encoder = PublicActionEncoder(256)
         values = torch.tensor([left.as_vector("four_dark"), right.as_vector("four_dark")])
         output = encoder(values, torch.ones(2, dtype=torch.bool))
@@ -72,10 +72,10 @@ class ActionEncoderTests(unittest.TestCase):
     def test_single_linear_layer_and_absent_actions_are_zero_even_with_bias(self):
         encoder = PublicActionEncoder(256)
         self.assertEqual(list(encoder.children()), [encoder.projection])
-        self.assertEqual(sum(p.numel() for p in encoder.parameters()), 1536)
+        self.assertEqual(sum(p.numel() for p in encoder.parameters()), 1792)
         with torch.no_grad():
             encoder.projection.bias.fill_(5.)
-        values = torch.tensor([[[-2., -3., -2., -2., 0.], [float("nan")] * 5]], requires_grad=True)
+        values = torch.tensor([[[-2., -3., -2., -2., 0., 69.], [float("nan")] * 6]], requires_grad=True)
         present = torch.tensor([[True, False]])
         output = encoder(values, present)
         torch.testing.assert_close(output[0, 0], encoder.projection(values[0, 0]))
@@ -84,12 +84,12 @@ class ActionEncoderTests(unittest.TestCase):
         self.assertEqual(torch.count_nonzero(values.grad[0, 1]), 0)
         self.assertTrue(torch.isfinite(encoder.projection.weight.grad).all())
         self.assertGreater(float(encoder.projection.weight.grad.abs().sum()), 0)
-        with self.assertRaisesRegex(ValueError, "5 coordinate"):
+        with self.assertRaisesRegex(ValueError, "6 coordinate"):
             encoder(torch.zeros(2, 8), torch.ones(2, dtype=torch.bool))
         with self.assertRaisesRegex(ValueError, "presence"):
-            encoder(torch.zeros(2, 5), torch.ones(2, 1, dtype=torch.bool))
+            encoder(torch.zeros(2, 6), torch.ones(2, 1, dtype=torch.bool))
 
-    def test_all_viewers_and_modes_collate_only_five_coordinate_values(self):
+    def test_all_viewers_and_modes_collate_six_public_values(self):
         for mode in TrainingMode:
             states = []
             game = new_game(mode, seed=710)
@@ -104,14 +104,15 @@ class ActionEncoderTests(unittest.TestCase):
                 state = player.as_policy_state(((0, 1),))
                 states.append(state)
             batch = collate_policy_states(states, device="cpu")
-            self.assertEqual(batch.action_fields.shape, (mode_spec(mode).player_count, 2, 5))
+            self.assertEqual(batch.action_fields.shape, (mode_spec(mode).player_count, 2, 6))
             self.assertEqual(batch.action_fields.dtype, torch.float32)
             self.assertFalse(batch.action_present[:, 0].any())
             self.assertTrue(batch.action_present[:, 1].all())
             self.assertEqual(torch.count_nonzero(batch.action_fields[:, 0]), 0)
             for row, state in enumerate(states):
                 torch.testing.assert_close(batch.action_fields[row, 1],
-                                           torch.tensor(state.records[-1].action.as_vector(state.mode)))
+                                           torch.tensor(state.records[-1].action.as_vector(
+                                               state.mode, no_capture_plies=state.records[-1].no_interaction_plies)))
 
     def test_invalid_points_and_players_fail_before_encoding(self):
         for mode, point in (("four_dark", -1), ("four_dark", 129), ("two_player", 60),
@@ -171,7 +172,7 @@ class ActionEncoderTests(unittest.TestCase):
         for scale in ("bootstrap", "main", "extended"):
             settings = TrainingSettings.from_yaml(config_path, TrainingMode.FOUR_DARK, model_scale=scale)
             self.assertEqual(settings.model.action_encoder_type, ACTION_ENCODER_TYPE)
-        for field, value, error in (("input_dim", 8, "exactly five"),
+        for field, value, error in (("input_dim", 8, "exactly six"),
                                     ("output_dim", 128, "equal output"),
                                     ("architecture", "field_embeddings", "unsupported action encoder")):
             data = yaml.safe_load(config_path.read_text(encoding="utf-8"))

@@ -82,10 +82,15 @@ class InferenceEngine:
                 inference_temporal_cache_entries=temporal_cache_entries,
                 inference_board_cache_entries=2048,
             )
-        policy = GamePolicyTransformer(config).to(resolved_device)
-        layout = PieceConditionedLayoutPointerDecoder(config).to(resolved_device)
-        policy.load_state_dict(payload["policy"], strict=True)
-        layout.load_state_dict(payload["layout"], strict=True)
+        policy = GamePolicyTransformer(config)
+        layout = PieceConditionedLayoutPointerDecoder(config)
+        if "packed_weights" in payload:
+            from .inference_weights import install_packed_weights
+            install_packed_weights(policy, payload["packed_weights"]["policy"], resolved_device)
+            install_packed_weights(layout, payload["packed_weights"]["layout"], resolved_device)
+        else:
+            policy.to(resolved_device).load_state_dict(payload["policy"], strict=True)
+            layout.to(resolved_device).load_state_dict(payload["layout"], strict=True)
         amp_dtype = None
         if is_accelerator(resolved_device):
             amp_dtype = (

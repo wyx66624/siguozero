@@ -17,9 +17,10 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from .accelerator import supports_pinned_memory
+from .accelerator import supports_pinned_memory, trim_cuda_cache
+from .cuda_graph_runtime import warmup_stream
 from .encoding import PolicyState
-from .history_arrays import HistoryArrayView
+from .history_arrays import HistoryArrayView, OBSERVATION_METADATA_DIM
 from .modes import mode_spec
 
 
@@ -28,6 +29,7 @@ class _Entry:
     slot: int
     window_start: int = -1
     length: int = 0
+    owner: int = 0
 
 
 class FixedKVCache:
@@ -49,8 +51,28 @@ class FixedKVCache:
                 # CPU/NPU and installations without Triton retain exact SDPA.
                 pass
         self.prefill_states = self.decode_states = self.decode_tokens = 0
+        self.prefill_padded_tokens = self.prefill_max_padded_tokens = 0
         self.submitted_decode_tokens = 0
         self.graph_captures = self.graph_replays = 0
+        self._encode_calls = 0
+        self.allocator_trimmed_bytes = 0
+
+    PREFILL_PADDED_TOKENS = 8192
+
+    def _prefill_batches(self, states, indices):
+        """Keep each complete history; group nearby lengths under a token cap."""
+        batch = []
+        maximum = 0
+        for index in sorted(indices, key=lambda i: len(states[i].records)):
+            length = len(states[index].records)
+            if batch and max(maximum, length) * (len(batch) + 1) > self.PREFILL_PADDED_TOKENS:
+                yield batch
+                batch = []
+                maximum = 0
+            batch.append(index)
+            maximum = max(maximum, length)
+        if batch:
+            yield batch
 
     def allocate(self) -> None:
         if self.storage is not None:
@@ -71,16 +93,32 @@ class FixedKVCache:
             if key[0] == game_identity:
                 self.free.append(self.entries.pop(key).slot)
 
+    def share_storage(self, other: FixedKVCache) -> None:
+        """Share bounded slots, never model-specific values or CUDA graphs.
+
+        Seat ownership is fixed for an entire game. Both policies use one slot
+        allocator; a seat cannot accidentally read another model's KV values.
+        Call inside the same autocast context used for rollout inference.
+        """
+        if (self.entries or self.storage is not None or self.capacity != other.capacity
+                or self.model.config != other.model.config or self.model.device != other.model.device):
+            raise ValueError("fixed KV sharing requires fresh compatible caches")
+        other.allocate()
+        self.storage, self.contexts = other.storage, other.contexts
+        self.entries, self.free = other.entries, other.free
+
     def _entry(self, view: HistoryArrayView, pinned: set) -> _Entry:
         key = view.identity
         entry = self.entries.get(key)
+        if entry is not None and entry.owner != id(self.model):
+            raise RuntimeError("a game seat cannot reuse KV from another policy")
         if entry is None:
             if not self.free:
                 victim = next((key for key in self.entries if key not in pinned), None)
                 if victim is None:
                     raise torch.OutOfMemoryError("PPO fixed KV capacity is smaller than the active batch")
                 self.free.append(self.entries.pop(victim).slot)
-            entry = _Entry(self.free.pop())
+            entry = _Entry(self.free.pop(), owner=id(self.model))
             self.entries[key] = entry
         self.entries.move_to_end(key)
         return entry
@@ -153,7 +191,7 @@ class FixedKVCache:
         if entry is None:
             # Warm up all libraries/JIT kernels on a side stream before capture.
             static_raw, static_meta = raw.clone(), metadata.clone()
-            stream = torch.cuda.Stream(device=raw.device)
+            stream = warmup_stream(raw.device)
             stream.wait_stream(torch.cuda.current_stream(raw.device))
             with torch.cuda.stream(stream):
                 for _ in range(2):
@@ -178,6 +216,9 @@ class FixedKVCache:
 
     def encode(self, states: Sequence[PolicyState]):
         from .models import PolicyFeatures
+        if self._encode_calls % 64 == 0:
+            self.allocator_trimmed_bytes += trim_cuda_cache(self.model.device)
+        self._encode_calls += 1
         if len({state.records.identity for state in states}) != len(states):
             # Duplicate or out-of-order diagnostic queries cannot mutate one
             # seat's slot twice in the same invocation.
@@ -198,9 +239,15 @@ class FixedKVCache:
         output = torch.empty((len(states), self.model.config.temporal_dim), device=self.model.device,
                                dtype=self.contexts.dtype)
         if cold:
-            features = self.model._encode_full([states[i] for i in cold], count_history_stats=False,
-                                               fixed_slots=[entries[i].slot for i in cold])
-            output.index_copy_(0, torch.tensor(cold, device=output.device), features.context)
+            # A few long games must not pad an entire actor wave to 1,001
+            # positions and force even subsequent short decode waves to shrink.
+            for indices in self._prefill_batches(states, cold):
+                features = self.model._encode_full([states[i] for i in indices], count_history_stats=False,
+                                                   fixed_slots=[entries[i].slot for i in indices])
+                output.index_copy_(0, torch.tensor(indices, device=output.device), features.context)
+                padded = len(indices) * max(len(states[i].records) for i in indices)
+                self.prefill_padded_tokens += padded
+                self.prefill_max_padded_tokens = max(self.prefill_max_padded_tokens, padded)
             self.prefill_states += len(cold)
             self.model._temporal_cold_states += len(cold)
             self.model._temporal_computed_pairs += sum(len(states[i].records) * (len(states[i].records) + 1) // 2 for i in cold)
@@ -210,7 +257,7 @@ class FixedKVCache:
             # Stable sizes avoid a separate capture for each rare partial batch.
             batch = ((len(warm) + 7) // 8) * 8 if self.kernels is not None else len(warm)
             view = states[warm[0]].records
-            width = mode_spec(view.mode).point_count + (75 if view.dead_rules else 0) + 10
+            width = mode_spec(view.mode).point_count + (75 if view.dead_rules else 0) + OBSERVATION_METADATA_DIM
             pin = supports_pinned_memory(output.device)
             raw_cpu = torch.zeros((batch, queries, width), dtype=torch.int16, pin_memory=pin)
             meta_cpu = torch.zeros((batch, 3), dtype=torch.long, pin_memory=pin)

@@ -6,7 +6,11 @@
 蒙特卡洛终局续局。revision 20 已将棋盘编码改为**整盘向量经过一个线性层得到 256 维**，
 移除逐点 Embedding 和棋盘 Transformer，详见[整盘编码与验证](docs/whole_board_linear_zh.md)。
 revision 21 将动作改为**起点二维坐标、终点二维坐标、相对行动方 → Linear(5,256)**，
-不再使用动作字段 Embedding 和战斗结果特征，详见[五维动作编码](docs/action_linear_zh.md)。
+不再使用动作字段 Embedding 和战斗结果特征，详见[动作坐标编码历史](docs/action_linear_zh.md)。
+revision 24 将和棋训练奖励改为 **-0.15**，并增加第六个动作输入：
+**距 70 步无吃子和棋的剩余步数**。四国使用 `Linear(6,128)`，PPO 分别传播队伍胜负
+与共同和棋惩罚，格式 6/7 断点可保留进度迁移到格式 8。详见[负奖励、步骤倒计时与迁移](docs/draw_penalty_countdown_zh.md)。
+revision 25 增加**每人每局四次主动跳过**：动作 `0` / `(0,0)`，棋盘输入增加四个剩余次数，格式 9 从旧完整断点保留进度续训。详见[跳过动作与续训迁移](docs/pass_action_zh.md)。
 参数和训练流程见[四国 PPO](docs/four_player_ppo_zh.md)。二人模式继续使用 Game-GRPO。
 revision 22 将四暗、双明的棋盘和动作投影各缩为 **128 维**，拼接后 **256 维**，
 main 保留 32 层，FFN 改为 **1024**；Policy 为 **36,324,226** 参数。
@@ -67,7 +71,7 @@ print(board.directed_paths[:5])
 action = board.action(0, 127)
 
 # 静态动作列表已删除包括工兵在内都永远不可能完成的点对。
-assert len(board.actions) == 5624
+assert len(board.actions) == 5625
 action_id = board.action_index(*action)
 assert board.decode_action(action_id) == action
 
@@ -255,8 +259,13 @@ python tools/benchmark_rollout.py --device npu --mode two_player \
 二人保留进度 `30%、35%、…、100%`、每轮 1000 局的日程。
 得分率超过 50% 时更新 `checkpoints/best.pt`。完整续训仍用 `latest.pt`；规则、配置与
 棋力变化记录见 [训练中的自动最优模型选择](docs/best_model_selection_zh.md)。
-四国默认只在评测时保存参数和完整续训状态，取消逐轮及退出保存；初始比较基线先留在
-CPU 内存，首次评测时再落盘。中途停止从最近评测保存点恢复，首次评测前的进度不可恢复。
+四国完整续训断点每 **2500 万环境步**保存一次，初始化与正常退出也保存；评测仍每
+5000 万步执行。本地对弈快照每 5 次更新生成。训练、评测和人机对局默认没有总步数上限，
+连续 **70 步没有吃子**自动和棋。旧运行的完整迁移方式见[规则与断点迁移](docs/draw_rule_migration_zh.md)。
+
+本地 4090 配置覆盖上述默认值：完整断点每 **1000 万步**保存，正常停止额外保存；
+PPO 使用随训练进度收窄的优势自适应裁剪。监控区分已保存与未保存进度，详见
+[动态裁剪与真实恢复进度](docs/adaptive_clipping_and_resume_zh.md)。
 
 **验证新模型是否真的更强**：二人和四国使用独立的跨版本棋力评测入口、协议与成绩库：
 
@@ -376,4 +385,4 @@ python -m junqi.training.infer_double_open --checkpoint runs/double_open/with_de
 python -m junqi.training.infer_two_player --checkpoint runs/two_player/with_dead_rules/checkpoints/latest.pt
 ```
 
-单卡安装验收可为任一训练入口添加 `--smoke-test --device cuda`；双进程分布式验收可用 `torchrun --standalone --nproc-per-node=2 ... --smoke-test --device cpu --anchor-batch 2 --base-game-pool 2`。四国默认 `--checkpoint-policy evaluation`，只在评测时保存；二人及安装验收默认 `periodic`，先保存 update 0，再按周期及退出保存。训练指标写入各变体目录内的追加式 `metrics.jsonl`、文本日志和可选 TensorBoard。独立资源心跳写入 `resource_metrics.jsonl` 并原子更新 `resource_latest.json`，其他 rank 使用带 `.rankNNN` 的独立日志。可用 `--resource-monitor-seconds` 调整间隔；`--checkpoint-every`、`--archive-every` 和 `--keep-checkpoint-archives` 仅控制 `periodic` 策略的周期归档。检查点包含模式/算法/变体标记、Policy/Layout（四国另含 Critic）、对应参考模型和优化器、训练计数、有效 microbatch、布局样本缓冲区、所有 rank 的未结束基础局、玩家历史窗口和 CPU/CUDA/环境随机状态；只有开启死规则时才保存持久确定身份与确定阵亡库存。
+单卡安装验收可为任一训练入口添加 `--smoke-test --device cuda`；双进程分布式验收可用 `torchrun --standalone --nproc-per-node=2 ... --smoke-test --device cpu --anchor-batch 2 --base-game-pool 2`。默认 `--checkpoint-policy periodic`，先保存 update 0，再按周期及正常退出保存；四国完整断点间隔为 2500 万环境步，二人默认每 5 次更新保存。训练指标写入各变体目录内的追加式 `metrics.jsonl`、文本日志和可选 TensorBoard。独立资源心跳写入 `resource_metrics.jsonl` 并原子更新 `resource_latest.json`，其他 rank 使用带 `.rankNNN` 的独立日志。可用 `--resource-monitor-seconds` 调整间隔；`--checkpoint-interval-environment-plies` 设置环境步保存间隔，显式 `--checkpoint-every` 改用 update 间隔。`--archive-every` 和 `--keep-checkpoint-archives` 控制周期归档。检查点包含模式/算法/变体标记、Policy/Layout（四国另含 Critic）、对应参考模型和优化器、训练计数、有效 microbatch、布局样本缓冲区、所有 rank 的未结束基础局、玩家历史窗口和 CPU/CUDA/环境随机状态；只有开启死规则时才保存持久确定身份与确定阵亡库存。

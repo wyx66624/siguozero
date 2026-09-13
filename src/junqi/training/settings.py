@@ -13,6 +13,8 @@ from .encoding import ACTION_FEATURE_DIM
 from .models import ModelConfig
 from .modes import TrainingMode, normalize_mode
 from .rollout import REPLICAS_PER_CANDIDATE, ROOT_CANDIDATE_COUNT
+from .rewards import DEFAULT_DRAW_REWARD
+from .clipping import DEFAULT_CLIP_SCHEDULE
 
 
 PLAYER_PARAMETER_SHARING = "single_policy_and_layout_instance_all_seats"
@@ -83,14 +85,25 @@ class TrainingSettings:
     ppo_deferred_values: bool = False
     ppo_pipeline_groups: int = 1
     ppo_fused_optimizer: bool = False
+    ppo_learner_cuda_graphs: bool = False
+    ppo_cuda_memory_fraction: float | None = None
+    ppo_adaptive_clip: bool = False
+    ppo_clip_minimum: float = 0.1
+    ppo_clip_maximum: float = 0.45
+    ppo_clip_advantage_scale: float = 0.5
+    ppo_clip_schedule: tuple[tuple[float, float, float], ...] = DEFAULT_CLIP_SCHEDULE
     grpo_equivalent_plies: int | None = None
     grpo_mean_remaining_plies: float = 334.5
     arena_enabled: bool = True
     arena_start_percent: int = 30
     arena_interval_percent: int = 5
     arena_interval_environment_plies: int | None = None
+    arena_after_half_interval_environment_plies: int | None = None
+    arena_after_half_historical_only: bool = False
+    arena_observational_only: bool = False
+    arena_historical_teammate_fraction: float = 0.0
     arena_games: int = 1000
-    arena_max_plies: int = 2000
+    arena_max_plies: int | None = None
     arena_seed: int = 20260910
     arena_temporal_cache_entries: int = 8
     arena_parallel_games: int = 32
@@ -98,6 +111,40 @@ class TrainingSettings:
     arena_environment_workers: int = 4
     checkpoint_policy: str = "periodic"
     inference_snapshot_every_updates: int = 0
+    no_capture_draw_plies: int = 70
+    max_passes_per_player: int = 4
+    checkpoint_interval_environment_plies: int | None = None
+    draw_reward: float = DEFAULT_DRAW_REWARD
+    historical_enabled: bool = False
+    historical_start_fraction: float = 0.5
+    historical_training_fraction: float = 0.2
+    historical_teammate_fraction: float = 0.2
+    historical_snapshot_fractions: tuple[float, ...] = (0.05, 0.1, 0.2, 0.3, 0.4)
+    historical_cohort_games: int = 1024
+    historical_eval_games: int = 400
+    historical_eval_total_games: int | None = None
+    historical_uniform_fraction: float = 0.05
+    historical_learning_rate: float = 0.01
+    layout_buffer_capacity: int = 16384
+    layout_max_behavior_age: int = 0
+    layout_microbatch_size: int = 32
+    adaptive_entropy: bool = False
+    entropy_minimum: float = 0.005
+    entropy_maximum: float = 0.02
+    entropy_opening_maximum: float | None = None
+    entropy_target_ratio: float = 0.6
+    entropy_adaptation_rate: float = 0.1
+    entropy_ema_decay: float = 0.9
+    entropy_opening_plies: int = 16
+    adaptive_learning_rate: bool = False
+    maximum_learning_rate: float = 1.0e-4
+    lr_increase_factor: float = 1.03
+    lr_decrease_factor: float = 0.8
+    lr_stable_updates: int = 5
+    lr_cooldown_updates: int = 5
+    lr_ema_decay: float = 0.8
+    lr_probe_samples: int = 2048
+    lr_recovery_clip_fraction: float = 0.1
 
     @classmethod
     def from_yaml(
@@ -125,6 +172,12 @@ class TrainingSettings:
         learner = data["learner"]
         runtime = data.get("runtime", {})
         ppo = data.get("ppo", {})
+        adaptive_clip = ppo.get("adaptive_clip", {})
+        if not isinstance(adaptive_clip, dict):
+            raise ValueError("ppo.adaptive_clip must be a mapping")
+        historical = data.get("historical_opponents", {})
+        if not isinstance(historical, dict):
+            raise ValueError("historical_opponents must be a mapping")
         model_selection = data.get("model_selection", {})
         if not isinstance(model_selection, dict):
             raise ValueError("model_selection must be a mapping")
@@ -236,7 +289,24 @@ class TrainingSettings:
             "layout_prefetch_games": int(ppo.get("layout_prefetch_games", 1)) if algorithm == "ppo" else 1,
             "ppo_deferred_values": ppo.get("deferred_values", False) if algorithm == 'ppo' else False,
             "ppo_pipeline_groups": int(ppo.get("pipeline_groups", 1)) if algorithm == 'ppo' else 1,
+            "historical_enabled": historical.get("enabled", False) if algorithm == "ppo" else False,
+            "historical_start_fraction": historical.get("start_fraction", 0.5),
+            "historical_training_fraction": historical.get("training_fraction", 0.2),
+            "historical_teammate_fraction": historical.get("teammate_fraction", 0.2),
+            "historical_snapshot_fractions": tuple(historical.get("snapshot_fractions", (0.05, 0.1, 0.2, 0.3, 0.4))),
+            "historical_cohort_games": historical.get("cohort_games", 1024),
+            "historical_eval_games": historical.get("eval_games", 400),
+            "historical_eval_total_games": historical.get("eval_total_games"),
+            "historical_uniform_fraction": historical.get("uniform_fraction", 0.05),
+            "historical_learning_rate": historical.get("learning_rate", 0.01),
             "ppo_fused_optimizer": ppo.get("fused_optimizer", False) if algorithm == 'ppo' else False,
+            "ppo_learner_cuda_graphs": ppo.get("learner_cuda_graphs", False) if algorithm == 'ppo' else False,
+            "ppo_cuda_memory_fraction": ppo.get("cuda_memory_fraction") if algorithm == 'ppo' else None,
+            "ppo_adaptive_clip": adaptive_clip.get("enabled", False) if algorithm == 'ppo' else False,
+            "ppo_clip_minimum": adaptive_clip.get("minimum", 0.1),
+            "ppo_clip_maximum": adaptive_clip.get("maximum", 0.45),
+            "ppo_clip_advantage_scale": adaptive_clip.get("advantage_scale", 0.5),
+            "ppo_clip_schedule": adaptive_clip.get("schedule", DEFAULT_CLIP_SCHEDULE),
             "grpo_equivalent_plies": None,
             "grpo_mean_remaining_plies": float(ppo.get("grpo_mean_remaining_plies", 334.5)),
             # Preserve the YAML types so malformed booleans and fractional
@@ -245,8 +315,15 @@ class TrainingSettings:
             "arena_start_percent": model_selection.get("start_percent", 30),
             "arena_interval_percent": model_selection.get("interval_percent", 5),
             "arena_interval_environment_plies": model_selection.get("interval_environment_plies"),
+            "arena_after_half_interval_environment_plies": model_selection.get("after_half_interval_environment_plies"),
+            "arena_after_half_historical_only": model_selection.get("after_half_historical_only", False),
+            "arena_observational_only": model_selection.get("observational_only", False),
+            "arena_historical_teammate_fraction": model_selection.get("historical_teammate_fraction", 0.0),
             "arena_games": model_selection.get("games", 1000),
-            "arena_max_plies": model_selection.get("max_plies", 2000),
+            "arena_max_plies": model_selection.get("max_plies"),
+            "no_capture_draw_plies": data.get("rules", {}).get("no_capture_draw_plies", 70),
+            "max_passes_per_player": data.get("rules", {}).get("max_passes_per_player", 4),
+            "draw_reward": data.get("rules", {}).get("terminal_reward", {}).get("draw", DEFAULT_DRAW_REWARD),
             "arena_seed": model_selection.get("seed", 20260910),
             "arena_temporal_cache_entries": model_selection.get(
                 "temporal_cache_entries", 8
@@ -268,7 +345,7 @@ class TrainingSettings:
                 runtime.get("enable_torch_compile", False)
             ),
             "base_game_pool_size": int(profile_pool.get(normalized.value, 32)),
-            "max_game_plies": runtime.get("max_game_plies", 2000),
+            "max_game_plies": runtime.get("max_game_plies"),
             "anchor_batch": int(learner["policy_batch"]["global_target"]),
             "policy_microbatch": policy_microbatch,
             "actor_inference_batch": int(
@@ -288,6 +365,17 @@ class TrainingSettings:
             ),
             "policy_learning_rate": float(learner["learning_rate"]["initial"]),
             "minimum_learning_rate": float(learner["learning_rate"]["minimum"]),
+            "adaptive_learning_rate": (learner["learning_rate"].get("adaptive", False)
+                                       if algorithm == "ppo" else False),
+            "maximum_learning_rate": float(learner["learning_rate"].get(
+                "maximum", learner["learning_rate"]["initial"])),
+            "lr_increase_factor": learner["learning_rate"].get("increase_factor", 1.03),
+            "lr_decrease_factor": learner["learning_rate"].get("decrease_factor", .8),
+            "lr_stable_updates": learner["learning_rate"].get("stable_updates", 5),
+            "lr_cooldown_updates": learner["learning_rate"].get("cooldown_updates", 5),
+            "lr_ema_decay": learner["learning_rate"].get("ema_decay", .8),
+            "lr_probe_samples": learner["learning_rate"].get("probe_samples", 2048),
+            "lr_recovery_clip_fraction": learner["learning_rate"].get("recovery_clip_fraction", .1),
             "layout_learning_rate": float(
                 runtime.get("layout_learning_rate", 5.0e-5)
             ),
@@ -297,6 +385,14 @@ class TrainingSettings:
             "entropy_coefficient": float(
                 learner["entropy_coefficient"]["initial"]
             ),
+            "adaptive_entropy": learner["entropy_coefficient"].get("adaptive_to_target_entropy", False),
+            "entropy_minimum": float(learner["entropy_coefficient"].get("minimum", 0.005)),
+            "entropy_maximum": float(learner["entropy_coefficient"].get("maximum", 0.02)),
+            "entropy_opening_maximum": learner["entropy_coefficient"].get("opening_maximum"),
+            "entropy_target_ratio": float(learner["entropy_coefficient"].get("target_ratio", 0.6)),
+            "entropy_adaptation_rate": float(learner["entropy_coefficient"].get("adaptation_rate", 0.1)),
+            "entropy_ema_decay": float(learner["entropy_coefficient"].get("ema_decay", 0.9)),
+            "entropy_opening_plies": learner["entropy_coefficient"].get("opening_plies", 16),
             "kl_coefficient": float(learner["kl"]["initial_coefficient"]),
             "target_kl": float(learner["kl"]["target_per_action"]),
             "early_stop_kl_multiple": float(
@@ -312,13 +408,19 @@ class TrainingSettings:
             "layout_outcomes_per_update": int(
                 runtime.get("layout_outcomes_per_update", 64)
             ),
+            "layout_buffer_capacity": int(runtime.get("layout_buffer_capacity", 16384)),
+            # GRPO games can span many learner updates; PPO's freshness window
+            # must not silently expire those outcomes in two-player runs.
+            "layout_max_behavior_age": int(runtime.get("layout_max_behavior_age", 16 if algorithm == "ppo" else 0)),
+            "layout_microbatch_size": int(runtime.get("layout_microbatch_size", 32)),
             "reference_refresh_updates": int(
                 runtime.get("reference_refresh_updates", 50000)
             ),
             "checkpoint_every_updates": int(
-                runtime.get("checkpoint_every_updates", 10)
+                runtime.get("checkpoint_every_updates", 5)
             ),
             "checkpoint_policy": model_selection.get("checkpoint_policy", "periodic"),
+            "checkpoint_interval_environment_plies": model_selection.get("checkpoint_interval_environment_plies"),
             "inference_snapshot_every_updates": int(runtime.get("inference_snapshot_every_updates", 0)),
             "archive_every_updates": int(
                 runtime.get("archive_every_updates", 500)
@@ -373,9 +475,16 @@ class TrainingSettings:
                     "layout_outcomes_per_update": 2,
                     "checkpoint_every_updates": 1,
                     "checkpoint_policy": "periodic",
+                    "checkpoint_interval_environment_plies": None,
+                    "ppo_adaptive_clip": False,
                     "archive_every_updates": 1,
                     "arena_enabled": False,
+                    "historical_enabled": False,
                     "arena_interval_environment_plies": None,
+                    "arena_after_half_interval_environment_plies": None,
+                    "arena_after_half_historical_only": False,
+                    "arena_observational_only": False,
+                    "arena_historical_teammate_fraction": 0.0,
                 }
             )
         if overrides:
@@ -411,8 +520,6 @@ class TrainingSettings:
             if not tiny and (not overrides or "warmup_updates" not in overrides):
                 # Former GRPO warmup: 2000 updates x 128 root decision states.
                 values["warmup_updates"] = max(1, math.ceil(256_000 / values["anchor_batch"]))
-        if values["max_game_plies"] is not None:
-            values["max_game_plies"] = int(values["max_game_plies"])
         if values["target_continuation_plies"] is not None:
             values["target_continuation_plies"] = int(
                 values["target_continuation_plies"]
@@ -442,6 +549,69 @@ class TrainingSettings:
         return result
 
     def validate(self) -> None:
+        clip_values = (self.clip_epsilon, self.ppo_clip_minimum, self.ppo_clip_maximum,
+                       self.ppo_clip_advantage_scale)
+        if (type(self.ppo_adaptive_clip) is not bool or any(
+                type(x) not in (int, float) or not math.isfinite(x) for x in clip_values)
+                or not 0 < self.clip_epsilon < 1
+                or not 0 < self.ppo_clip_minimum <= self.ppo_clip_maximum < 1
+                or not 0 <= self.ppo_clip_advantage_scale <= 1):
+            raise ValueError("invalid bounded PPO clipping settings")
+        schedule = self.ppo_clip_schedule
+        if (not isinstance(schedule, (list, tuple)) or len(schedule) < 2
+                or any(not isinstance(row, (list, tuple)) or len(row) != 3 or any(
+                    type(x) not in (int, float) or not math.isfinite(x) for x in row)
+                    for row in schedule)):
+            raise ValueError("PPO clip schedule must contain finite [progress, lower, upper] rows")
+        if (schedule[0][0] != 0 or schedule[-1][0] != 1
+                or any(not 0 <= p <= 1 or not self.ppo_clip_minimum <= low <= high <= self.ppo_clip_maximum
+                       for p, low, high in schedule)
+                or any(a[0] >= b[0] or a[1] < b[1] or a[2] < b[2]
+                       for a, b in zip(schedule, schedule[1:]))):
+            raise ValueError("PPO clipping must narrow monotonically from progress 0 to 1 within hard bounds")
+        if self.ppo_adaptive_clip and (self.algorithm != 'ppo' or not self.target_environment_plies):
+            raise ValueError("adaptive PPO clipping requires an environment-step target and PPO")
+        rates = (self.policy_learning_rate, self.minimum_learning_rate,
+                 self.maximum_learning_rate, self.lr_increase_factor,
+                 self.lr_decrease_factor, self.lr_ema_decay, self.lr_recovery_clip_fraction,
+                 self.critic_learning_rate, self.target_kl, self.early_stop_kl_multiple,
+                 self.early_stop_clip_fraction)
+        if (type(self.adaptive_learning_rate) is not bool
+                or any(not isinstance(v, (int, float)) or isinstance(v, bool)
+                       or not math.isfinite(v) for v in rates)
+                or not 0 < self.minimum_learning_rate <= self.maximum_learning_rate
+                or self.minimum_learning_rate > self.policy_learning_rate
+                or not 1 < self.lr_increase_factor <= 1.5
+                or not 0 < self.lr_decrease_factor < 1
+                or not 0 <= self.lr_ema_decay < 1
+                or not 0 < self.lr_recovery_clip_fraction <= self.early_stop_clip_fraction
+                or type(self.lr_stable_updates) is not int or self.lr_stable_updates < 1
+                or type(self.lr_cooldown_updates) is not int or self.lr_cooldown_updates < 0
+                or type(self.lr_probe_samples) is not int or self.lr_probe_samples < 1
+                or not math.isfinite(self.target_kl) or self.target_kl <= 0
+                or not math.isfinite(self.early_stop_kl_multiple) or self.early_stop_kl_multiple <= .5
+                or (self.adaptive_learning_rate and self.algorithm != "ppo")):
+            raise ValueError("invalid bounded adaptive learning rate settings")
+        entropy_values = (self.entropy_coefficient, self.entropy_minimum, self.entropy_maximum,
+                          self.entropy_target_ratio, self.entropy_adaptation_rate, self.entropy_ema_decay)
+        if (type(self.adaptive_entropy) is not bool or any(
+                type(x) not in (int, float) or not math.isfinite(x) for x in entropy_values)
+                or self.entropy_coefficient < 0 or not 0 < self.entropy_minimum <= self.entropy_maximum
+                or not 0 < self.entropy_target_ratio <= 1 or not 0 < self.entropy_adaptation_rate <= 1
+                or not 0 <= self.entropy_ema_decay < 1 or type(self.entropy_opening_plies) is not int
+                or self.entropy_opening_plies < 0):
+            raise ValueError("invalid adaptive entropy settings")
+        if self.adaptive_entropy and not self.entropy_minimum <= self.entropy_coefficient <= self.entropy_maximum:
+            raise ValueError("adaptive entropy initial coefficient must be within minimum and maximum")
+        if self.entropy_opening_maximum is not None:
+            maximum = self.entropy_opening_maximum
+            if (type(maximum) not in (int, float) or not math.isfinite(maximum)
+                    or maximum < self.entropy_minimum
+                    or (self.adaptive_entropy and maximum < self.entropy_coefficient)):
+                raise ValueError("invalid opening entropy maximum")
+        if (isinstance(self.draw_reward, bool) or not isinstance(self.draw_reward, (int, float))
+                or not math.isfinite(self.draw_reward) or not -1 < self.draw_reward <= 0):
+            raise ValueError("draw_reward must be finite and in (-1, 0]")
         expected_algorithm = "grpo" if self.mode is TrainingMode.TWO_PLAYER else "ppo"
         if self.algorithm != expected_algorithm:
             raise ValueError(f"{self.mode.value} requires {expected_algorithm}")
@@ -469,6 +639,8 @@ class TrainingSettings:
             "ppo_pipeline_groups": self.ppo_pipeline_groups,
             "layout_update_interval": self.layout_update_interval,
             "layout_outcomes_per_update": self.layout_outcomes_per_update,
+            "layout_buffer_capacity": self.layout_buffer_capacity,
+            "layout_microbatch_size": self.layout_microbatch_size,
             "checkpoint_every_updates": self.checkpoint_every_updates,
             "archive_every_updates": self.archive_every_updates,
             "minimum_policy_microbatch": self.minimum_policy_microbatch,
@@ -476,6 +648,10 @@ class TrainingSettings:
         for name, value in positive.items():
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
+        if self.layout_buffer_capacity < max(2, self.layout_outcomes_per_update):
+            raise ValueError("layout buffer capacity must cover an update batch")
+        if self.layout_max_behavior_age < 0:
+            raise ValueError("layout maximum behavior age must be nonnegative (0 disables age expiry)")
         if self.policy_microbatch > self.anchor_batch:
             raise ValueError("policy microbatch cannot exceed anchor batch")
         if self.minimum_policy_microbatch > self.policy_microbatch:
@@ -504,6 +680,14 @@ class TrainingSettings:
             raise ValueError("keep checkpoint archives cannot be negative")
         if self.checkpoint_policy not in ("periodic", "evaluation"):
             raise ValueError("checkpoint_policy must be periodic or evaluation")
+        for name in ("max_game_plies", "arena_max_plies", "checkpoint_interval_environment_plies"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value <= 0):
+                raise ValueError(f"{name} must be a positive integer or None")
+        if type(self.max_passes_per_player) is not int or self.max_passes_per_player != 4:
+            raise ValueError("the current rules require exactly four passes per player")
+        if type(self.no_capture_draw_plies) is not int or not 1 <= self.no_capture_draw_plies <= 70:
+            raise ValueError("no_capture_draw_plies must be an integer in [1, 70]")
         if not isinstance(self.learner_length_bucketing, bool):
             raise ValueError("learner_length_bucketing must be a boolean")
         if not isinstance(self.ppo_sequence_training, bool):
@@ -512,23 +696,82 @@ class TrainingSettings:
             raise ValueError("ppo_deferred_values must be a boolean")
         if type(self.ppo_fused_optimizer) is not bool:
             raise ValueError("ppo_fused_optimizer must be a boolean")
+        if type(self.ppo_learner_cuda_graphs) is not bool:
+            raise ValueError("ppo_learner_cuda_graphs must be a boolean")
+        if self.ppo_cuda_memory_fraction is not None and (
+                type(self.ppo_cuda_memory_fraction) not in (int, float)
+                or not math.isfinite(self.ppo_cuda_memory_fraction)
+                or not 0 < self.ppo_cuda_memory_fraction <= 1):
+            raise ValueError('ppo_cuda_memory_fraction must be in (0, 1]')
         if self.ppo_pipeline_groups > 1 and (not self.ppo_deferred_values or not self.model.ppo_array_history
                                             or self.rollout_environment_workers < 2):
             raise ValueError("PPO pipeline needs deferred values, array histories and parallel workers")
         if type(self.arena_enabled) is not bool:
             raise ValueError("arena_enabled must be a boolean")
+        if type(self.historical_enabled) is not bool:
+            raise ValueError("historical_enabled must be a boolean")
+        if type(self.arena_after_half_historical_only) is not bool:
+            raise ValueError("arena_after_half_historical_only must be a boolean")
+        if self.arena_after_half_historical_only and (
+                not self.historical_enabled or self.historical_start_fraction > .5
+                or self.target_environment_plies is None or self.arena_interval_environment_plies is None):
+            raise ValueError("historical-only evaluation after half requires an environment schedule and historical opponents active by half")
+        if self.historical_enabled:
+            if (self.algorithm != "ppo" or self.target_environment_plies is None
+                    or not self.arena_enabled or self.ppo_pipeline_groups < 2):
+                raise ValueError("historical opponents require four-player pipelined PPO, an environment budget and arena")
+            if not self.model.ppo_fixed_kv or not self.model.incremental_inference:
+                raise ValueError("historical opponents require bounded shared fixed KV storage")
+            for name in ("historical_start_fraction", "historical_training_fraction", "historical_uniform_fraction"):
+                value = getattr(self, name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < 1:
+                    raise ValueError(f"{name} must be in (0, 1)")
+            value = self.historical_teammate_fraction
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value < 1:
+                raise ValueError("historical_teammate_fraction must be in [0, 1)")
+            fractions = self.historical_snapshot_fractions
+            if (not 2 <= len(fractions) <= 7 or list(fractions) != sorted(set(fractions))
+                    or any(not 0 < f < self.historical_start_fraction for f in fractions)):
+                raise ValueError("historical snapshots require 2..7 increasing fractions before activation")
+            for name in ("historical_cohort_games", "historical_eval_games"):
+                if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
+                    raise ValueError(f"{name} must be a positive integer")
+            if self.historical_eval_games % 4:
+                raise ValueError("historical evaluation requires complete four-game rotations")
+            total = self.historical_eval_total_games
+            if total is not None and (type(total) is not int or total % 4
+                                      or total < 4 * (1 + len(fractions))):
+                raise ValueError("historical_eval_total_games must cover every opponent with complete four-game rotations")
+            if not 0 < self.historical_learning_rate <= 1:
+                raise ValueError("historical learning rate must be in (0, 1]")
         if self.arena_interval_environment_plies is not None:
             if (type(self.arena_interval_environment_plies) is not int
                     or self.arena_interval_environment_plies <= 0):
                 raise ValueError("arena_interval_environment_plies must be a positive integer or None")
             if self.arena_enabled and self.target_environment_plies is None:
                 raise ValueError("environment-step model selection requires target_environment_plies")
+        if self.arena_after_half_interval_environment_plies is not None:
+            interval = self.arena_after_half_interval_environment_plies
+            if type(interval) is not int or interval <= 0:
+                raise ValueError("arena_after_half_interval_environment_plies must be a positive integer or None")
+            if self.arena_interval_environment_plies is None or self.target_environment_plies is None:
+                raise ValueError("after-half evaluation requires an environment schedule and budget")
+            if interval > self.arena_interval_environment_plies:
+                raise ValueError("after-half evaluation interval must not exceed the initial interval")
         for name in ("arena_start_percent", "arena_interval_percent"):
             value = getattr(self, name)
             if type(value) is not int or not 1 <= value <= 100:
                 raise ValueError(f"{name} must be an integer in [1, 100]")
+        if type(self.arena_observational_only) is not bool:
+            raise ValueError("arena_observational_only must be a boolean")
+        if self.arena_observational_only and (self.mode is TrainingMode.TWO_PLAYER or self.algorithm != "ppo"):
+            raise ValueError("observational evaluation requires four-player PPO")
+        fraction = self.arena_historical_teammate_fraction
+        if (type(fraction) not in (int, float) or fraction not in (0, .5)
+                or (fraction and not self.arena_observational_only)):
+            raise ValueError("historical teammate evaluation requires observational mode and fraction 0 or 0.5")
         for name in (
-            "arena_games", "arena_max_plies", "arena_temporal_cache_entries",
+            "arena_games", "arena_temporal_cache_entries",
             "arena_parallel_games", "arena_inference_batch_size", "arena_environment_workers",
         ):
             value = getattr(self, name)
@@ -553,9 +796,16 @@ class TrainingSettings:
             )
 
     @property
-    def arena_milestones(self) -> range:
+    def arena_milestones(self) -> range | tuple[int, ...]:
         if self.arena_interval_environment_plies is not None:
             interval = self.arena_interval_environment_plies
+            if self.arena_after_half_interval_environment_plies is not None:
+                target = self.target_environment_plies or 0
+                half = (target + 1) // 2
+                # Include the half-budget boundary exactly once, even when
+                # the first interval does not divide it.
+                return (*range(interval, half, interval),
+                        *range(half, target + 1, self.arena_after_half_interval_environment_plies))
             return range(interval, (self.target_environment_plies or 0) + 1, interval)
         return range(self.arena_start_percent, 101, self.arena_interval_percent)
 
@@ -643,7 +893,7 @@ def _model_config(
     board = policy["board_encoder"]
     action = policy["action_encoder"]
     if int(action["input_dim"]) != ACTION_FEATURE_DIM:
-        raise ValueError("action encoder requires exactly five coordinate/player inputs")
+        raise ValueError("action encoder requires exactly six coordinate/player/countdown inputs")
     if int(action["output_dim"]) != int(board["output_dim"]):
         raise ValueError("action and board encoders must have equal output dimensions")
     temporal = policy["temporal_transformer"]
