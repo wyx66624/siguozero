@@ -87,6 +87,8 @@ class SelfPlayTrainer:
         initialize_from: str | Path | None = None,
         adopt_current_draw_rules: bool = False,
         adopt_draw_penalty: bool = False,
+        adopt_flag_capture_reward: bool = False,
+        adopt_champion_evaluation: bool = False,
         adopt_pass_rule: bool = False,
         expand_game_pool: bool = False,
         reset_oom_batch_limits: bool = False,
@@ -97,6 +99,7 @@ class SelfPlayTrainer:
         self.resumed_from_cumulative = {}
         self.adopt_current_draw_rules = adopt_current_draw_rules
         self.adopt_draw_penalty = adopt_draw_penalty
+        self.adopt_flag_capture_reward = adopt_flag_capture_reward
         self.adopt_pass_rule = adopt_pass_rule
         self.expand_game_pool = expand_game_pool
         self.reset_oom_batch_limits = reset_oom_batch_limits
@@ -105,6 +108,7 @@ class SelfPlayTrainer:
         self.last_checkpoint_environment_plies = 0
         self.draw_rule_migration = None
         self.draw_objective_migration = None
+        self.flag_capture_objective_migration = None
         self.initialize_from = None if initialize_from is None else Path(initialize_from).resolve()
         self.device = (
             resolve_device(settings.device)
@@ -336,6 +340,7 @@ class SelfPlayTrainer:
                     self.policy, self.layout, update=self.update, cumulative=self.cumulative,
                     adopt_current_draw_rules=adopt_current_draw_rules,
                     adopt_pass_rule=adopt_pass_rule,
+                    adopt_champion_evaluation=adopt_champion_evaluation,
                 )
             self.historical.update_progress(self.policy, self.layout,
                 environment_plies=self.cumulative["environment_plies"], update=self.update)
@@ -347,8 +352,11 @@ class SelfPlayTrainer:
         self._write_run_config()
         self._export_live_inference()
         self._install_signal_handlers()
-        if resumed and (adopt_current_draw_rules or adopt_draw_penalty or adopt_pass_rule):
-            self.save_checkpoint(reason="pass_rule_migration" if adopt_pass_rule else
+        if resumed and (adopt_current_draw_rules or adopt_draw_penalty or adopt_pass_rule or
+                        adopt_flag_capture_reward or adopt_champion_evaluation):
+            self.save_checkpoint(reason="champion_evaluation_migration" if adopt_champion_evaluation else
+                                 "flag_capture_objective_migration" if adopt_flag_capture_reward else
+                                 "pass_rule_migration" if adopt_pass_rule else
                                  "draw_objective_migration" if adopt_draw_penalty else "draw_rule_migration", archive=False)
         if not resumed and settings.checkpoint_policy == "periodic":
             self.save_checkpoint(reason="initialized", archive=False)
@@ -499,6 +507,7 @@ class SelfPlayTrainer:
         temporary = self.run_directory / ".resolved_config.json.tmp"
         resolved = self.settings.serializable()
         resolved["draw_objective_migration"] = self.draw_objective_migration
+        resolved["flag_capture_objective_migration"] = self.flag_capture_objective_migration
         resolved["pass_rule_migration"] = self.pass_rule_migration
         resolved["initialized_from"] = (
             None if self.initialize_from is None else str(self.initialize_from)
@@ -565,8 +574,9 @@ class SelfPlayTrainer:
             adopt_draw_rules(payload, self.settings)
         from .pass_migration import reconcile_pass_rule
         reconcile_pass_rule(payload, adopt=self.adopt_pass_rule)
-        from .objective_migration import reconcile_draw_objective
+        from .objective_migration import reconcile_draw_objective, reconcile_flag_capture_objective
         reconcile_draw_objective(payload, self.settings, adopt=self.adopt_draw_penalty)
+        reconcile_flag_capture_objective(payload, self.settings, adopt=self.adopt_flag_capture_reward)
         self.update, trainer_state = restore_training_state(
             payload,
             expected_mode=self.settings.mode.value,
@@ -654,6 +664,7 @@ class SelfPlayTrainer:
         self.draw_rule_migration = trainer_state.get("draw_rule_migration")
         self.pass_rule_migration = trainer_state.get("pass_rule_migration")
         self.draw_objective_migration = trainer_state.get("draw_objective_migration")
+        self.flag_capture_objective_migration = trainer_state.get("flag_capture_objective_migration")
         self.last_checkpoint_environment_plies = int(trainer_state.get(
             "last_checkpoint_environment_plies", restored_cumulative.get("environment_plies", 0),
         ))
@@ -1449,6 +1460,7 @@ class SelfPlayTrainer:
             "draw_rule_migration": self.draw_rule_migration,
             "pass_rule_migration": self.pass_rule_migration,
             "draw_objective_migration": self.draw_objective_migration,
+            "flag_capture_objective_migration": self.flag_capture_objective_migration,
             "policy_lr_scale": self.policy_lr_scale,
             "adaptive_learning_rate": (self.lr_controller.state_dict()
                                        if self.lr_controller is not None else None),
@@ -1481,6 +1493,8 @@ class SelfPlayTrainer:
         # Automatic saves in evaluation mode only reach here at a match. A
         # manual save must also persist its initial opponent for exact resume.
         self.model_selection.persist_baseline()
+        inference_state = self.historical.archive_checkpoint(self.policy, self.layout,
+            environment_plies=self.cumulative["environment_plies"], update=self.update)
         gathered = self.distributed.gather_object(self._local_rank_state())
         path = self.checkpoints.latest_path
         if self.distributed.primary:
@@ -1507,6 +1521,7 @@ class SelfPlayTrainer:
                 algorithm=self.settings.algorithm,
                 critic=self.critic,
                 critic_optimizer=self.critic_optimizer,
+                inference_state=inference_state,
             )
             self.logger.event(f"checkpoint saved: {path} reason={reason}")
         self.distributed.barrier()
@@ -1558,7 +1573,7 @@ class SelfPlayTrainer:
                            else f"games_per_opponent={self.settings.historical_eval_games}")
             self.logger.event(
                 f"historical panel {self.model_selection.milestone_label(milestone)}: update={self.update} "
-                f"opponents={len(self.historical.panel())} {panel_games} "
+                f"opponents={len(self.historical.evaluation_panel())} {panel_games} "
                 f"parallel_games_per_rank={self.settings.arena_parallel_games}; champion evaluation disabled, use latest model"
             )
         elif observational:
@@ -1646,6 +1661,8 @@ class SelfPlayTrainer:
             "wins",
             "draws",
             "losses",
+            "flag_captures",
+            "nonterminal_flag_captures",
         )
         aggregated = RolloutMetrics()
         for field in summed_fields:
@@ -1656,6 +1673,9 @@ class SelfPlayTrainer:
             )
         aggregated.wall_seconds = self.distributed.reduce_float(
             metrics.wall_seconds, operation="max"
+        )
+        aggregated.flag_capture_reward_abs_sum = self.distributed.reduce_float(
+            metrics.flag_capture_reward_abs_sum, operation="sum"
         )
         aggregated.actor_inference_seconds = self.distributed.reduce_float(
             metrics.actor_inference_seconds, operation="max"
@@ -1763,6 +1783,7 @@ class SelfPlayTrainer:
                         pipeline_groups=self.settings.ppo_pipeline_groups,
                         discount=self.settings.discount, gae_lambda=self.settings.gae_lambda,
                         draw_reward=self.settings.draw_reward,
+                        flag_capture_reward=self.settings.flag_capture_reward,
                     )
                     groups = self._normalize_ppo_batch(samples)
                     if not self.settings.ppo_deferred_values:
@@ -1884,7 +1905,9 @@ class SelfPlayTrainer:
                     "model/board_pass_input_dim": self.policy.board_encoder.pass_feature_dim,
                     "rules/max_passes_per_player": self.settings.max_passes_per_player,
                     "training/draw_reward": self.settings.draw_reward,
+                    "training/flag_capture_reward": self.settings.flag_capture_reward,
                     "evaluation/observational_only": int(self.settings.arena_observational_only),
+                    "evaluation/champion_only": int(self.settings.arena_champion_only),
                     "evaluation/historical_teammate_fraction": self.settings.arena_historical_teammate_fraction,
                     "evaluation/games": self.settings.arena_games,
                     "distributed/world_size": self.distributed.world_size,
@@ -1974,6 +1997,7 @@ class SelfPlayTrainer:
             raise
         finally:
             self.phase = "stopped"
+            self.historical.close()
             if self._ppo_environment is not None:
                 self._ppo_environment.close()
                 self._ppo_environment = None

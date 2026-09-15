@@ -1,4 +1,4 @@
-"""Adopt a changed terminal training utility without discarding training state."""
+"""Adopt changed training rewards without discarding training state."""
 from __future__ import annotations
 
 
@@ -26,3 +26,24 @@ def reconcile_draw_objective(payload, settings, *, adopt: bool = False):
     }
     state["draw_objective_migration"] = migration
     config["draw_reward"] = target
+
+
+def reconcile_flag_capture_objective(payload, settings, *, adopt: bool = False):
+    # Old checkpoints have no event shaping, irrespective of their raw YAML.
+    config = payload["config"]
+    old = float(config.get("flag_capture_reward", 0.0))
+    target = float(settings.flag_capture_reward)
+    if old == target:
+        return
+    if not adopt:
+        raise RuntimeError("flag capture reward changed across resume; use --adopt-flag-capture-reward to retain state and adopt it explicitly")
+    state = payload["trainer_state"]
+    state["flag_capture_objective_migration"] = {
+        "update": int(payload["update"]),
+        "environment_plies": state.get("cumulative", {}).get("environment_plies", 0),
+        "from_flag_capture_reward": old, "to_flag_capture_reward": target,
+        "scope": "future_ppo_transitions_only",
+        "perspective": "value_owner_team",
+        "terminal_reward": "additive",
+    }
+    config["flag_capture_reward"] = target

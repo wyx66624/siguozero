@@ -101,6 +101,7 @@ class TrainingSettings:
     arena_after_half_interval_environment_plies: int | None = None
     arena_after_half_historical_only: bool = False
     arena_observational_only: bool = False
+    arena_champion_only: bool = False
     arena_historical_teammate_fraction: float = 0.0
     arena_games: int = 1000
     arena_max_plies: int | None = None
@@ -115,6 +116,7 @@ class TrainingSettings:
     max_passes_per_player: int = 4
     checkpoint_interval_environment_plies: int | None = None
     draw_reward: float = DEFAULT_DRAW_REWARD
+    flag_capture_reward: float = 0.0
     historical_enabled: bool = False
     historical_start_fraction: float = 0.5
     historical_training_fraction: float = 0.2
@@ -125,6 +127,11 @@ class TrainingSettings:
     historical_eval_total_games: int | None = None
     historical_uniform_fraction: float = 0.05
     historical_learning_rate: float = 0.01
+    historical_checkpoint_start_fraction: float | None = None
+    historical_stage_mix_fraction: float = 0.0
+    historical_cache_gib: float = 0.0
+    historical_cache_reserve_gib: float = 16.0
+    historical_pinned_mib: int = 256
     layout_buffer_capacity: int = 16384
     layout_max_behavior_age: int = 0
     layout_microbatch_size: int = 32
@@ -299,6 +306,11 @@ class TrainingSettings:
             "historical_eval_total_games": historical.get("eval_total_games"),
             "historical_uniform_fraction": historical.get("uniform_fraction", 0.05),
             "historical_learning_rate": historical.get("learning_rate", 0.01),
+            "historical_checkpoint_start_fraction": historical.get("checkpoint_start_fraction"),
+            "historical_stage_mix_fraction": historical.get("stage_mix_fraction", 0.0),
+            "historical_cache_gib": historical.get("cache_gib", 0.0),
+            "historical_cache_reserve_gib": historical.get("cache_reserve_gib", 16.0),
+            "historical_pinned_mib": historical.get("pinned_mib", 256),
             "ppo_fused_optimizer": ppo.get("fused_optimizer", False) if algorithm == 'ppo' else False,
             "ppo_learner_cuda_graphs": ppo.get("learner_cuda_graphs", False) if algorithm == 'ppo' else False,
             "ppo_cuda_memory_fraction": ppo.get("cuda_memory_fraction") if algorithm == 'ppo' else None,
@@ -318,12 +330,14 @@ class TrainingSettings:
             "arena_after_half_interval_environment_plies": model_selection.get("after_half_interval_environment_plies"),
             "arena_after_half_historical_only": model_selection.get("after_half_historical_only", False),
             "arena_observational_only": model_selection.get("observational_only", False),
+            "arena_champion_only": model_selection.get("champion_only", False),
             "arena_historical_teammate_fraction": model_selection.get("historical_teammate_fraction", 0.0),
             "arena_games": model_selection.get("games", 1000),
             "arena_max_plies": model_selection.get("max_plies"),
             "no_capture_draw_plies": data.get("rules", {}).get("no_capture_draw_plies", 70),
             "max_passes_per_player": data.get("rules", {}).get("max_passes_per_player", 4),
             "draw_reward": data.get("rules", {}).get("terminal_reward", {}).get("draw", DEFAULT_DRAW_REWARD),
+            "flag_capture_reward": ppo.get("flag_capture_reward", 0.0) if algorithm == "ppo" else 0.0,
             "arena_seed": model_selection.get("seed", 20260910),
             "arena_temporal_cache_entries": model_selection.get(
                 "temporal_cache_entries", 8
@@ -484,6 +498,7 @@ class TrainingSettings:
                     "arena_after_half_interval_environment_plies": None,
                     "arena_after_half_historical_only": False,
                     "arena_observational_only": False,
+                    "arena_champion_only": False,
                     "arena_historical_teammate_fraction": 0.0,
                 }
             )
@@ -612,6 +627,11 @@ class TrainingSettings:
         if (isinstance(self.draw_reward, bool) or not isinstance(self.draw_reward, (int, float))
                 or not math.isfinite(self.draw_reward) or not -1 < self.draw_reward <= 0):
             raise ValueError("draw_reward must be finite and in (-1, 0]")
+        if (isinstance(self.flag_capture_reward, bool) or not isinstance(self.flag_capture_reward, (int, float))
+                or not math.isfinite(self.flag_capture_reward) or self.flag_capture_reward < 0):
+            raise ValueError("flag_capture_reward must be finite and nonnegative")
+        if self.algorithm != "ppo" and self.flag_capture_reward != 0:
+            raise ValueError("flag_capture_reward requires PPO")
         expected_algorithm = "grpo" if self.mode is TrainingMode.TWO_PLAYER else "ppo"
         if self.algorithm != expected_algorithm:
             raise ValueError(f"{self.mode.value} requires {expected_algorithm}")
@@ -717,6 +737,19 @@ class TrainingSettings:
                 or self.target_environment_plies is None or self.arena_interval_environment_plies is None):
             raise ValueError("historical-only evaluation after half requires an environment schedule and historical opponents active by half")
         if self.historical_enabled:
+            fraction = self.historical_checkpoint_start_fraction
+            if fraction is not None and (isinstance(fraction, bool) or not isinstance(fraction, (int, float))
+                                         or not 0 < fraction < 1):
+                raise ValueError("historical_checkpoint_start_fraction must be in (0, 1)")
+            mix = self.historical_stage_mix_fraction
+            if isinstance(mix, bool) or not isinstance(mix, (int, float)) or not 0 <= mix <= 1:
+                raise ValueError("historical_stage_mix_fraction must be in [0, 1]")
+            for name in ("historical_cache_gib", "historical_cache_reserve_gib"):
+                value = getattr(self, name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                    raise ValueError(f"{name} must be finite and nonnegative")
+            if type(self.historical_pinned_mib) is not int or not 0 <= self.historical_pinned_mib <= 1024:
+                raise ValueError("historical_pinned_mib must be an integer in [0, 1024]")
             if (self.algorithm != "ppo" or self.target_environment_plies is None
                     or not self.arena_enabled or self.ppo_pipeline_groups < 2):
                 raise ValueError("historical opponents require four-player pipelined PPO, an environment budget and arena")
@@ -766,10 +799,17 @@ class TrainingSettings:
             raise ValueError("arena_observational_only must be a boolean")
         if self.arena_observational_only and (self.mode is TrainingMode.TWO_PLAYER or self.algorithm != "ppo"):
             raise ValueError("observational evaluation requires four-player PPO")
+        if type(self.arena_champion_only) is not bool:
+            raise ValueError("arena_champion_only must be a boolean")
+        if self.arena_champion_only:
+            if self.mode is TrainingMode.TWO_PLAYER or self.algorithm != "ppo":
+                raise ValueError("champion-only evaluation requires four-player PPO")
+            if self.arena_observational_only or self.arena_after_half_historical_only:
+                raise ValueError("champion-only evaluation cannot use observational or historical-only evaluation")
         fraction = self.arena_historical_teammate_fraction
         if (type(fraction) not in (int, float) or fraction not in (0, .5)
-                or (fraction and not self.arena_observational_only)):
-            raise ValueError("historical teammate evaluation requires observational mode and fraction 0 or 0.5")
+                or (fraction and not (self.arena_observational_only or self.arena_champion_only))):
+            raise ValueError("historical teammate evaluation requires observational or champion-only mode and fraction 0 or 0.5")
         for name in (
             "arena_games", "arena_temporal_cache_entries",
             "arena_parallel_games", "arena_inference_batch_size", "arena_environment_workers",

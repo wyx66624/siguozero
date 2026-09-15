@@ -345,7 +345,8 @@ class ModelSelectionTests(unittest.TestCase):
         config = CONFIG.with_name("local_4090_training.yaml")
         settings = TrainingSettings.from_yaml(config, "four_dark", model_scale="main")
         self.assertEqual(settings.arena_after_half_interval_environment_plies, 50_000_000)
-        self.assertTrue(settings.arena_after_half_historical_only)
+        self.assertFalse(settings.arena_after_half_historical_only)
+        self.assertTrue(settings.arena_champion_only)
         self.assertEqual(settings.arena_games, 500)
         self.assertEqual(settings.historical_eval_total_games, 500)
         for total in (True, 0, -1, 500.0, 502, 20):
@@ -373,7 +374,8 @@ class ModelSelectionTests(unittest.TestCase):
         for changes in ({"arena_after_half_historical_only": "true"}, {"historical_enabled": False},
                         {"historical_start_fraction": .6}):
             with self.assertRaises(ValueError):
-                replace(settings, **changes).validate()
+                replace(settings, **{"arena_champion_only": False, "arena_observational_only": True,
+                                    "arena_after_half_historical_only": True, **changes}).validate()
 
     def test_cli_after_half_interval_and_explicit_percentage_override(self):
         from junqi.training.cli import main
@@ -385,8 +387,8 @@ class ModelSelectionTests(unittest.TestCase):
             with patch("junqi.training.cli.SelfPlayTrainer") as trainer:
                 main(["--config", config, "--mode", "four_dark", "--device", "cpu", *options])
             self.assertEqual(trainer.call_args.args[0].arena_after_half_interval_environment_plies, expected)
-            self.assertEqual(trainer.call_args.args[0].arena_after_half_historical_only,
-                             "--arena-start-percent" not in options)
+            self.assertFalse(trainer.call_args.args[0].arena_after_half_historical_only)
+            self.assertTrue(trainer.call_args.args[0].arena_champion_only)
         with patch("junqi.training.cli.SelfPlayTrainer") as trainer:
             main(["--config", config, "--mode", "four_dark", "--device", "cpu", "--no-arena-after-half-historical-only"])
         self.assertFalse(trainer.call_args.args[0].arena_after_half_historical_only)

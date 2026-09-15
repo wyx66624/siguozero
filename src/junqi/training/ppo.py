@@ -20,7 +20,7 @@ from .encoding import PolicyState, history_prefix_groups
 from .losses import LossOutput
 from .models import GameValueTransformer, PieceConditionedLayoutPointerDecoder
 from .rollout import BaseGamePool, FrozenPolicyActor, LayoutOutcome, RolloutMetrics
-from .rewards import DEFAULT_DRAW_REWARD, terminal_utility
+from .rewards import DEFAULT_DRAW_REWARD, flag_capture_utility, terminal_utility
 from .entropy import policy_entropy_bonus
 
 
@@ -52,6 +52,7 @@ class PPOTransition:
     terminal_draw: bool = False
     learnable: bool = True
     value_state: PolicyState | None = None
+    flag_capture_reward: float = 0.0
 
 
 def generalized_advantages(
@@ -81,7 +82,9 @@ def generalized_advantages(
             raise ValueError("team sign must be -1 or 1")
         if item.terminal_draw and not item.terminal:
             raise ValueError("only a terminal transition can be a draw")
-        common_reward = item.reward if item.terminal_draw else 0.0
+        # A flag capture can coincide with a max-plies draw. Only the draw
+        # penalty is shared by both teams; the capture component changes sign.
+        common_reward = item.reward - item.flag_capture_reward if item.terminal_draw else 0.0
         old_outcome = item.old_value - item.old_draw_value
         common_factor = 0.0 if item.terminal else discount
         factor = common_factor * item.next_team_sign
@@ -223,6 +226,7 @@ def collect_ppo_samples(
     environment_workers: int = 1, environment=None,
     pipeline_groups: int = 1,
     draw_reward: float = DEFAULT_DRAW_REWARD,
+    flag_capture_reward: float = 0.0,
 ) -> tuple[list[PPOSample], list[LayoutOutcome], RolloutMetrics]:
     """Take exactly count real self-play actions, without cloned continuations."""
 
@@ -247,10 +251,12 @@ def collect_ppo_samples(
                 from .ppo_pipeline import collect_pipelined
                 return collect_pipelined(pool, actor, critic, layout, count=count,
                     behavior_version=behavior_version, discount=discount, gae_lambda=gae_lambda,
-                    environment=environment, groups=pipeline_groups, draw_reward=draw_reward)
+                    environment=environment, groups=pipeline_groups, draw_reward=draw_reward,
+                    flag_capture_reward=flag_capture_reward)
             return _collect_parallel_ppo_samples(
                 pool, actor, critic, layout, count=count, behavior_version=behavior_version,
-                discount=discount, gae_lambda=gae_lambda, environment=environment, draw_reward=draw_reward)
+                discount=discount, gae_lambda=gae_lambda, environment=environment, draw_reward=draw_reward,
+                flag_capture_reward=flag_capture_reward)
         finally:
             if owned:
                 environment.close()
@@ -287,19 +293,23 @@ def collect_ppo_samples(
             if player is None:
                 raise RuntimeError("terminal game remained in PPO pool")
             team = slot.game.team_of(player)
-            slot.game.step(sampled[0])
+            result = slot.game.step(sampled[0])
             metrics.record_environment_steps()
             slot.history.append_after_step(slot.game)
             terminal = slot.game.is_terminal
             outcome = slot.game.rewards()[player] if terminal else 0.0
             reward = terminal_utility(outcome, draw_reward=draw_reward) if terminal else 0.0
+            capture_reward = flag_capture_utility(slot.game, result.flag_captured_owner,
+                                                  player=player, coefficient=flag_capture_reward)
+            metrics.record_flag_capture(result.flag_captured_owner, capture_reward, terminal=terminal)
             next_player = slot.game.current_player
             sign = (1 if terminal or slot.game.team_of(next_player) == team else -1)
             traces[index].append(PPOTransition(
                 state=state, action=sampled[0], old_log_prob=float(log[0]),
-                old_value=value[0], old_draw_value=value[1], reward=reward, terminal=terminal,
+                old_value=value[0], old_draw_value=value[1], reward=reward + capture_reward, terminal=terminal,
                 terminal_draw=terminal and outcome == 0,
                 next_team_sign=sign,
+                flag_capture_reward=capture_reward,
             ))
             if terminal:
                 metrics.base_games_completed += 1
@@ -343,7 +353,8 @@ def collect_ppo_samples(
 
 
 def _collect_parallel_ppo_samples(pool, actor, critic, layout, *, count,
-                                  behavior_version, discount, gae_lambda, environment, draw_reward):
+                                  behavior_version, discount, gae_lambda, environment, draw_reward,
+                                  flag_capture_reward):
     started = time.perf_counter()
     pool.fill(layout, behavior_version)
     array_history = actor.policy.config.ppo_array_history
@@ -371,6 +382,7 @@ def _collect_parallel_ppo_samples(pool, actor, critic, layout, *, count,
     while collected < count:
         indices = list(range(min(len(pool.slots), count - collected)))
         states = states_for(indices)
+        players = [environment.states[i].player for i in indices]
         boundary = time.perf_counter()
         actions, logs = actor.sample(states, count=1, return_log_probs=True)
         metrics.actor_inference_seconds += time.perf_counter() - boundary
@@ -386,13 +398,17 @@ def _collect_parallel_ppo_samples(pool, actor, critic, layout, *, count,
         responses = environment.receive()
         if [row.index for row in responses] != indices:
             raise RuntimeError('PPO workers returned an incomplete step wave')
-        for index, state, sampled, log, value, row in zip(indices, states, actions, logs, values, responses, strict=True):
+        for index, player, state, sampled, log, value, row in zip(indices, players, states, actions, logs, values, responses, strict=True):
             slot = pool.slots[index]
             slot.history.append_encoded_rows(row.records)
             metrics.record_environment_steps()
+            capture_reward = flag_capture_utility(slot.game, row.flag_captured_owner,
+                                                  player=player, coefficient=flag_capture_reward)
+            metrics.record_flag_capture(row.flag_captured_owner, capture_reward, terminal=row.terminal)
             traces[index].append(PPOTransition(
                 state=state, action=sampled[0], old_log_prob=float(log[0]), old_value=value[0], old_draw_value=value[1],
-                reward=terminal_utility(row.reward, draw_reward=draw_reward) if row.terminal else 0.,
+                reward=(terminal_utility(row.reward, draw_reward=draw_reward) if row.terminal else 0.) + capture_reward,
+                flag_capture_reward=capture_reward,
                 terminal_draw=row.terminal and row.reward == 0,
                 terminal=row.terminal, next_team_sign=row.next_team_sign))
             if row.terminal:

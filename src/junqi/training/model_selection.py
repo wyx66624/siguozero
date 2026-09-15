@@ -81,6 +81,8 @@ class ModelSelection:
             contract["after_half_historical_only"] = True
         if settings.arena_observational_only:
             contract["observational_only"] = True
+        if settings.arena_champion_only:
+            contract["champion_only"] = True
         if settings.arena_historical_teammate_fraction:
             contract["historical_teammate_fraction"] = settings.arena_historical_teammate_fraction
         if settings.historical_eval_total_games is not None:
@@ -112,6 +114,56 @@ class ModelSelection:
             fixed_reference_snapshot=self.state["best_snapshot"],
             fixed_reference_update=self.state["best_update"],
             previous_seed_base=old_base, next_seed_base=new_base))
+        self.state["schedule_seed_base"] = new_base
+        return desired
+
+    def _adopt_champion_evaluation(self, contract, *, update, cumulative, adopt=False):
+        """Migrate future challenges; keep completed reports and training weights intact."""
+        desired = self._contract()
+        fields = {"observational_only", "after_half_historical_only", "champion_only"}
+        stable = lambda value: {k: v for k, v in value.items() if k not in fields}
+        if (self.state.get("version") != 2 or contract == desired
+                or not desired.get("champion_only") or stable(contract) != stable(desired)):
+            return contract
+        if not adopt:
+            raise ValueError("changing to champion-only evaluation requires --adopt-champion-evaluation")
+        if self.due_milestone(update=update, cumulative=cumulative) is not None:
+            raise ValueError("finish the pending evaluation before changing to champion-only evaluation")
+        self._repair_views()
+        slots = len(self.state.get("evaluation_seed_milestones", self.milestones))
+        groups = max(contract["games"], contract.get("historical_eval_total_games", 0),
+                     self.settings.historical_eval_games) // 4
+        old_base = self.state.get("schedule_seed_base", contract["seed"])
+        new_base = old_base + (slots + 1) * 6 * groups
+        if new_base + (slots + 1) * 6 * groups + 8 * 1_000_003 >= 2**63:
+            raise ValueError("champion evaluation seed range exceeds int64")
+        migration = dict(previous_contract=contract, next_contract=desired, update=update,
+                         environment_plies=cumulative.get("environment_plies", 0),
+                         previous_rounds=list(self.state["rounds"]),
+                         previous_best_update=self.state["best_update"],
+                         previous_best_sha256=self.state["best_sha256"],
+                         previous_seed_base=old_base, next_seed_base=new_base)
+        # Only the latest completed head-to-head result against this incumbent
+        # may update it. Never pick a maximum from unrelated historical scores.
+        if self.state["rounds"]:
+            name = self.state["rounds"][-1]
+            report = json.loads((self.directory / name).read_text(encoding="utf-8"))
+            if (report.get("evaluation_type") == "fixed_reference"
+                    and report.get("schedule_contract") == contract
+                    and report.get("candidate_update") == self.state["last_evaluated_update"]
+                    and report.get("candidate_snapshot") == self.state.get("latest_evaluated_snapshot")
+                    and report.get("candidate_sha256") == self.state.get("latest_evaluated_sha256")
+                    and report.get("opponent_update") == self.state["best_update"]
+                    and report.get("opponent_sha256") == self.state["best_sha256"]):
+                self._validate_historical_result(report, games=self.settings.arena_games)
+                migration.update(source_report=name, source_score=report["score"])
+                if report["score"] > .5:
+                    self.state.update(best_update=report["candidate_update"],
+                                      best_snapshot=report["candidate_snapshot"],
+                                      best_sha256=report["candidate_sha256"])
+        migration.update(best_update=self.state["best_update"], best_sha256=self.state["best_sha256"])
+        self.state.setdefault("round_alpha", self._round_alpha())
+        self.state.setdefault("champion_evaluation_migrations", []).append(migration)
         self.state["schedule_seed_base"] = new_base
         return desired
 
@@ -341,6 +393,22 @@ class ModelSelection:
                                      for r in records), encoding="utf-8")
         temporary.replace(self.directory / "history.jsonl")
         for report in reversed(records):
+            if report.get("schedule_contract", {}).get("champion_only"):
+                result = {key: report[key] for key in (
+                    "opponent_update", "opponent_sha256", "games", "wins", "draws", "losses",
+                    "score", "score_ci")}
+                result.update(teammate_results=report.get("teammate_results", {}),
+                              below_half=report["score"] < .5)
+                atomic_json(self.directory.parent / "historical_opponents/latest_evaluation.json", {
+                    "evaluation_type": "champion", "observational_only": False,
+                    "candidate_sha256": report["candidate_sha256"],
+                    "candidate_update": report["candidate_update"],
+                    "environment_plies": report["environment_plies"],
+                    "games": report["games"], "minimum_score": report["score"],
+                    "promoted": report["promoted"], "best_update": report["best_update"],
+                    "decision": report["decision"], "results": [result],
+                })
+                break
             if report.get("historical_panel"):
                 atomic_json(self.directory.parent / "historical_opponents/latest_evaluation.json", {
                     "candidate_sha256": report["candidate_sha256"],
@@ -354,7 +422,8 @@ class ModelSelection:
     def initialize(self, policy: GamePolicyTransformer,
                    layout: PieceConditionedLayoutPointerDecoder, *,
                    update: int, cumulative: Mapping[str, int],
-                   adopt_current_draw_rules: bool = False, adopt_pass_rule: bool = False) -> None:
+                   adopt_current_draw_rules: bool = False, adopt_pass_rule: bool = False,
+                   adopt_champion_evaluation: bool = False) -> None:
         if not self.settings.arena_enabled:
             return
         error = None
@@ -435,6 +504,8 @@ class ModelSelection:
                         contract = self._adopt_historical_only(contract, update=update, cumulative=cumulative)
                         contract = self._adopt_evaluation_game_budget(contract, update=update, cumulative=cumulative)
                         contract = self._adopt_observational_evaluation(contract, update=update, cumulative=cumulative)
+                        contract = self._adopt_champion_evaluation(
+                            contract, update=update, cumulative=cumulative, adopt=adopt_champion_evaluation)
                     if self.state.get("version") != version or contract != self._contract():
                         raise ValueError("model selection schedule/budget changed; restore its original settings or use a new run directory")
                     if self.state["contract"] != contract:
@@ -500,7 +571,8 @@ class ModelSelection:
         observational = historical_only or self.settings.arena_observational_only
         reference_only = observational and not historical_only
         evaluation_type = "historical_only" if historical_only else "fixed_reference" if reference_only else "champion"
-        panel = historical.panel() if historical is not None and historical.active else []
+        panel = (historical.evaluation_panel() if not self.settings.arena_champion_only
+                 and historical is not None and historical.active else [])
         panel_directory = historical.directory if historical is not None else self.directory
         if reference_only:
             panel = [dict(id=f"reference_u{self.state['best_update']:09d}",
@@ -581,7 +653,7 @@ class ModelSelection:
                         saved = json.loads(champion_cache.read_text(encoding="utf-8"))
                         if saved.get("identity") == champion_identity:
                             report = saved["result"]
-                            self._validate_result(report)
+                            self._validate_historical_result(report, games=self.settings.arena_games)
                 except Exception as exc:
                     error = f"champion match retry: {type(exc).__name__}: {exc}"
             synchronized_error(self.context, error)
@@ -613,7 +685,7 @@ class ModelSelection:
                     error = None
                     if self.context.primary:
                         try:
-                            self._validate_result(report)
+                            self._validate_historical_result(report, games=self.settings.arena_games)
                             atomic_json(champion_cache, {"identity": champion_identity, "result": report})
                         except Exception as exc:
                             error = f"champion match commit: {type(exc).__name__}: {exc}"
@@ -666,7 +738,7 @@ class ModelSelection:
                         if "teammate_results" in reference:
                             report["teammate_results"] = reference["teammate_results"]
                 else:
-                    self._validate_result(report)
+                    self._validate_historical_result(report, games=self.settings.arena_games)
                     promoted = report["score"] > 0.5 and (not panel_result or panel_result["promotion_allowed"])
                     report.update({
                         "champion_evaluated": True,

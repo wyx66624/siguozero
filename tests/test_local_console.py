@@ -196,6 +196,22 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(status["evaluation_type"], "historical_only")
         self.assertTrue(status["after_half_historical_only"])
 
+    def test_champion_catalog_and_status_expose_latest_model_and_current_champion(self):
+        self.test_after_half_catalog_prefers_latest_and_labels_old_champion_as_archived()
+        self.write("resolved_config.json", {"arena_champion_only": True,
+                   "arena_historical_teammate_fraction": .5, "arena_games": 500,
+                   "target_environment_plies": 1000})
+        entries = {e["kind"]: e for e in self.monitor.public_catalog()}
+        self.assertEqual(entries["live"]["update"], 55)
+        self.assertEqual(entries["best"]["label"], "历史冠军")
+        self.assertEqual(entries["best"]["update"], 20)
+        self.assertIn("evaluated", entries)
+        status = self.monitor.run_status(self.monitor.specs[0])
+        self.assertEqual(status["evaluation_type"], "champion")
+        self.assertTrue(status["evaluation_champion_only"])
+        self.assertFalse(status["observational_only"])
+        self.assertEqual(status["evaluation_games"], 500)
+
     def test_observational_first_half_uses_latest_with_immutable_old_reference(self):
         self.test_after_half_catalog_prefers_latest_and_labels_old_champion_as_archived()
         self.write("resolved_config.json", {"arena_observational_only": True,

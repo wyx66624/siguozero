@@ -47,6 +47,9 @@ def main():
     parser.add_argument('--fused-optimizer', action='store_true')
     parser.add_argument('--learner-graphs', choices=('on', 'off'))
     parser.add_argument('--adaptive-clip', choices=('on', 'off'))
+    parser.add_argument('--historical-library', help='isolated frozen library; force ONLY this probe to the half gate')
+    parser.add_argument('--historical-cache-gib', type=float, default=0)
+    parser.add_argument('--historical-cohort-games', type=int, default=1024)
     parser.add_argument('--sampling-graphs', action='store_true')
     parser.add_argument('--full-policy-epochs', action='store_true',
                         help='benchmark only: hold optimizer work fixed by disabling KL early exit')
@@ -147,6 +150,19 @@ def main():
             patch.object(MetricLogger, "start_resource_monitor"):
         trainer = SelfPlayTrainer(settings, run_directory=args.run_dir)
     del payload, state, pool
+    if args.historical_library:
+        from dataclasses import replace
+        from junqi.training.historical_opponents import HistoricalOpponents
+        # This local diagnostic changes counters only inside the probe. The
+        # production checkpoint, RNG state and already-running games are intact.
+        library_settings = replace(settings, historical_enabled=True,
+            historical_cache_gib=args.historical_cache_gib,
+            historical_cohort_games=args.historical_cohort_games)
+        trainer.historical = HistoricalOpponents(library_settings, args.historical_library, trainer.distributed)
+        trainer.pool.historical = trainer.historical
+        trainer.cumulative['environment_plies'] = trainer.historical.threshold
+        trainer.historical.update_progress(trainer.policy, trainer.layout,
+            environment_plies=trainer.cumulative['environment_plies'], update=trainer.update)
     trainer.pool.fill(trainer.layout.eval(), trainer.update)
     gc.collect()
     counts_before = dict(trainer.cumulative)
@@ -217,6 +233,9 @@ def main():
         config_sha256=config_hash,
         settings=settings.serializable(),
         checkpoint=str(checkpoint), checkpoint_update=update, completed_update=trainer.update,
+        historical_probe=(dict(library=args.historical_library, cache_gib=args.historical_cache_gib,
+            cohort_games=args.historical_cohort_games, forced_half_gate=True,
+            metrics=trainer.historical.metrics()) if args.historical_library else None),
         games=games, saved_games=saved_games, added_games_before_timing=games - saved_games,
         transitions_per_update=transitions,
         requested_updates=args.updates, environment_steps=steps, model_config=asdict(settings.model),

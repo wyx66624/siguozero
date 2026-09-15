@@ -4,8 +4,8 @@ from __future__ import annotations
 import torch
 
 
-def _matrix_packs(module, packs, dtype):
-    """Precast just autocast's linear operands; retain embeddings/norms in FP32."""
+def matrix_parameter_names(module):
+    """A CPU-only conversion recipe; safe to pass to a background reader."""
     matrices = set()
     for prefix, child in module.named_modules():
         names = ("weight", "bias") if isinstance(child, torch.nn.Linear) else (
@@ -13,6 +13,11 @@ def _matrix_packs(module, packs, dtype):
         for name in names:
             if getattr(child, name, None) is not None:
                 matrices.add(f"{prefix}.{name}" if prefix else name)
+    return matrices
+
+
+def prepare_matrix_packs(packs, matrices, dtype):
+    """Precast just autocast's linear operands; retain embeddings/norms in FP32."""
     groups = {}
     for pack in packs.values():
         for name, (start, end, shape) in pack["views"].items():
@@ -35,7 +40,11 @@ def _matrix_packs(module, packs, dtype):
     return result
 
 
-def install_packed_weights(module, packs, device, *, slabs=None, matrix_dtype=None):
+def _matrix_packs(module, packs, dtype):
+    return prepare_matrix_packs(packs, matrix_parameter_names(module), dtype)
+
+
+def install_packed_weights(module, packs, device, *, slabs=None, matrix_dtype=None, non_blocking=False):
     """Upload one contiguous tensor per dtype; reuse installed storage on swaps.
 
     The module has no optimizer. Its Parameter objects alias these slabs after
@@ -55,7 +64,7 @@ def install_packed_weights(module, packs, device, *, slabs=None, matrix_dtype=No
         target = slabs[dtype]
         if target.shape != source.shape or target.dtype != source.dtype:
             raise ValueError("historical weight slab architecture changed")
-        target.copy_(source)
+        target.copy_(source, non_blocking=non_blocking)
         uploaded += source.numel() * source.element_size()
         state.update({name: target[start:end].view(shape)
                       for name, (start, end, shape) in pack["views"].items()})

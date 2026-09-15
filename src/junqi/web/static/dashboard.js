@@ -6,9 +6,11 @@ const states={running:'正在训练',starting:'正在初始化',stale:'进程存
 const phases={ready:'准备下一轮',initializing:'初始化',base_game_collection:'生成基础棋局',ppo_trajectory_collection:'并行自我对弈采样',terminal_rollouts:'终局分支采样',policy_backward:'策略学习',critic_backward:'价值学习',layout_backward:'布阵学习',checkpoint:'保存检查点',model_selection_checkpoint:'保存评测检查点',emergency_checkpoint:'保存异常现场',inference_snapshot:'导出对弈快照',model_selection:'棋力评测',waiting:'等待训练',stopped:'已停止'};
 function stat(label,value,cls=''){return `<div class="stat"><span>${label}</span><strong class="${cls}">${value}</strong></div>`}
 const observing = r => Boolean(r.observational_only ?? r.metrics?.['evaluation/observational_only']);
+const championOnly = r => Boolean(r.evaluation_champion_only ?? r.metrics?.['evaluation/champion_only']);
 function evaluationPlan(r){
  const games=r.evaluation_games??r.metrics?.['evaluation/games']??500;
  const fraction=r.evaluation_historical_teammate_fraction??r.metrics?.['evaluation/historical_teammate_fraction']??.5;
+ if(championOnly(r))return `每次评测总计 ${fmt(games)} 局：当前队友 ${fmt(games*(1-fraction))} 局、历史队友 ${fmt(games*fraction)} 局。全程挑战历史冠军（当前 update ${fmt(r.best_update)}），15 亿步后沿用同一规则。得分率 =（胜局 + 和局 × 0.5）/ 总局数，超过 50% 更新冠军，否则保留冠军。训练始终继续使用最新模型。历史记录保留各轮的实际对手，跨对手得分率不能直接当作同一条棋力曲线。`;
  return `每次评测总计 ${fmt(games)} 局：当前队友 ${fmt(games*(1-fraction))} 局、历史队友 ${fmt(games*fraction)} 局。前半程固定旧基准，${fmt(r.target/2||1500000000)} 步后分配至历史对手集。全程保留并使用最新模型，评测只记录棋力变化。此前评测协议不同，分开解读。`;
 }
 function renderOutcomes(r){
@@ -18,7 +20,7 @@ function renderOutcomes(r){
  const t=o.totals,last=o.latest,unit=o.unit==='branches'?'条分支':'局';
  const perspective={team_0_2:'0/2 队视角 · 每个完整棋局计一次',seat_0:'0 号席位视角 · 每个完整棋局计一次',root_player:'分支根节点行动方视角 · 不等于完整基础棋局数'}[o.perspective];
  const title=o.unit==='branches'?'GRPO 终局分支统计':'训练对局统计';
- const pct=v=>v==null?'—':fmt(v*100,2)+'%';
+  const pct=v=>v==null?'—':fmt(v*100,2)+'%';
  let coverage=o.coverage_complete?`已统计至第 ${fmt(o.last_update)} 轮`:'仅展示日志中可核对的结果';
  if(o.expected_games!=null&&!o.coverage_complete)coverage=`已记录 ${fmt(t.games)} / 累计结算 ${fmt(o.expected_games)} ${unit}`;
  if(o.catching_up)coverage+=' · 正在补齐历史';
@@ -32,7 +34,7 @@ function renderOutcomes(r){
  <div class="outcome-caption"><span>胜率（含和局）${pct(t.win_rate)} · 和棋率 ${pct(t.draw_rate)}</span><span>${coverage}</span></div>
  <p class="outcome-latest">${last?`最近一轮（update ${fmt(last.update)}）：${fmt(last.games)} ${unit} · 胜 <b class="win">${fmt(last.wins)}</b> / 和 <b>${fmt(last.draws)}</b> / 负 <b class="loss">${fmt(last.losses)}</b>`:'等待第一轮结算记录'}。训练自我对弈结果不代表对外棋力。</p>
  <details class="outcome-history"><summary>最近 ${o.recent.length} 轮结算记录</summary>${rows?`<div class="table-scroll"><table><thead><tr><th>训练轮次</th><th>结算${o.unit==='branches'?'分支':'局数'}</th><th>胜</th><th>和</th><th>负</th><th>日志累计</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<p>尚无结算记录</p>'}</details>
- <div class="evaluation-summary"><h4>${observing(r)?'单一旧基准评测记录（含此前冠军评测）':r.evaluation_type==='historical_only'?'前半程冠军评测记录（已停止）':'对阵最优模型的评测'}</h4><p>${evaluation}${e?.unavailable_rounds?` · ${fmt(e.unavailable_rounds)} 轮报告暂不可用`:''}</p>${observing(r)?`<p>${evaluationPlan(r)}</p>`:r.after_half_historical_only?`<p>${r.evaluation_type==='historical_only'?'当前仅评测历史对手集，继续使用最新模型。':'达到 15 亿步后仅评测历史对手集，继续使用最新模型。'}</p>`:''}</div></section>`;
+ <div class="evaluation-summary"><h4>${championOnly(r)?'历史冠军挑战记录（含此前评测）':observing(r)?'单一旧基准评测记录（含此前冠军评测）':r.evaluation_type==='historical_only'?'前半程冠军评测记录（已停止）':'对阵最优模型的评测'}</h4><p>${evaluation}${e?.unavailable_rounds?` · ${fmt(e.unavailable_rounds)} 轮报告暂不可用`:''}</p>${championOnly(r)||observing(r)?`<p>${evaluationPlan(r)}</p>`:r.after_half_historical_only?`<p>${r.evaluation_type==='historical_only'?'当前仅评测历史对手集，继续使用最新模型。':'达到 15 亿步后仅评测历史对手集，继续使用最新模型。'}</p>`:''}</div></section>`;
 }
 function chart(records,key,color){
  const values=records.filter(r=>Number.isFinite(r[key]));
@@ -45,6 +47,7 @@ function renderHistorical(r){
  const h=r.historical_opponents,e=r.historical_evaluation;
  if(!h||!Object.keys(h).length)return '';
  const pct=v=>v==null?'—':fmt(v*100,2)+'%';
+ const gib=v=>fmt((v??0)/2**30,2);
  const wdl=r=>r?`${fmt(r.wins??0)} / ${fmt(r.draws??0)} / ${fmt(r.losses??0)}`:'—';
  const rows=(h.opponents||[]).map(o=>`<tr><td>update ${fmt(o.update)}</td><td>${fmt(o.environment_plies)}</td><td>${pct(o.probability)}</td><td>${wdl(o.results)}</td><td>${wdl(o.teammate_results)}</td></tr>`).join('');
  const roleNames={self_play:'全部当前版本',historical_opponents:'仅历史对手',historical_teammate:'仅历史队友',historical_both:'历史对手 + 历史队友'};
@@ -52,12 +55,14 @@ function renderHistorical(r){
  const evalRows=(e?.results||[]).map(o=>`<tr><td>update ${fmt(o.opponent_update)}</td><td>${fmt(o.games)}</td><td>${fmt(o.wins)} / ${fmt(o.draws)} / ${fmt(o.losses)}</td><td>${pct(o.score)}</td><td>${pct(o.score_ci?.[0])}–${pct(o.score_ci?.[1])}</td><td>${o.confirmed_regression?'确认回退':o.below_half?'低于 50%':o.score_ci?.[0]>.5?'显著领先':'证据不足'}</td></tr>`).join('');
  const teammateRows=(e?.results||[]).flatMap(o=>Object.entries(o.teammate_results||{}).map(([version,s])=>`<tr><td>update ${fmt(o.opponent_update)}</td><td>${version==='current'?'当前队友':'历史队友'}</td><td>${fmt(s.games)}</td><td>${wdl(s)}</td><td>${pct(s.score)}</td><td>${pct(s.score_ci?.[0])}–${pct(s.score_ci?.[1])}</td></tr>`)).join('');
  const teammateTable=teammateRows?`<h4>按队友版本分组</h4><p>每个四局换位组各含两局当前队友、两局历史队友；历史队友使用本场冻结对手的版本。胜负均按当前模型所在队计数。</p><div class="table-scroll"><table><thead><tr><th>冻结版本</th><th>队友</th><th>局数</th><th>胜 / 和 / 负</th><th>得分率</th><th>校正置信区间</th></tr></thead><tbody>${teammateRows}</tbody></table></div>`:'';
- return `<section class="outcome-section"><h3>历史对手与队友</h3><p>${h['historical/active']?'已启用':'等待训练达到一半'} · 门槛 ${fmt(h['historical/threshold_environment_plies'])} 环境步 · 已保存 ${fmt(h['historical/opponents'])} 个冻结版本</p>
+ return `<section class="outcome-section"><h3>历史对手与队友</h3><p>${h['historical/active']?'已启用':'等待训练达到一半'} · 门槛 ${fmt(h['historical/threshold_environment_plies'])} 环境步 · 已保存 ${fmt(h['historical/opponents'])} 个冻结版本${!championOnly(r)&&h['historical/evaluation_opponents']!=null?` · 固定评测 ${fmt(h['historical/evaluation_opponents'])} 个`:''}</p>
+ ${h['historical/checkpoint_start_environment_plies']!=null?`<p>从 ${fmt(h['historical/checkpoint_start_environment_plies'])} 环境步起，完整检查点持续加入训练库；${championOnly(r)?'独立评测始终挑战历史冠军':'评测库保持固定'}。抽样中 ${pct(h['historical/stage_mix_fraction'])} 按训练阶段均衡覆盖，其余按对手挑战程度抽取。</p>`:''}
+ ${h['historical/ram_cache_limit_bytes']!=null?`<p>历史权重内存缓存 ${gib(h['historical/ram_cache_bytes'])} / ${gib(h['historical/ram_cache_limit_bytes'])} GiB · 已缓存 ${fmt(h['historical/ram_cache_models'])} 个 · 命中 ${fmt(h['historical/ram_cache_hits'])} 次 · 读盘 ${fmt(h['historical/disk_load_count'])} 次 · 锁页缓冲 ${gib(h['historical/pinned_bytes'])} GiB · GPU 驻留 ${fmt(h['historical/resident_models'])} 个历史模型 · 切换等待累计 ${fmt(h['historical/cache_wait_seconds'],2)} 秒</p>`:''}
  <p>历史对手占新开局 ${pct(h['historical/admission_fraction'])}（目标 ${pct(h['historical/target_training_fraction']??.2)}） · 历史队友占新开局 ${pct(h['historical/teammate_admission_fraction'])}（目标 ${pct(h['historical/target_teammate_fraction']??.2)}）。两个比例独立分配，允许重合。</p>
  <p>对战历史模型已完成 ${fmt(h['historical/games_completed'])} 局 · 搭档历史模型已完成 ${fmt(h['historical/teammate_games_completed'])} 局 · 两者重合新开 ${fmt(h['historical/both_games_started'])} 局 · 混合棋局当前未结束 ${fmt(h.unfinished_historical_games)} 局${h.world_size>1?' · 此处为 rank 0 统计':''}</p>
  ${roleRows?`<div class="table-scroll"><table><thead><tr><th>对局组合</th><th>目标</th><th>新开局与实际占比</th><th>胜 / 和 / 负</th></tr></thead><tbody>${roleRows}</tbody></table></div>`:''}
  <details><summary>各历史版本出场概率与训练胜 / 和 / 负（基准学习席位所在队视角）</summary><p>重合棋局分别计入对手与队友统计，不能将两列局数相加。对手难度只用当前队友条件下的结果更新。</p><div class="table-scroll"><table><thead><tr><th>版本</th><th>环境步</th><th>下个批次概率</th><th>作为对手</th><th>作为队友</th></tr></thead><tbody>${rows}</tbody></table></div></details>
- ${evalRows?`<h3>${e.evaluation_type==='fixed_reference'?'固定旧基准棋力评测':'冻结对手集评测'}</h3><p>评测模型 update ${fmt(e.candidate_update)} · 最弱一项得分率 ${pct(e.minimum_score)} · ${e.observational_only?'仅观察训练成果，继续使用最新模型；评测不触发回滚':e.promotion_allowed?'历史对手门槛通过':'历史对手门槛未通过'}。区间以完整四局轮换组计算。</p><div class="table-scroll"><table><thead><tr><th>对手</th><th>局数</th><th>胜 / 和 / 负</th><th>得分率</th><th>校正置信区间</th><th>结论</th></tr></thead><tbody>${evalRows}</tbody></table></div>${teammateTable}`:observing(r)?'<p>等待首次包含历史队友的 500 局评测；此前结果保留在上方。训练胜率不等同于棋力评测。</p>':'<p>尚无后半程对手集评测；训练胜率不等同于棋力评测。</p>'}</section>`;
+ ${evalRows?`<h3>${e.evaluation_type==='champion'?'历史冠军挑战赛':e.evaluation_type==='fixed_reference'?'固定旧基准棋力评测':'冻结对手集评测'}</h3><p>评测模型 update ${fmt(e.candidate_update)} · ${e.evaluation_type==='champion'?'挑战得分率':'最弱一项得分率'} ${pct(e.minimum_score)} · ${e.evaluation_type==='champion'?`${e.promoted?'冠军更新为':'保留冠军'} update ${fmt(e.best_update)}；训练继续使用最新模型`:e.observational_only?'仅观察训练成果，继续使用最新模型；评测不触发回滚':e.promotion_allowed?'历史对手门槛通过':'历史对手门槛未通过'}。区间以完整四局轮换组计算。</p><div class="table-scroll"><table><thead><tr><th>对手</th><th>局数</th><th>胜 / 和 / 负</th><th>得分率</th><th>校正置信区间</th><th>结论</th></tr></thead><tbody>${evalRows}</tbody></table></div>${teammateTable}`:championOnly(r)?'<p>等待冠军挑战赛完成；训练胜率不等同于棋力评测。</p>':observing(r)?'<p>等待首次包含历史队友的 500 局评测；此前结果保留在上方。训练胜率不等同于棋力评测。</p>':'<p>尚无后半程对手集评测；训练胜率不等同于棋力评测。</p>'}</section>`;
 }
 function renderExploration(m){
  if(m['policy/adaptive_entropy_enabled']==null)return '<section class="outcome-section"><h3>策略探索</h3><p>等待训练记录探索指标。</p></section>';
@@ -100,7 +105,7 @@ function renderRun(r){
  ${renderClipping(m)}
  <div class="stats">${stat('当前 update / 可恢复检查点',`${fmt(r.update)} / ${fmt(r.checkpoint_update)}`)}${stat('训练主进程',r.processes.length ? r.processes.map(p=>`PID ${p.pid}`).join(' / ') : '未运行')}${stat('rank 心跳 / 最久心跳',`${r.heartbeat_count}/${r.world_size} · ${r.heartbeat_age==null?'—':fmt(r.heartbeat_age)+' 秒'}`)}${stat('完整周期吞吐（最近 '+r.rate_updates+' 轮）',rate==null?'等待测量':fmt(rate)+' 步/s')}${stat('轮内吞吐（不含轮间开销）',r.inner_rate==null?'—':fmt(r.inner_rate)+' 步/s')}${stat('剩余任务 20 天所需吞吐',fmt(target)+' 步/s')}${stat('按当前周期吞吐预测剩余',duration(r.eta_seconds))}${stat('20 天吞吐条件',rate==null?'等待测量':ok?'已达到':'尚未达到',rate==null?'':ok?'good':'warn')}${stat('Policy loss',fmt(m['loss/policy_total'],5))}${stat('Critic loss',fmt(m['loss/critic_total'],5))}${stat('KL · 目标 0.015',fmt(m['policy/approx_kl_old']??m['policy/kl_reference'],5))}${stat('熵 / clip 比例',`${fmt(m['policy/entropy'],3)} / ${fmt(m['policy/clip_fraction'],3)}`)}</div>
  <div class="charts"><div><div class="chart-title"><span>Policy loss</span><span>策略损失</span></div>${chart(r.chart,'loss/policy_total','#87c7ff')}</div><div><div class="chart-title"><span>${r.algorithm==='ppo'?'Critic':'Layout'} loss</span><span>${r.algorithm==='ppo'?'价值':'布阵'}损失</span></div>${chart(r.chart,r.algorithm==='ppo'?'loss/critic_total':'loss/layout_total','#78d3b6')}</div></div>
- <details><summary>运行记录与评测状态</summary><p>已完成评测 ${r.evaluated_rounds} 轮 · ${observing(r)?`使用最新模型，固定旧基准 update ${fmt(r.best_update)}`:r.evaluation_type==='historical_only'?'使用最新模型，冠军评测已停止':`最优模型 update ${fmt(r.best_update)}`} · 保存策略 ${escapeHTML(r.checkpoint_policy||'未知')} · 最近指标 ${r.metrics_age==null?'—':fmt(r.metrics_age/60)+' 分钟前'}</p><pre>${escapeHTML(r.logs.join('\n'))}</pre></details></article>`;
+ <details><summary>运行记录与评测状态</summary><p>已完成评测 ${r.evaluated_rounds} 轮 · ${championOnly(r)?`使用最新训练模型，下轮对阵历史冠军 update ${fmt(r.best_update)}`:observing(r)?`使用最新模型，固定旧基准 update ${fmt(r.best_update)}`:r.evaluation_type==='historical_only'?'使用最新模型，冠军评测已停止':`最优模型 update ${fmt(r.best_update)}`} · 保存策略 ${escapeHTML(r.checkpoint_policy||'未知')} · 最近指标 ${r.metrics_age==null?'—':fmt(r.metrics_age/60)+' 分钟前'}</p><pre>${escapeHTML(r.logs.join('\n'))}</pre></details></article>`;
 }
 let loading=false;
 async function refresh(){

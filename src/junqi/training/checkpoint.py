@@ -139,6 +139,7 @@ class CheckpointManager:
         algorithm: str = "grpo",
         critic: nn.Module | None = None,
         critic_optimizer: torch.optim.Optimizer | None = None,
+        inference_state: dict[str, Any] | None = None,
     ) -> Path:
         if not isinstance(dead_rules_enabled, bool):
             raise ValueError("dead_rules_enabled must be a boolean")
@@ -153,8 +154,8 @@ class CheckpointManager:
             "algorithm": algorithm,
             "dead_rules_enabled": dead_rules_enabled,
             "reason": reason,
-            "policy": policy.state_dict(),
-            "layout": layout.state_dict(),
+            "policy": inference_state["policy"] if inference_state is not None else policy.state_dict(),
+            "layout": inference_state["layout"] if inference_state is not None else layout.state_dict(),
             "reference_policy": (
                 None if reference_policy is None else reference_policy.state_dict()
             ),

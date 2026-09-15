@@ -9,6 +9,19 @@ const source = fs.readFileSync(path.join(__dirname, '../src/junqi/web/static/das
 const context = {};
 vm.runInNewContext(source.slice(0, source.indexOf('let loading=false;')), context);
 
+test('growing training library and bounded RAM cache are distinct from the evaluation panel', () => {
+  const html=context.renderHistorical({historical_opponents:{
+    'historical/opponents':241,'historical/evaluation_opponents':6,
+    'historical/checkpoint_start_environment_plies':600000000,'historical/stage_mix_fraction':.5,
+    'historical/ram_cache_bytes':16*2**30,'historical/ram_cache_limit_bytes':32*2**30,
+    'historical/ram_cache_models':120,'historical/ram_cache_hits':90,'historical/disk_load_count':30,
+    'historical/pinned_bytes':128*2**20,'historical/resident_models':1,'historical/cache_wait_seconds':.03}});
+  for(const text of ['241 个冻结版本','固定评测 6 个','600,000,000','评测库保持固定',
+                    '16 / 32 GiB','已缓存 120 个','命中 90 次','读盘 30 次','GPU 驻留 1 个'])
+    assert.ok(html.includes(text),text);
+  assert.ok(!html.includes('NaN')&&!html.includes('undefined'));
+});
+
 test('observational evaluation shows half teammates and retains independent training ratios', () => {
   const run=fixture();
   Object.assign(run,{metrics:{'evaluation/observational_only':1},historical_opponents:{'historical/active':0},
@@ -34,6 +47,29 @@ function fixture() {
     latest, recent:[latest]},
     evaluation_outcomes:{rounds:0, unavailable_rounds:0, latest:null}};
 }
+
+test('champion challenges show the current champion and keep the same plan after half', () => {
+  const run=fixture();
+  Object.assign(run,{target:3000000000,best_update:3052,metrics:{'evaluation/champion_only':1},
+    historical_opponents:{'historical/active':1,'historical/evaluation_opponents':6,
+      'historical/checkpoint_start_environment_plies':600000000},
+    historical_evaluation:{evaluation_type:'champion',candidate_update:4000,best_update:3052,
+      promoted:false,minimum_score:.5,results:[{opponent_update:3052,games:500,wins:200,draws:100,losses:200,
+        score:.5,score_ci:[.3,.7],teammate_results:{
+          current:{games:250,wins:100,draws:50,losses:100,score:.5,score_ci:[.3,.7]},
+          historical:{games:250,wins:100,draws:50,losses:100,score:.5,score_ci:[.3,.7]}}}]}});
+  const html=context.renderHistorical(run),outcomes=context.renderOutcomes(run);
+  for(const text of ['全程挑战历史冠军','3,052','15 亿步后沿用同一规则','超过 50% 更新冠军',
+                     '当前队友 250 局、历史队友 250 局','训练始终继续使用最新模型'])
+    assert.ok(outcomes.includes(text),text);
+  for(const text of ['历史冠军挑战赛','保留冠军 update 3,052','挑战得分率 50%','250','历史队友'])
+    assert.ok(html.includes(text),text);
+  for(const text of ['固定评测 6 个','评测库保持固定','历史对手门槛未通过','NaN','undefined'])
+    assert.ok(!html.includes(text),text);
+  run.historical_evaluation.promoted=true;
+  run.historical_evaluation.best_update=4000;
+  assert.ok(context.renderHistorical(run).includes('冠军更新为 update 4,000'));
+});
 
 test('completed games, wins/draws/losses and recent update are visible together', () => {
   const html = context.renderOutcomes(fixture());

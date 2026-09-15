@@ -39,6 +39,7 @@ class EnvironmentStep:
     reward: float
     rewards: tuple[float, ...]
     next_team_sign: int
+    flag_captured_owner: int | None = None
 
 
 def environment_state(game):
@@ -50,13 +51,14 @@ def _advance(index, game, action, mode):
     if player is None:
         raise RuntimeError('terminal game remained in PPO environment')
     team = game.team_of(player)
-    game.step(action)
+    result = game.step(action)
     rows = observation_rows(game, mode)
     terminal = game.is_terminal
     rewards = tuple(game.rewards()) if terminal else ()
     return EnvironmentStep(index, environment_state(game), rows, terminal,
                            rewards[player] if terminal else 0., rewards,
-                           1 if terminal or game.team_of(game.current_player) == team else -1)
+                           1 if terminal or game.team_of(game.current_player) == team else -1,
+                           result.flag_captured_owner)
 
 
 @lru_cache(maxsize=2)

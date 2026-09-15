@@ -1,8 +1,8 @@
-"""Bounded frozen-opponent archive and cohort scheduler for four-player PPO.
+"""Growing frozen training library and fixed evaluation panel for four-player PPO.
 
-Only metadata and one inference replica are resident. Immutable CPU checkpoint
-storages are packed by dtype, so a version switch uploads one slab per dtype,
-not thousands of parameter tensors. No optimizer or critic is archived.
+CPU weights use a bounded prepared RAM cache; the GPU keeps one inference
+replica. Packed dtype slabs avoid thousands of parameter transfers. No optimizer
+or critic is archived in the historical library.
 """
 from __future__ import annotations
 
@@ -18,7 +18,8 @@ import torch
 
 from .arena import atomic_json, sha256_file, synchronized_error
 from .checkpoint_format import CHECKPOINT_FORMAT_VERSION
-from .inference_weights import install_packed_weights
+from .inference_weights import install_packed_weights, matrix_parameter_names
+from .historical_cache import HistoricalWeightCache
 from .models import GamePolicyTransformer, PieceConditionedLayoutPointerDecoder, layout_sample_from_trace
 from .rollout import FrozenPolicyActor
 
@@ -33,13 +34,14 @@ def packed_weights(model):
         groups.setdefault(str(value.dtype), []).append((name, value))
     packs = {}
     for dtype, items in groups.items():
-        flat = torch.empty(sum(v.numel() for _, v in items), dtype=items[0][1].dtype)
+        # Coalesce on the source device before copying. A CUDA snapshot performs
+        # one D2H transfer per dtype instead of one blocking copy per parameter.
+        flat = torch.cat([value.detach().reshape(-1) for _, value in items]).cpu()
         offset = 0
         views = {}
         for name, value in items:
             end = offset + value.numel()
             state[name] = flat[offset:end].view(value.shape)
-            state[name].copy_(value.detach())
             views[name] = (offset, end, tuple(value.shape))
             offset = end
         packs[dtype] = {"flat": flat, "views": views}
@@ -57,6 +59,8 @@ class HistoricalOpponents:
         self.q, self.results = {}, {}
         self.active_id = None
         self.active_probability = 1.0
+        self.active_panel_size = 0
+        self.pending_cohort = None
         self.cohort_started = 0
         self.cohort_limit = settings.historical_cohort_games
         self.started = self.historical_started = self.completed = 0
@@ -75,12 +79,18 @@ class HistoricalOpponents:
         self.load_seconds = 0.0
         self._verified = set()
         self._catalog_dirty = False
+        self.weight_cache = None
+        self.archive_count = 0
+        self.archive_seconds = 0.
+        self._checkpoint_cpu_state = None
         if self.enabled and self.catalog_path.exists():
             catalog = json.loads(self.catalog_path.read_text(encoding="utf-8"))
-            if catalog.get("contract") != self.contract():
+            if not self._compatible_contract(catalog.get("contract"),
+                    max((e["environment_plies"] for e in catalog["opponents"]), default=0)):
                 raise ValueError("historical archive mode/rules/budget contract changed")
             self.entries = catalog["opponents"]
-            if len(self.entries) > 1 + len(settings.historical_snapshot_fractions):
+            self._catalog_dirty = catalog.get("contract") != self.contract()
+            if len(self.evaluation_panel(include_future=True)) > 1 + len(settings.historical_snapshot_fractions):
                 raise ValueError("historical archive exceeds its configured bound")
 
     @property
@@ -96,58 +106,140 @@ class HistoricalOpponents:
         return self.enabled and self.progress >= self.threshold
 
     def contract(self):
-        return dict(mode=self.settings.mode.value, dead_rules_enabled=self.settings.dead_rules_enabled,
+        result = dict(mode=self.settings.mode.value, dead_rules_enabled=self.settings.dead_rules_enabled,
                     no_capture_draw_plies=self.settings.no_capture_draw_plies,
                     checkpoint_format=CHECKPOINT_FORMAT_VERSION,
                     target=self.settings.target_environment_plies,
                     start_fraction=self.settings.historical_start_fraction,
                     snapshot_fractions=list(self.settings.historical_snapshot_fractions))
+        if self.settings.historical_checkpoint_start_fraction is not None:
+            result["checkpoint_start_fraction"] = self.settings.historical_checkpoint_start_fraction
+        if self.settings.historical_stage_mix_fraction:
+            result["stage_mix_fraction"] = self.settings.historical_stage_mix_fraction
+        return result
+
+    def _compatible_contract(self, saved, progress):
+        if saved == self.contract():
+            return True
+        previous = self.contract()
+        previous.pop("checkpoint_start_fraction", None)
+        previous.pop("stage_mix_fraction", None)
+        # Adopt the extension before it can affect any archived checkpoint or
+        # played mixed game. Other rules, budgets and protocols stay strict.
+        return (saved == previous and progress < min(self.threshold, self.checkpoint_threshold))
+
+    @property
+    def checkpoint_threshold(self):
+        fraction = self.settings.historical_checkpoint_start_fraction
+        return math.ceil((self.settings.target_environment_plies or 0) * fraction) if fraction is not None else math.inf
+
+    def evaluation_panel(self, *, include_future=False):
+        return [e for e in self.entries if e.get("kind", "early") == "early"
+                and (include_future or e["environment_plies"] <= self.progress)]
 
     def panel(self):
         return [e for e in self.entries if e["environment_plies"] <= self.progress]
 
     def update_progress(self, policy, layout, *, environment_plies, update):
         self.progress = int(environment_plies)
+        if self._checkpoint_cpu_state is not None and self._checkpoint_cpu_state[:2] != (update, self.progress):
+            self._checkpoint_cpu_state = None
         if not self.enabled:
             return
+        self._configure_weight_cache(policy)
         # Archive at most one real set of parameters per completed update. A
         # late installation cannot fabricate versions at already passed steps.
         covered = {f for e in self.entries for f in e["milestones"]}
         due = [f for f in self.settings.historical_snapshot_fractions
                if self.progress >= math.ceil(f * self.settings.target_environment_plies) and f not in covered]
         archive = self.progress < self.threshold and (not self.entries or bool(due))
+        if archive:
+            self._archive_snapshot(policy, layout, update=update, kind="early", milestones=due)
+        elif self._catalog_dirty:
+            self._publish_catalog()
+        if self.active and len(self.evaluation_panel()) < 2:
+            raise RuntimeError("historical phase needs at least two real early snapshots; archive is incomplete")
+        # Scheduling must not depend on cache size or I/O completion: cache-off
+        # and cache-on runs consume identical RNG and select identical games.
+        if (self.settings.historical_checkpoint_start_fraction is not None and self.active
+                and self.cohort_started >= self.cohort_limit and self.pending_cohort is None):
+            self.pending_cohort = self._choose_cohort()
+        if self.weight_cache is not None:
+            self.weight_cache.trim()
+            if self.pending_cohort is not None and self.pending_cohort["id"] != self.loaded_id:
+                entry = next(e for e in self.panel() if e["id"] == self.pending_cohort["id"])
+                self.weight_cache.prefetch(entry)
+
+    def _configure_weight_cache(self, policy):
+        if self.weight_cache is None and self.settings.historical_cache_gib:
+            matrix_dtype = ({"bfloat16": torch.bfloat16, "float16": torch.float16}.get(self.settings.amp)
+                            if self.context.device.type == "cuda" else None)
+            self.weight_cache = HistoricalWeightCache(self.directory, self.settings,
+                matrix_names=matrix_parameter_names(policy), matrix_dtype=matrix_dtype,
+                pin=self.context.device.type == "cuda")
+
+    def _publish_catalog(self):
         error = None
-        if (archive or self._catalog_dirty) and self.context.primary:
+        if self.context.primary:
             try:
                 self.directory.mkdir(parents=True, exist_ok=True)
-                if self._catalog_dirty:
-                    atomic_json(self.catalog_path, {"contract": self.contract(), "opponents": self.entries})
-                name = f"early_{self.progress:012d}_u{update:09d}_{uuid.uuid4().hex[:8]}.pt"
+                atomic_json(self.catalog_path, {"contract": self.contract(), "opponents": self.entries})
+            except Exception as exc:
+                error = f"historical catalog: {type(exc).__name__}: {exc}"
+        synchronized_error(self.context, error)
+        self.entries = self.context.broadcast_object(self.entries)
+        self._catalog_dirty = False
+
+    def _archive_snapshot(self, policy, layout, *, update, kind, milestones):
+        started, error, payload = time.perf_counter(), None, None
+        if self.context.primary:
+            try:
+                self.directory.mkdir(parents=True, exist_ok=True)
+                name = f"{kind}_{self.progress:012d}_u{update:09d}_{uuid.uuid4().hex[:8]}.pt"
                 path = self.directory / name
-                if archive:
-                    p, pp = packed_weights(policy)
-                    l, lp = packed_weights(layout)
-                    payload = dict(format_version=CHECKPOINT_FORMAT_VERSION, update=update,
-                                   mode=self.settings.mode.value, algorithm="ppo",
-                                   dead_rules_enabled=self.settings.dead_rules_enabled,
-                                   reason="historical_opponent_inference_only",
-                                   config=self.settings.serializable(), policy=p, layout=l,
-                                   packed_weights={"policy": pp, "layout": lp})
-                    temp = path.with_suffix(".pt.tmp")
-                    torch.save(payload, temp)
-                    temp.replace(path)
-                    self.entries.append(dict(id=path.stem, file=name, sha256=sha256_file(path),
-                                         environment_plies=self.progress, update=update, milestones=due,
-                                         bytes=path.stat().st_size))
-                    atomic_json(self.catalog_path, {"contract": self.contract(), "opponents": self.entries})
+                p, pp = packed_weights(policy)
+                l, lp = packed_weights(layout)
+                payload = dict(format_version=CHECKPOINT_FORMAT_VERSION, update=update,
+                               mode=self.settings.mode.value, algorithm="ppo",
+                               dead_rules_enabled=self.settings.dead_rules_enabled,
+                               reason="historical_opponent_inference_only",
+                               config=self.settings.serializable(), policy=p, layout=l,
+                               packed_weights={"policy": pp, "layout": lp})
+                temp = path.with_suffix(".pt.tmp")
+                torch.save(payload, temp)
+                temp.replace(path)
+                entry = dict(id=path.stem, file=name, sha256=sha256_file(path), kind=kind,
+                             environment_plies=self.progress, update=update, milestones=milestones,
+                             bytes=path.stat().st_size)
+                self.entries.append(entry)
+                if self.weight_cache is not None:
+                    self.weight_cache.remember_payload(entry, payload)
             except Exception as exc:
                 error = f"historical snapshot: {type(exc).__name__}: {exc}"
-        if archive or self._catalog_dirty:
-            synchronized_error(self.context, error)
-            self.entries = self.context.broadcast_object(self.entries)
-            self._catalog_dirty = False
-        if self.active and len(self.panel()) < 2:
-            raise RuntimeError("historical phase needs at least two real early snapshots; archive is incomplete")
+        synchronized_error(self.context, error)
+        self._publish_catalog()
+        self.archive_count += 1
+        self.archive_seconds += time.perf_counter() - started
+        weights = {name: payload[name] for name in ("policy", "layout")} if payload is not None else None
+        self._checkpoint_cpu_state = (update, self.progress, weights)
+        return weights
+
+    def archive_checkpoint(self, policy, layout, *, environment_plies, update):
+        """Called before gathering checkpoint rank state, once per saved version.
+
+        Return the same CPU weights for the full checkpoint to avoid a second
+        GPU-to-CPU copy. A failed full save leaves only an orphan disk snapshot;
+        exact resume prunes its metadata using the saved catalog lineage.
+        """
+        self.progress = int(environment_plies)
+        if self._checkpoint_cpu_state is not None and self._checkpoint_cpu_state[:2] == (update, self.progress):
+            return self._checkpoint_cpu_state[2]
+        if not self.enabled or self.progress < self.checkpoint_threshold:
+            return None
+        if any(e["update"] == update and e["environment_plies"] == self.progress for e in self.entries):
+            return None
+        self._configure_weight_cache(policy)
+        return self._archive_snapshot(policy, layout, update=update, kind="checkpoint", milestones=[])
 
     def probabilities(self):
         panel = self.panel()
@@ -156,8 +248,26 @@ class HistoricalOpponents:
         high = max(self.q.get(e["id"], 0.) for e in panel)
         weights = [math.exp(max(-60., self.q.get(e["id"], 0.) - high)) for e in panel]
         total, uniform = sum(weights), self.settings.historical_uniform_fraction
-        return {e["id"]: (1 - uniform) * w / total + uniform / len(panel)
-                for e, w in zip(panel, weights, strict=True)}
+        probabilities = {e["id"]: (1 - uniform) * w / total + uniform / len(panel)
+                         for e, w in zip(panel, weights, strict=True)}
+        mix = self.settings.historical_stage_mix_fraction
+        if mix:
+            # Equal mass per occupied 10%-progress band, then uniform within a
+            # band. Dense adjacent checkpoints cannot drown out earlier styles.
+            bands = {}
+            for e in panel:
+                band = min(9, int(10 * e["environment_plies"] / self.settings.target_environment_plies))
+                bands.setdefault(band, []).append(e["id"])
+            for identifiers in bands.values():
+                for identifier in identifiers:
+                    probabilities[identifier] = ((1 - mix) * probabilities[identifier]
+                                                  + mix / len(bands) / len(identifiers))
+        return probabilities
+
+    def _choose_cohort(self):
+        probabilities = self.probabilities()
+        identifier = self.rng.choices(list(probabilities), weights=list(probabilities.values()))[0]
+        return dict(id=identifier, probability=probabilities[identifier], panel_size=len(probabilities))
 
     def role_targets(self):
         opponent, teammate = self.settings.historical_training_fraction, self.settings.historical_teammate_fraction
@@ -180,9 +290,10 @@ class HistoricalOpponents:
         if pinned and pinned != {self.active_id}:
             raise RuntimeError("unfinished games do not match the resident historical cohort")
         if self.active_id is None or (not pinned and self.cohort_started >= self.cohort_limit):
-            probabilities = self.probabilities()
-            self.active_id = self.rng.choices(list(probabilities), weights=list(probabilities.values()))[0]
-            self.active_probability = probabilities[self.active_id]
+            choice = self.pending_cohort or self._choose_cohort()
+            self.pending_cohort = None
+            self.active_id, self.active_probability = choice["id"], choice["probability"]
+            self.active_panel_size = choice["panel_size"]
             self.cohort_started = 0
             # Long unfinished games can delay a swap. Amortize that drain and
             # repay admission debt instead of repeatedly starving the 20% mix.
@@ -215,20 +326,30 @@ class HistoricalOpponents:
         self.device_packs.clear()
         self.loaded_id = None
 
+    def close(self):
+        if self.weight_cache is not None:
+            self.weight_cache.close()
+        self._checkpoint_cpu_state = None
+
     def _load_active(self, actor):
         if self.loaded_id == self.active_id:
             return
         boundary = time.perf_counter()
         entry = next(e for e in self.panel() if e["id"] == self.active_id)
-        path = self.directory / entry["file"]
-        if entry["sha256"] not in self._verified:
-            if sha256_file(path) != entry["sha256"]:
-                raise ValueError("frozen historical snapshot hash changed")
-            self._verified.add(entry["sha256"])
-        payload = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
-        if (payload["mode"] != self.settings.mode.value or payload["format_version"] != CHECKPOINT_FORMAT_VERSION
-                or payload["config"]["no_capture_draw_plies"] != self.settings.no_capture_draw_plies):
-            raise ValueError("historical opponent checkpoint contract mismatch")
+        cached = self.weight_cache is not None
+        if cached:
+            packs = self.weight_cache.get(entry)
+        else:
+            path = self.directory / entry["file"]
+            if entry["sha256"] not in self._verified:
+                if sha256_file(path) != entry["sha256"]:
+                    raise ValueError("frozen historical snapshot hash changed")
+                self._verified.add(entry["sha256"])
+            payload = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
+            if (payload["mode"] != self.settings.mode.value or payload["format_version"] != CHECKPOINT_FORMAT_VERSION
+                    or payload["config"]["no_capture_draw_plies"] != self.settings.no_capture_draw_plies):
+                raise ValueError("historical opponent checkpoint contract mismatch")
+            packs = payload["packed_weights"]
         self.clear_caches()
         if self.policy is None:
             # Preserve the learner's random stream on lazy initialization and resume.
@@ -237,13 +358,22 @@ class HistoricalOpponents:
                 self.layout = PieceConditionedLayoutPointerDecoder(self.settings.model)
         for name, module in (("policy", self.policy), ("layout", self.layout)):
             existing = {dtype: tensor for (model, dtype), tensor in self.device_packs.items() if model == name}
-            slabs, byte_count, calls = install_packed_weights(module, payload["packed_weights"][name],
+            slabs, byte_count, calls = install_packed_weights(module, packs[name],
                 self.context.device, slabs=existing or None,
-                matrix_dtype=actor.amp_dtype if name == "policy" and self.context.device.type == "cuda" else None)
+                matrix_dtype=actor.amp_dtype if not cached and name == "policy" and self.context.device.type == "cuda" else None,
+                non_blocking=cached and self.context.device.type == "cuda")
             self.device_packs.update({(name, dtype): tensor for dtype, tensor in slabs.items()})
             self.upload_calls += calls
             self.upload_bytes += byte_count
             module.eval().requires_grad_(False)
+        if cached:
+            if self.context.device.type == "cuda":
+                # One fence for all dtype slabs, not a synchronization for each
+                # weight. Pinned buffers must survive until the copies finish.
+                event = torch.cuda.Event()
+                event.record(torch.cuda.current_stream(self.context.device))
+                event.synchronize()
+            self.weight_cache.finish_upload()
         self.loaded_id = self.active_id
         self.load_count += 1
         self.load_seconds += time.perf_counter() - boundary
@@ -315,7 +445,7 @@ class HistoricalOpponents:
         # Appendix N inspired importance-weighted quality update, adapted to
         # draws and batched cohorts. Arena results never feed this sampler.
         self.q[opponent] = self.q.get(opponent, 0.) - self.settings.historical_learning_rate * score / (
-            len(self.panel()) * self.active_probability)
+            (self.active_panel_size or len(self.panel())) * self.active_probability)
         self.quality_update_games += 1
 
     def state_dict(self):
@@ -323,6 +453,7 @@ class HistoricalOpponents:
                     entries=copy.deepcopy(self.panel()), progress=self.progress,
                     rng=self.rng.getstate(), q=dict(self.q), results=copy.deepcopy(self.results),
                     active_id=self.active_id, active_probability=self.active_probability,
+                    active_panel_size=self.active_panel_size, pending_cohort=copy.deepcopy(self.pending_cohort),
                     cohort_started=self.cohort_started, cohort_limit=self.cohort_limit, credit=self.credit, started=self.started,
                     historical_started=self.historical_started, completed=self.completed,
                     opponent_plies=self.opponent_plies, teammate_plies=self.teammate_plies,
@@ -336,7 +467,7 @@ class HistoricalOpponents:
 
     def load_state_dict(self, state):
         version = state.get("version")
-        if not self.enabled or version not in (1, 2) or state.get("contract") != self.contract():
+        if not self.enabled or version not in (1, 2) or not self._compatible_contract(state.get("contract"), state["progress"]):
             raise ValueError("historical opponent resume contract changed")
         if version == 2 and state.get("mix_contract") != self.mix_contract():
             raise ValueError("historical role fractions changed across resume")
@@ -348,12 +479,20 @@ class HistoricalOpponents:
                 raise ValueError("historical checkpoint requires a missing or changed immutable opponent")
         # A disk snapshot from an update after latest.pt is on an abandoned
         # trajectory. Retain its file, but never silently admit it on replay.
-        self._catalog_dirty = self.entries != state["entries"]
+        self._catalog_dirty = (self._catalog_dirty or self.entries != state["entries"]
+                               or state.get("contract") != self.contract())
         self.entries = copy.deepcopy(state["entries"])
         for name in ("progress", "q", "results", "active_id", "active_probability", "cohort_started",
                      "started", "historical_started", "completed", "opponent_plies"):
             setattr(self, name, copy.deepcopy(state[name]))
         self.rng.setstate(state["rng"])
+        self.active_panel_size = state.get("active_panel_size", len(self.panel()))
+        self.pending_cohort = copy.deepcopy(state.get("pending_cohort"))
+        if self.pending_cohort is not None:
+            choice = self.pending_cohort
+            if (choice["id"] not in {e["id"] for e in self.panel()}
+                    or not 0 < choice["probability"] <= 1 or choice["panel_size"] < 1):
+                raise ValueError("invalid saved historical prefetch choice")
         self.cohort_limit = state.get("cohort_limit", self.settings.historical_cohort_games)
         if version == 2:
             for name in ("teammate_started", "teammate_completed", "mixed_completed", "teammate_plies",
@@ -372,6 +511,14 @@ class HistoricalOpponents:
 
     def metrics(self):
         return {"historical/active": int(self.active), "historical/threshold_environment_plies": self.threshold,
+                "historical/evaluation_opponents": len(self.evaluation_panel()),
+                "historical/checkpoint_start_environment_plies": (self.checkpoint_threshold
+                    if math.isfinite(self.checkpoint_threshold) else None),
+                "historical/stage_mix_fraction": self.settings.historical_stage_mix_fraction,
+                "historical/archive_count": self.archive_count,
+                "historical/archive_seconds": self.archive_seconds,
+                "historical/archive_disk_bytes": sum(e.get("bytes", 0) for e in self.panel()),
+                **(self.weight_cache.metrics() if self.weight_cache is not None else {}),
                 "historical/opponents": len(self.panel()), "historical/games_started": self.historical_started,
                 "historical/all_games_started_after_half": self.started, "historical/games_completed": self.completed,
                 "historical/admission_fraction": self.historical_started / max(1, self.started),
@@ -402,6 +549,7 @@ class HistoricalOpponents:
             probabilities = self.probabilities()
             atomic_json(self.directory / "status.json", dict(
                 **self.metrics(), progress=self.progress, active_id=self.active_id,
+                pending_cohort=copy.deepcopy(self.pending_cohort),
                 unfinished_historical_games=sum(s.opponent_id is not None or s.teammate_id is not None for s in pool.slots),
                 scenarios=[dict(id=k, target_fraction=v, started=self.scenario_started[k],
                                 actual_fraction=self.scenario_started[k] / max(1, self.started),

@@ -114,18 +114,20 @@ class Monitor:
                 metrics.get("cumulative/environment_plies", 0), resume.get("environment_plies", 0),
                 selection.get("last_completed_environment_plies", 0)))
             observing = bool(settings.get("arena_observational_only"))
+            champion_only = bool(settings.get("arena_champion_only"))
             candidates = []
             if selection.get("best_snapshot"):
                 path = (run / "model_selection" / selection["best_snapshot"]).resolve()
                 proven = bool(selection.get("rounds"))
                 candidates.append(("best", path, selection.get("best_update"),
+                                   "历史冠军" if champion_only and proven else
                                    "固定旧基准（归档）" if observing else
                                    "前半程评测最优（归档）" if historical_only else
                                    "评测最优" if proven else "评测初始基线", proven))
             if live.get("file"):
                 candidates.append(("live", (run / "inference" / live["file"]).resolve(),
                                    live.get("update"), "最新训练快照", False))
-            if (historical_only or observing) and selection.get("latest_evaluated_snapshot"):
+            if (historical_only or observing or champion_only) and selection.get("latest_evaluated_snapshot"):
                 candidates.append(("evaluated", (run / "model_selection" / selection["latest_evaluated_snapshot"]).resolve(),
                                    selection.get("last_evaluated_update"), "最近完成评测快照", True))
             candidates.append(("latest", run / "checkpoints/latest.pt", resume.get("update"), "最近可恢复检查点", False))
@@ -284,6 +286,7 @@ class Monitor:
                 "evaluation_type": ("historical_only" if historical_evaluation_only(settings, completed) else
                                     "fixed_reference" if settings.get("arena_observational_only") else "champion"),
                 "observational_only": settings.get("arena_observational_only", False),
+                "evaluation_champion_only": settings.get("arena_champion_only", False),
                 "evaluation_games": settings.get("arena_games"),
                 "evaluation_historical_teammate_fraction": settings.get("arena_historical_teammate_fraction", 0.0),
                 "after_half_historical_only": settings.get("arena_after_half_historical_only", False),

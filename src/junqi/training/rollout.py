@@ -71,6 +71,9 @@ class RolloutMetrics:
     wins: int = 0
     draws: int = 0
     losses: int = 0
+    flag_captures: int = 0
+    nonterminal_flag_captures: int = 0
+    flag_capture_reward_abs_sum: float = 0.0
     wall_seconds: float = 0.0
     actor_inference_seconds: float = 0.0
     environment_step_seconds: float = 0.0
@@ -92,6 +95,12 @@ class RolloutMetrics:
             self.base_plies += count
         self.environment_plies += count
 
+    def record_flag_capture(self, owner: int | None, reward: float, *, terminal: bool) -> None:
+        if owner is not None:
+            self.flag_captures += 1
+            self.nonterminal_flag_captures += int(not terminal)
+            self.flag_capture_reward_abs_sum += abs(reward)
+
     def as_dict(self) -> dict[str, float | int]:
         return {
             "rollout/policy_samples": self.policy_samples,
@@ -106,6 +115,9 @@ class RolloutMetrics:
             "rollout/wins": self.wins,
             "rollout/draws": self.draws,
             "rollout/losses": self.losses,
+            "rollout/flag_captures": self.flag_captures,
+            "rollout/nonterminal_flag_captures": self.nonterminal_flag_captures,
+            "rollout/flag_capture_reward_abs_sum": self.flag_capture_reward_abs_sum,
             "rollout/wall_seconds": self.wall_seconds,
             "rollout/actor_inference_seconds": self.actor_inference_seconds,
             "rollout/environment_step_work_seconds": self.environment_step_seconds,

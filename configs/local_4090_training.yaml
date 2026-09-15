@@ -257,6 +257,9 @@ rollout:
 ppo:
   discount: 1.0
   gae_lambda: 0.95
+  # Each captured flag: +0.2 for the capturing team, -0.2 for the losing team.
+  # Added to any terminal reward on the same step; zero disables event shaping.
+  flag_capture_reward: 0.2
   value_coefficient: 0.5
   value_clip_epsilon: 0.2
   critic_learning_rate: 0.0001
@@ -386,8 +389,10 @@ model_selection:
   four_player:
     interval_environment_plies: 50000000
     after_half_interval_environment_plies: 50000000
-    after_half_historical_only: true
-    observational_only: true
+    after_half_historical_only: false
+    observational_only: false
+    # Every evaluation challenges the incumbent champion, including after half.
+    champion_only: true
     historical_teammate_fraction: 0.5
     games: 500
     checkpoint_policy: periodic
@@ -465,6 +470,14 @@ historical_opponents:
   training_fraction: 0.2
   teammate_fraction: 0.2
   snapshot_fractions: [0.05, 0.10, 0.20, 0.30, 0.40]
+  # Every complete checkpoint from 20% enters the training pool. Early
+  # snapshots remain archived; champion-only evaluation uses its own incumbent.
+  # Cache capacities are performance-only limits.
+  checkpoint_start_fraction: 0.20
+  stage_mix_fraction: 0.50
+  cache_gib: 32
+  cache_reserve_gib: 16
+  pinned_mib: 256
   cohort_games: 1024
   eval_total_games: 500  # Total across the frozen panel, allocated in four-game rotations.
   uniform_fraction: 0.05
