@@ -22,7 +22,8 @@ def reconcile_draw_objective(payload, settings, *, adopt: bool = False):
         "environment_plies": state.get("cumulative", {}).get("environment_plies", 0),
         "from_draw_reward": old, "to_draw_reward": target,
         "action_feature_dim": 6, "layout_outcomes_remapped": changed,
-        "gae": "signed_team_outcome_plus_unsigned_shared_draw_penalty",
+        "gae": ("fixed_team_scalar_global_value" if settings.algorithm == "mappo"
+                else "signed_team_outcome_plus_unsigned_shared_draw_penalty"),
     }
     state["draw_objective_migration"] = migration
     config["draw_reward"] = target
@@ -47,3 +48,37 @@ def reconcile_flag_capture_objective(payload, settings, *, adopt: bool = False):
         "terminal_reward": "additive",
     }
     config["flag_capture_reward"] = target
+
+
+def reconcile_futile_attack_objective(payload, settings, *, adopt: bool = False):
+    from .futile_attack import FutileAttackPenalty
+    config = payload["config"]
+    old = float(config.get("futile_attack_penalty", 0.0))
+    target = float(settings.futile_attack_penalty)
+    unchanged = (old == target and (target == 0 or (
+        config.get("futile_attack_ema_decay", 0.95) == settings.futile_attack_ema_decay
+        and config.get("target_environment_plies") == settings.target_environment_plies)))
+    if unchanged:
+        return
+    if not adopt:
+        raise RuntimeError("futile attack penalty changed across resume; use --adopt-futile-attack-penalty to preserve state and adopt it explicitly")
+    state = payload["trainer_state"]
+    progress = int(state.get("cumulative", {}).get("environment_plies", 0))
+    controller = FutileAttackPenalty(target, settings.target_environment_plies, settings.futile_attack_ema_decay)
+    if old > 0:
+        controller.load_state_dict(state.get("futile_attack_penalty"))
+    else:
+        controller.start_environment_plies = progress
+    state["futile_attack_penalty"] = controller.state_dict()
+    state["futile_attack_objective_migration"] = {
+        "update": int(payload["update"]), "environment_plies": progress,
+        "from_penalty": old, "to_penalty": target,
+        "start_environment_plies": controller.start_environment_plies,
+        "stop_environment_plies": controller.stop_environment_plies,
+        "ema_decay": settings.futile_attack_ema_decay,
+        "scope": "future_ppo_transitions_only", "perspective": "acting_learner_team",
+        "evidence": "per_viewer_public_battle_history", "terminal_reward": "additive",
+    }
+    config["futile_attack_penalty"] = target
+    config["futile_attack_ema_decay"] = settings.futile_attack_ema_decay
+    config["target_environment_plies"] = settings.target_environment_plies

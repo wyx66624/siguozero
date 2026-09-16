@@ -2,7 +2,8 @@
 
 Only the live context window is owned by ArrayHistory. Older blocks survive
 while a rollout sample references them, then are reclaimed with that sample.
-No referee identities or hidden information enter these arrays.
+Actor arrays contain only player observations. MAPPO stores referee histories
+in separate arrays with distinct identities and marks every value-only state.
 """
 
 from __future__ import annotations

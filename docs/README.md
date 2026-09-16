@@ -2,6 +2,8 @@
 
 本目录保存四国军棋与二人军棋的规则、棋盘编码、动作编码、可执行训练环境和自博弈方案。
 
+[expand：512 维模型与 MAPPO](expand_mappo_zh.md)：256 维 action/state、concat 后 SwiGLU、16 层 Actor、16 层全知单 V Critic；独立配置，已实现但尚未运行验证。
+
 [后半程历史对手、队友训练与评测](historical_opponents_zh.md)：15 亿步后独立启用 20% 历史对手和 20% 历史队友，配合冻结对手评测、回退检查及共享 KV / 批量权重传输。
 
 本地 4090 全程每 5000 万环境步评测一次，从 15 亿步起仅进行历史对手集评测，不再做冠军比较或按结果筛选模型，持续使用后续版本。完整断点每 1000 万步保存，正常停止额外保存，每次评测单独保留快照，详见[评测与保存日程](best_model_selection_zh.md)。
@@ -16,6 +18,7 @@
 
 [布局队列与计算优化](layout_queue_optimization_zh.md)说明样本时效、消费上限、紧凑缓冲和批量回放验证。
 [行棋自适应探索熵](adaptive_entropy_zh.md)说明开局与后续阶段的独立反馈、损失接入、断点恢复、监控指标及 4090 短批开销。
+[重复送子的临时即时惩罚](futile_attack_penalty_zh.md)说明公开战斗证据、初始 0.01、按进度和发生率衰减、到一半预算归零，以及完整断点迁移。
 下述工期来自 revision 22 性能基线；后续[规则迁移](draw_rule_migration_zh.md)和[revision 24 奖励与输入修改](draw_penalty_countdown_zh.md)后的工期需重新测量。
 
 **revision 22 四国性能基线**：棋盘和动作各 128 维，时序 token 256 维，main 32 层、FFN 1024。

@@ -260,6 +260,9 @@ ppo:
   # Each captured flag: +0.2 for the capturing team, -0.2 for the losing team.
   # Added to any terminal reward on the same step; zero disables event shaping.
   flag_capture_reward: 0.2
+  # Temporary public-evidence shaping; reaches zero at half the global step budget.
+  futile_attack_penalty: 0.01
+  futile_attack_ema_decay: 0.95
   value_coefficient: 0.5
   value_clip_epsilon: 0.2
   critic_learning_rate: 0.0001
@@ -371,11 +374,26 @@ learner:
     adaptation_rate: 0.1  # log-coefficient feedback once per completed update
     ema_decay: 0.9
     opening_plies: 16  # separate opening and later-play entropy controllers
+    mode_overrides:
+      four_dark:
+        minimum: 0.001
+        maximum: 0.01
+        opening_maximum: 0.02
+        target_ratio: 0.50
+        opening_target_ratio: 0.50
+        # [completed global environment steps, opening target, later-play target].
+        # Hold 0.50 through 350M, then interpolate linearly; resume keeps progress.
+        target_schedule:
+          - [0, 0.50, 0.50]
+          - [350000000, 0.50, 0.50]
+          - [1500000000, 0.40, 0.40]
+          - [3000000000, 0.35, 0.35]
   kl:
     initial_coefficient: 0.02
-    target_per_action: 0.015
+    target_per_action: 0.02
   early_stop:
-    observed_kl_multiple: 1.5
+    # Allow larger PPO updates: stop above 0.02 * 2 = 0.04 per-action KL.
+    observed_kl_multiple: 2.0
     clipped_sample_fraction: 0.3
   precision:
     model: bfloat16
@@ -474,13 +492,16 @@ historical_opponents:
   # snapshots remain archived; champion-only evaluation uses its own incumbent.
   # Cache capacities are performance-only limits.
   checkpoint_start_fraction: 0.20
-  stage_mix_fraction: 0.50
+  sampling: win_rate_distance
+  win_rate_temperature: 0.10  # Opponents closest to a 50% learner win rate get the most weight.
+  win_rate_ema_alpha: 0.01
+  stage_mix_fraction: 0.0
   cache_gib: 32
   cache_reserve_gib: 16
   pinned_mib: 256
   cohort_games: 1024
   eval_total_games: 500  # Total across the frozen panel, allocated in four-game rotations.
-  uniform_fraction: 0.05
+  uniform_fraction: 0.0
   learning_rate: 0.01
 
 compute_budget:

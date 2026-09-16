@@ -54,7 +54,7 @@ class OutcomeStore:
     def snapshot(self, run, *, algorithm, mode, max_update=None, session_started=None, resumed_update=None):
         run = Path(run).resolve()
         key, source = str(run), run / "metrics.jsonl"
-        unit = "games" if algorithm == "ppo" else "branches"
+        unit = "games" if algorithm in ("ppo", "mappo") else "branches"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock, closing(sqlite3.connect(self.path, timeout=10)) as db:
             db.row_factory = sqlite3.Row
@@ -100,7 +100,7 @@ class OutcomeStore:
                         update = count(record.get("update"))
                         if not update:
                             continue
-                        row_unit = "games" if record.get("algorithm", algorithm) == "ppo" else "branches"
+                        row_unit = "games" if record.get("algorithm", algorithm) in ("ppo", "mappo") else "branches"
                         values = result_counts(record, "rollout/")
                         expected = count(record.get("rollout/base_games_completed" if row_unit == "games"
                                                     else "rollout/terminal_continuations"))

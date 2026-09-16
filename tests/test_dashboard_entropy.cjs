@@ -35,3 +35,18 @@ test('phase coefficients show their independently configured ceilings', () => {
   assert.ok(html.includes('0.021 → 0.0215 · 上限 0.04'));
   assert.ok(html.includes('0.013 → 0.0131 · 上限 0.02'));
 });
+
+test('annealing displays current phase targets and eventual targets separately from measurements', () => {
+  const html = context.renderExploration({'policy/adaptive_entropy_enabled':1,
+    'policy/opening_entropy_target_ratio':.5, 'policy/other_entropy_target_ratio':.45,
+    'policy/opening_entropy_ratio':.62, 'policy/other_entropy_ratio':.59,
+    'policy/entropy_target_schedule_enabled':1,
+    'policy/entropy_target_schedule_end_environment_plies':3000000000,
+    'policy/opening_entropy_target_final':.35, 'policy/other_entropy_target_final':.3});
+  for (const text of ['开局目标 50%', '后续目标 45%', '62%', '59%', '逐步下降',
+                      '3,000,000,000', '开局目标 35%', '后续目标 30%', '恢复训练沿用累计进度']) {
+    assert.ok(html.includes(text), text);
+  }
+  assert.ok(!html.includes('NaN') && !html.includes('Infinity'));
+  assert.ok(!context.renderExploration({'policy/adaptive_entropy_enabled':1}).includes('逐步下降'));
+});

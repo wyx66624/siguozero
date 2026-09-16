@@ -14,7 +14,7 @@ from .trainer import SelfPlayTrainer
 
 def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train four-player PPO with a critic, or two-player K=4/M=2 GRPO"
+        description="Train four-player PPO/MAPPO with a critic, or two-player K=4/M=2 GRPO"
     )
     parser.add_argument(
         "--mode",
@@ -90,7 +90,7 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
     parser.add_argument("--actor-batch", type=int, default=None)
     parser.add_argument("--rollout-anchor-wave", type=int, default=None)
     parser.add_argument("--environment-workers", type=int, default=None,
-                        help='PPO CPU worker processes per rank; 1 selects serial collection (GRPO uses threads)')
+                        help='PPO/MAPPO CPU workers per rank; MAPPO also uses a worker when set to 1 (GRPO uses threads)')
     parser.add_argument('--activation-checkpointing', action=argparse.BooleanOptionalAction, default=None,
                         help='recompute full temporal blocks to reduce activation memory')
     parser.add_argument('--causal-sdpa', action=argparse.BooleanOptionalAction, default=None,
@@ -135,6 +135,8 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
                         help="explicitly adopt the configured draw reward while preserving the complete latest checkpoint")
     parser.add_argument("--adopt-flag-capture-reward", action="store_true",
                         help="adopt the configured PPO flag reward for future steps, preserving the complete latest checkpoint")
+    parser.add_argument("--adopt-futile-attack-penalty", action="store_true",
+                        help="adopt the temporary PPO known-losing-attack penalty while preserving the complete latest checkpoint")
     parser.add_argument("--adopt-champion-evaluation", action="store_true",
                         help="switch future evaluations to the historical champion while preserving training state and completed reports")
     parser.add_argument("--adopt-pass-rule", action="store_true",
@@ -358,6 +360,7 @@ def main(
             adopt_current_draw_rules=args.adopt_current_draw_rules,
             adopt_draw_penalty=args.adopt_draw_penalty,
             adopt_flag_capture_reward=args.adopt_flag_capture_reward,
+            adopt_futile_attack_penalty=args.adopt_futile_attack_penalty,
             adopt_champion_evaluation=args.adopt_champion_evaluation,
             adopt_pass_rule=args.adopt_pass_rule,
             expand_game_pool=args.expand_game_pool,

@@ -4,12 +4,40 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 import torch
 from torch import Tensor
 
 from .encoding import PolicyState
+
+if TYPE_CHECKING:
+    from .settings import TrainingSettings
+
+
+def scheduled_entropy_targets(settings: TrainingSettings, environment_plies: int) -> dict[str, float]:
+    """Interpolate targets using completed global environment steps, including resume.
+
+    Configured knots are absolute step counts, independent of rollout size,
+    optimizer minibatches, epochs, and process lifetime. Settings validates them.
+    """
+    schedule = settings.entropy_target_schedule
+    if not schedule:
+        return {"opening": (settings.entropy_opening_target_ratio
+                            if settings.entropy_opening_target_ratio is not None
+                            else settings.entropy_target_ratio),
+                "other": settings.entropy_target_ratio}
+    if environment_plies <= schedule[0][0]:
+        targets = schedule[0][1:]
+    elif environment_plies >= schedule[-1][0]:
+        targets = schedule[-1][1:]
+    else:
+        for left, right in zip(schedule, schedule[1:]):
+            if environment_plies <= right[0]:
+                fraction = (environment_plies - left[0]) / (right[0] - left[0])
+                targets = tuple(a + fraction * (b - a) for a, b in zip(left[1:], right[1:]))
+                break
+    return dict(zip(("opening", "other"), targets))
 
 
 @dataclass

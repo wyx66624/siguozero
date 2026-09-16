@@ -10,7 +10,7 @@ from .rewards import DEFAULT_DRAW_REWARD, flag_capture_utility, terminal_utility
 
 def collect_pipelined(pool, actor, critic, layout, *, count, behavior_version,
                       discount, gae_lambda, environment, groups=2, draw_reward=DEFAULT_DRAW_REWARD,
-                      flag_capture_reward=0.0):
+                      flag_capture_reward=0.0, futile_attack_penalty=0.0):
     if not critic.deferred or not actor.policy.config.ppo_array_history:
         raise ValueError('pipelined PPO requires deferred values and array histories')
     if groups < 2:
@@ -28,7 +28,7 @@ def collect_pipelined(pool, actor, critic, layout, *, count, behavior_version,
         historical.attach_cache(actor, behavior_version)
     metrics = RolloutMetrics()
     boundary = time.perf_counter()
-    environment.begin(pool)
+    environment.begin(pool, track_futile_attacks=futile_attack_penalty > 0)
     metrics.environment_sync_seconds += time.perf_counter() - boundary
     metrics.environment_workers = len(environment.processes)
     initial_worker_seconds = environment.worker_seconds
@@ -95,15 +95,16 @@ def collect_pipelined(pool, actor, critic, layout, *, count, behavior_version,
                 player=value_owner if historical_game else state.records.identity[1],
                 coefficient=flag_capture_reward)
             metrics.record_flag_capture(row.flag_captured_owner, capture_reward, terminal=row.terminal)
+            futile_reward = metrics.record_futile_attack(row.futile_attack, futile_attack_penalty, learnable=learnable)
             sign = row.next_team_sign
             if historical_game and not row.terminal:
                 sign = 1 if value_owner % 2 == slot.value_seat(row.state.player) % 2 else -1
             traces[index].append(PPOTransition(state, action[0], float(log[0]), 0.,
-                (terminal_utility(reward, draw_reward=draw_reward) if row.terminal else 0.) + capture_reward,
+                (terminal_utility(reward, draw_reward=draw_reward) if row.terminal else 0.) + capture_reward + futile_reward,
                 row.terminal, sign,
                 terminal_draw=row.terminal and reward == 0, learnable=learnable,
                 value_state=value_state if historical_game else None,
-                flag_capture_reward=capture_reward))
+                flag_capture_reward=capture_reward, futile_attack_reward=futile_reward))
             if row.terminal:
                 metrics.base_games_completed += 1
                 metrics.wins += int(row.rewards[0] > 0)

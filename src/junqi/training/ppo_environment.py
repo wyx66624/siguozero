@@ -22,6 +22,7 @@ import numpy as np
 
 from ..game import GameConfig, JunqiGame
 from .packed_observation import observation_rows
+from .futile_attack import step_with_evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,25 +41,31 @@ class EnvironmentStep:
     rewards: tuple[float, ...]
     next_team_sign: int
     flag_captured_owner: int | None = None
+    futile_attack: bool = False
+    centralized_records: np.ndarray | None = None
 
 
 def environment_state(game):
     return EnvironmentState(game.current_player, tuple(game.legal_actions()) if not game.is_terminal else ())
 
 
-def _advance(index, game, action, mode):
+def _advance(index, game, action, mode, *, track_futile_attacks=False, centralized_critic=False):
     player = game.current_player
     if player is None:
         raise RuntimeError('terminal game remained in PPO environment')
     team = game.team_of(player)
-    result = game.step(action)
+    result, futile_attack = step_with_evidence(game, action, enabled=track_futile_attacks)
     rows = observation_rows(game, mode)
     terminal = game.is_terminal
     rewards = tuple(game.rewards()) if terminal else ()
+    centralized_rows = None
+    if centralized_critic:
+        from .mappo_encoding import centralized_observation_rows
+        centralized_rows = centralized_observation_rows(game, mode)
     return EnvironmentStep(index, environment_state(game), rows, terminal,
                            rewards[player] if terminal else 0., rewards,
                            1 if terminal or game.team_of(game.current_player) == team else -1,
-                           result.flag_captured_owner)
+                           result.flag_captured_owner, futile_attack, centralized_rows)
 
 
 @lru_cache(maxsize=2)
@@ -119,20 +126,25 @@ def _receive(stream):
 
 def _worker():
     games, mode = {}, None
+    track_futile_attacks = False
+    centralized_critic = False
     try:
         while True:
             command, payload = _receive(sys.stdin.buffer)
             if command == 'close':
                 return
             if command == 'initialize':
-                mode, replacements = payload
+                mode, replacements, track_futile_attacks = payload[:3]
+                centralized_critic = payload[3] if len(payload) == 4 else False
                 games = dict(replacements)
                 value = [(index, environment_state(game)) for index, game in games.items()]
             elif command == 'step':
                 replacements, actions = payload
                 games.update(replacements)
                 started = time.perf_counter()
-                value = ([_advance(index, games[index], action, mode) for index, action in actions],
+                value = ([_advance(index, games[index], action, mode,
+                                   track_futile_attacks=track_futile_attacks,
+                                   centralized_critic=centralized_critic) for index, action in actions],
                          time.perf_counter() - started)
             elif command == 'snapshot':
                 games.update(payload)
@@ -189,7 +201,7 @@ class ParallelPPOEnvironment:
             raise RuntimeError(f'PPO environment worker {worker} failed:\n{value}')
         return value
 
-    def begin(self, pool):
+    def begin(self, pool, *, track_futile_attacks=False, centralized_critic=False):
         if self.active_workers:
             raise RuntimeError('cannot replace a PPO pool during an outstanding step')
         self._start(len(pool.slots))
@@ -197,7 +209,10 @@ class ParallelPPOEnvironment:
         self.states = [None] * len(pool.slots)
         for worker, process in enumerate(self.processes):
             games = [(i, slot.game) for i, slot in enumerate(pool.slots) if i % len(self.processes) == worker]
-            _send(process.stdin, ('initialize', (pool.mode, games)))
+            payload = (pool.mode, games, track_futile_attacks)
+            if centralized_critic:
+                payload += (True,)
+            _send(process.stdin, ('initialize', payload))
         for worker in range(len(self.processes)):
             for index, state in self._result(worker):
                 self.states[index] = state

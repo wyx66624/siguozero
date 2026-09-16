@@ -21,28 +21,36 @@ from .accelerator import (
 
 # Version 6 uses a five-number coordinate/player action projection and histories
 # without event outcome features. Version 5's action embeddings are incompatible.
-from .checkpoint_format import CHECKPOINT_FORMAT_VERSION, SUPPORTED_CHECKPOINT_FORMAT_VERSIONS
+from .checkpoint_format import CHECKPOINT_FORMAT_VERSION, SUPPORTED_CHECKPOINT_FORMAT_VERSIONS, checkpoint_format_for_model
 
 
 def require_current_checkpoint(payload: dict[str, Any]) -> None:
     if payload.get("format_version") not in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS:
         raise ValueError(
             f"unsupported checkpoint format: {payload.get('format_version')!r}; "
-            "the whole-board linear action architecture requires version 6, 7, 8 or 9 weights. "
+            "supported architecture versions are 6 through 10. "
             "Use a new run directory; old board/action encoder weights are incompatible."
         )
-    if payload.get("format_version") in (8, 9):
+    if payload.get("format_version") in (8, 9, 10):
         for name in ("policy", "critic", "reference_policy"):
             weights = payload.get(name) or {}
             action = weights.get("action_encoder.projection.weight")
             if action is not None and (action.ndim != 2 or action.shape[1] != 6):
-                raise ValueError("version 8/9 checkpoint requires six action inputs")
+                raise ValueError("version 8+ checkpoint requires six action inputs")
             board = weights.get("board_encoder.projection.weight")
-            if payload["format_version"] == 9 and board is not None:
+            if payload["format_version"] >= 9 and board is not None:
                 from .encoding import BOARD_CODE_VOCAB_SIZE
                 expected = 129 * BOARD_CODE_VOCAB_SIZE + 3 + (75 if payload["dead_rules_enabled"] else 0) + 4
                 if board.ndim != 2 or board.shape[1] != expected:
-                    raise ValueError("version 9 checkpoint requires four pass inputs on the board encoder")
+                    raise ValueError("version 9+ checkpoint requires four pass inputs on the board encoder")
+    if payload.get("format_version") == 10:
+        model = payload.get("config", {}).get("model", {})
+        if checkpoint_format_for_model(model) != 10:
+            raise ValueError("version 10 checkpoint requires the concat-token SwiGLU contract")
+        weights = payload.get("critic")
+        if payload.get("algorithm") == "mappo" and weights is not None:
+            if "value_head.weight" not in weights or any(key.startswith("draw_value_head.") for key in weights):
+                raise ValueError("MAPPO checkpoint requires exactly one scalar V head")
 
 
 def capture_rng_state(
@@ -143,12 +151,12 @@ class CheckpointManager:
     ) -> Path:
         if not isinstance(dead_rules_enabled, bool):
             raise ValueError("dead_rules_enabled must be a boolean")
-        if algorithm not in ("grpo", "ppo"):
+        if algorithm not in ("grpo", "ppo", "mappo"):
             raise ValueError("invalid checkpoint training algorithm")
-        if (algorithm == "ppo") != (critic is not None and critic_optimizer is not None):
+        if (algorithm in ("ppo", "mappo")) != (critic is not None and critic_optimizer is not None):
             raise ValueError("PPO checkpoints require a critic and its optimizer")
         payload = {
-            "format_version": CHECKPOINT_FORMAT_VERSION,
+            "format_version": checkpoint_format_for_model(config.get("model", {})),
             "update": update,
             "mode": mode,
             "algorithm": algorithm,
@@ -294,9 +302,17 @@ def restore_training_state(
     if payload.get("algorithm", "grpo") != expected_algorithm:
         raise RuntimeError(
             "checkpoint algorithm does not match this training run; "
-            "use --init-from with a new run directory for an intentional GRPO-to-PPO migration"
+            "use a new run directory for a different algorithm or architecture"
         )
-    if expected_algorithm == "ppo":
+    if expected_algorithm == "mappo":
+        if (critic is None or payload.get("format_version") != 10
+                or payload.get("config", {}).get("critic_layers") != critic.config.temporal_layers):
+            raise RuntimeError("MAPPO architecture/critic depth changed across resume")
+        saved_model = payload.get("config", {}).get("model", {})
+        for name in ("board_dim", "temporal_dim", "temporal_layers", "temporal_heads", "token_fusion_hidden_dim"):
+            if saved_model.get(name) != getattr(policy.config, name):
+                raise RuntimeError(f"MAPPO model configuration changed across resume: {name}")
+    if expected_algorithm in ("ppo", "mappo"):
         if (critic is None or critic_optimizer is None
                 or "critic" not in payload or "critic_optimizer" not in payload):
             raise RuntimeError("PPO checkpoint is missing critic training state")

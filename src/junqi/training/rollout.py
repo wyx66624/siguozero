@@ -74,6 +74,8 @@ class RolloutMetrics:
     flag_captures: int = 0
     nonterminal_flag_captures: int = 0
     flag_capture_reward_abs_sum: float = 0.0
+    futile_attacks: int = 0
+    futile_attack_reward_abs_sum: float = 0.0
     wall_seconds: float = 0.0
     actor_inference_seconds: float = 0.0
     environment_step_seconds: float = 0.0
@@ -101,6 +103,13 @@ class RolloutMetrics:
             self.nonterminal_flag_captures += int(not terminal)
             self.flag_capture_reward_abs_sum += abs(reward)
 
+    def record_futile_attack(self, event: bool, coefficient: float, *, learnable=True) -> float:
+        if not event or not learnable:
+            return 0.0
+        self.futile_attacks += 1
+        self.futile_attack_reward_abs_sum += coefficient
+        return -coefficient
+
     def as_dict(self) -> dict[str, float | int]:
         return {
             "rollout/policy_samples": self.policy_samples,
@@ -118,6 +127,9 @@ class RolloutMetrics:
             "rollout/flag_captures": self.flag_captures,
             "rollout/nonterminal_flag_captures": self.nonterminal_flag_captures,
             "rollout/flag_capture_reward_abs_sum": self.flag_capture_reward_abs_sum,
+            "rollout/futile_attacks": self.futile_attacks,
+            "rollout/futile_attack_rate": self.futile_attacks / max(1, self.policy_samples),
+            "rollout/futile_attack_reward_abs_sum": self.futile_attack_reward_abs_sum,
             "rollout/wall_seconds": self.wall_seconds,
             "rollout/actor_inference_seconds": self.actor_inference_seconds,
             "rollout/environment_step_work_seconds": self.environment_step_seconds,
@@ -144,6 +156,7 @@ class BaseGameSlot:
     teammate_id: str | None = None
     learner_seat: int | None = None
     historical_scenario: str | None = None
+    critic_history: Any | None = None
 
     @property
     def primary_seat(self) -> int:
@@ -204,6 +217,8 @@ class FrozenPolicyActor:
         return_log_probs: bool = True,
         sampling_uniforms: torch.Tensor | None = None,
     ) -> tuple[list[list[tuple[int, int]]], list[torch.Tensor]]:
+        if any(state.centralized for state in states):
+            raise ValueError("actor sampling cannot consume centralized critic observations")
         if sampling_uniforms is not None:
             _validate_sampling_uniforms(
                 sampling_uniforms, state_count=len(states), sample_count=count
@@ -277,10 +292,16 @@ class BaseGamePool:
         seed: int,
         layout_prefetch_games: int = 1,
         no_capture_draw_plies: int = 70,
+        centralized_critic: bool = False,
     ) -> None:
         if pool_size <= 0:
             raise ValueError("base game pool size must be positive")
         self.mode = normalize_mode(mode)
+        if type(centralized_critic) is not bool:
+            raise ValueError("centralized_critic must be a boolean")
+        if centralized_critic and self.mode is TrainingMode.TWO_PLAYER:
+            raise ValueError("MAPPO pool is restricted to four-player modes")
+        self.centralized_critic = centralized_critic
         self.pool_size = pool_size
         self.max_transitions = max_transitions
         self.max_game_plies = max_game_plies
@@ -341,8 +362,12 @@ class BaseGamePool:
         if self.historical is not None and self.historical.active:
             scenario = ("historical_both" if opponent_id and teammate_id else "historical_opponents" if opponent_id
                         else "historical_teammate" if teammate_id else "self_play")
+        critic_history = None
+        if self.centralized_critic:
+            from .mappo_encoding import CentralizedHistory
+            critic_history = CentralizedHistory.initialize(game, self.mode, max_transitions=self.max_transitions)
         return BaseGameSlot(game, history, samples, behavior_version, opponent_id, learner_team,
-                            teammate_id, learner_seat, scenario)
+                            teammate_id, learner_seat, scenario, critic_history)
 
     def fill(
         self,
@@ -358,6 +383,7 @@ class BaseGamePool:
         return {
             # Version 5 stores only endpoint/actor action histories.
             "format_version": 5,
+            "centralized_critic": self.centralized_critic,
             "historical_opponents": self.historical.state_dict() if self.historical is not None and self.historical.enabled else None,
             "mode": self.mode.value,
             "dead_rules_enabled": self.dead_rules_enabled,
@@ -377,6 +403,8 @@ class BaseGamePool:
             raise ValueError("unsupported base-game-pool checkpoint format")
         if normalize_mode(state["mode"]) is not self.mode:
             raise ValueError("base-game-pool mode does not match trainer mode")
+        if state.get("centralized_critic", False) is not self.centralized_critic:
+            raise ValueError("actor/critic observation contract changed across resume")
         restored_dead_rules = state["dead_rules_enabled"]
         if not isinstance(restored_dead_rules, bool):
             raise ValueError("invalid base-game-pool dead-rule marker")
@@ -413,6 +441,7 @@ class BaseGamePool:
 
     @staticmethod
     def _slot_state_dict(slot: BaseGameSlot) -> dict[str, Any]:
+        from .futile_attack import EVIDENCE_ATTRIBUTE
         game = slot.game
         if game.is_terminal:
             raise ValueError("terminal games must be replaced before checkpointing")
@@ -435,8 +464,11 @@ class BaseGamePool:
                     for owner_tables in game.known_casualties
                 ],
                 "public_history": game.public_history,
+                **({"futile_attack_evidence": getattr(game, EVIDENCE_ATTRIBUTE)}
+                   if hasattr(game, EVIDENCE_ATTRIBUTE) else {}),
             },
             "history": slot.history.state_dict(),
+            "critic_history": slot.critic_history.state_dict() if slot.critic_history is not None else None,
             "layouts": [
                 {
                     "mode": sample.mode.value,
@@ -454,6 +486,7 @@ class BaseGamePool:
         }
 
     def _slot_from_state_dict(self, state: Mapping[str, Any]) -> BaseGameSlot:
+        from .futile_attack import restore_evidence
         raw_game = state["game"]
         game = JunqiGame.from_position(
             raw_game["config"],
@@ -471,6 +504,7 @@ class BaseGamePool:
         )
         if game.is_terminal:
             raise ValueError("checkpoint base-game slot unexpectedly terminal")
+        restore_evidence(game, raw_game.get("futile_attack_evidence"))
         history = GameHistory.from_state_dict(state["history"])
         if history.mode is not self.mode:
             raise ValueError("base-game history mode does not match pool")
@@ -497,6 +531,20 @@ class BaseGamePool:
                 raise ValueError("invalid historical game ownership")
         if len(layouts) != expected_players:
             raise ValueError("base-game checkpoint has the wrong layout count")
+        critic_history = None
+        if self.centralized_critic:
+            from .mappo_encoding import CentralizedHistory
+            if state.get("critic_history") is None:
+                raise ValueError("MAPPO checkpoint is missing global histories")
+            critic_history = CentralizedHistory.from_state_dict(state["critic_history"])
+            global_history = critic_history.history
+            if (global_history.mode is not self.mode
+                    or any(a.dead_rules_enabled != b.dead_rules_enabled
+                           or a.max_transitions != b.max_transitions or len(a.records) != len(b.records)
+                           for a, b in zip(history.players, global_history.players, strict=True))):
+                raise ValueError("actor and centralized histories are inconsistent")
+        elif state.get("critic_history") is not None:
+            raise ValueError("a private-value pool cannot load centralized histories")
         return BaseGameSlot(
             game=game,
             history=history,
@@ -507,6 +555,7 @@ class BaseGamePool:
             teammate_id=state.get("teammate_id"),
             learner_seat=state.get("learner_seat"),
             historical_scenario=state.get("historical_scenario"),
+            critic_history=critic_history,
         )
 
     def collect_anchors(

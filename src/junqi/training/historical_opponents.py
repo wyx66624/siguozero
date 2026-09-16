@@ -17,7 +17,7 @@ import uuid
 import torch
 
 from .arena import atomic_json, sha256_file, synchronized_error
-from .checkpoint_format import CHECKPOINT_FORMAT_VERSION
+from .checkpoint_format import checkpoint_format_for_model
 from .inference_weights import install_packed_weights, matrix_parameter_names
 from .historical_cache import HistoricalWeightCache
 from .models import GamePolicyTransformer, PieceConditionedLayoutPointerDecoder, layout_sample_from_trace
@@ -57,6 +57,7 @@ class HistoricalOpponents:
         self.progress = 0
         self.rng = random.Random(settings.seed + 7949 + 1_000_003 * context.rank)
         self.q, self.results = {}, {}
+        self.win_rates, self.win_rate_results = {}, {}
         self.active_id = None
         self.active_probability = 1.0
         self.active_panel_size = 0
@@ -108,7 +109,7 @@ class HistoricalOpponents:
     def contract(self):
         result = dict(mode=self.settings.mode.value, dead_rules_enabled=self.settings.dead_rules_enabled,
                     no_capture_draw_plies=self.settings.no_capture_draw_plies,
-                    checkpoint_format=CHECKPOINT_FORMAT_VERSION,
+                    checkpoint_format=checkpoint_format_for_model(self.settings.model),
                     target=self.settings.target_environment_plies,
                     start_fraction=self.settings.historical_start_fraction,
                     snapshot_fractions=list(self.settings.historical_snapshot_fractions))
@@ -121,6 +122,14 @@ class HistoricalOpponents:
     def _compatible_contract(self, saved, progress):
         if saved == self.contract():
             return True
+        # The current run can replace the old stage mixture before mixed games
+        # begin. Archive gates, rules and the budget must remain identical.
+        if self.settings.historical_sampling == "win_rate_distance" and isinstance(saved, dict) and progress < self.threshold:
+            previous, current = dict(saved), self.contract()
+            previous.pop("stage_mix_fraction", None)
+            current.pop("stage_mix_fraction", None)
+            if previous == current:
+                return True
         previous = self.contract()
         previous.pop("checkpoint_start_fraction", None)
         previous.pop("stage_mix_fraction", None)
@@ -199,8 +208,8 @@ class HistoricalOpponents:
                 path = self.directory / name
                 p, pp = packed_weights(policy)
                 l, lp = packed_weights(layout)
-                payload = dict(format_version=CHECKPOINT_FORMAT_VERSION, update=update,
-                               mode=self.settings.mode.value, algorithm="ppo",
+                payload = dict(format_version=checkpoint_format_for_model(self.settings.model), update=update,
+                               mode=self.settings.mode.value, algorithm=self.settings.algorithm,
                                dead_rules_enabled=self.settings.dead_rules_enabled,
                                reason="historical_opponent_inference_only",
                                config=self.settings.serializable(), policy=p, layout=l,
@@ -245,6 +254,15 @@ class HistoricalOpponents:
         panel = self.panel()
         if not panel:
             return {}
+        if self.settings.historical_sampling == "win_rate_distance":
+            distances = [abs(self.win_rates.get(e["id"], .5) - .5) for e in panel]
+            nearest = min(distances)
+            # Subtract the smallest distance before exponentiation; the floor
+            # only prevents underflow for extremely small configured tau.
+            weights = [math.exp(max(-60., -(d - nearest) / self.settings.historical_win_rate_temperature))
+                       for d in distances]
+            total = sum(weights)
+            return {e["id"]: w / total for e, w in zip(panel, weights, strict=True)}
         high = max(self.q.get(e["id"], 0.) for e in panel)
         weights = [math.exp(max(-60., self.q.get(e["id"], 0.) - high)) for e in panel]
         total, uniform = sum(weights), self.settings.historical_uniform_fraction
@@ -281,6 +299,15 @@ class HistoricalOpponents:
     def mix_contract(self):
         return dict(opponent_fraction=self.settings.historical_training_fraction,
                     teammate_fraction=self.settings.historical_teammate_fraction)
+
+    def sampling_contract(self):
+        if self.settings.historical_sampling == "win_rate_distance":
+            return dict(strategy="win_rate_distance", temperature=self.settings.historical_win_rate_temperature,
+                        ema_alpha=self.settings.historical_win_rate_ema_alpha, target=.5,
+                        initial_win_rate=.5, draws="non_win")
+        return dict(strategy="quality", learning_rate=self.settings.historical_learning_rate,
+                    uniform_fraction=self.settings.historical_uniform_fraction,
+                    stage_mix_fraction=self.settings.historical_stage_mix_fraction)
 
     def begin_rollout(self, pool, actor, behavior_version):
         if not self.active:
@@ -346,7 +373,7 @@ class HistoricalOpponents:
                     raise ValueError("frozen historical snapshot hash changed")
                 self._verified.add(entry["sha256"])
             payload = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
-            if (payload["mode"] != self.settings.mode.value or payload["format_version"] != CHECKPOINT_FORMAT_VERSION
+            if (payload["mode"] != self.settings.mode.value or payload["format_version"] != checkpoint_format_for_model(self.settings.model)
                     or payload["config"]["no_capture_draw_plies"] != self.settings.no_capture_draw_plies):
                 raise ValueError("historical opponent checkpoint contract mismatch")
             packs = payload["packed_weights"]
@@ -441,6 +468,15 @@ class HistoricalOpponents:
         # Only the fixed-current-teammate stratum informs opponent quality.
         if scenario != "historical_opponents":
             return
+        if self.settings.historical_sampling == "win_rate_distance":
+            # Estimate P(current team wins), not the draw-adjusted arena score.
+            # EMA follows a changing learner instead of averaging its lifetime.
+            record(self.win_rate_results, opponent)
+            rate = self.win_rates.get(opponent, .5)
+            alpha = self.settings.historical_win_rate_ema_alpha
+            self.win_rates[opponent] = (1 - alpha) * rate + alpha * float(reward > 0)
+            self.quality_update_games += 1
+            return
         score = 1. if reward > 0 else 0. if reward < 0 else .5
         # Appendix N inspired importance-weighted quality update, adapted to
         # draws and batched cohorts. Arena results never feed this sampler.
@@ -450,6 +486,8 @@ class HistoricalOpponents:
 
     def state_dict(self):
         return dict(version=2, contract=self.contract(), mix_contract=self.mix_contract(),
+                    sampling_contract=self.sampling_contract(), win_rates=dict(self.win_rates),
+                    win_rate_results=copy.deepcopy(self.win_rate_results),
                     entries=copy.deepcopy(self.panel()), progress=self.progress,
                     rng=self.rng.getstate(), q=dict(self.q), results=copy.deepcopy(self.results),
                     active_id=self.active_id, active_probability=self.active_probability,
@@ -473,6 +511,18 @@ class HistoricalOpponents:
             raise ValueError("historical role fractions changed across resume")
         if version == 1 and state["started"] and self.settings.historical_teammate_fraction:
             raise ValueError("legacy opponent-only active games require explicit role-schedule migration")
+        saved_sampling = state.get("sampling_contract")
+        legacy_quality = saved_sampling is None and self.settings.historical_sampling == "quality"
+        if saved_sampling != self.sampling_contract() and not legacy_quality:
+            pristine = (not state["started"] and not state["completed"] and state["active_id"] is None
+                        and state.get("pending_cohort") is None and not state["cohort_started"]
+                        and not state.get("quality_update_games", 0))
+            if not pristine:
+                raise ValueError("historical sampling changed after mixed games started; explicit migration required")
+        win_rates = copy.deepcopy(state.get("win_rates", {}))
+        if any(isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate)
+               or not 0 <= rate <= 1 for rate in win_rates.values()):
+            raise ValueError("invalid saved historical win rate")
         disk = {e["id"]: e for e in self.entries}
         for entry in state["entries"]:
             if disk.get(entry["id"]) != entry or not (self.directory / entry["file"]).is_file():
@@ -486,6 +536,8 @@ class HistoricalOpponents:
                      "started", "historical_started", "completed", "opponent_plies"):
             setattr(self, name, copy.deepcopy(state[name]))
         self.rng.setstate(state["rng"])
+        self.win_rates = win_rates
+        self.win_rate_results = copy.deepcopy(state.get("win_rate_results", {}))
         self.active_panel_size = state.get("active_panel_size", len(self.panel()))
         self.pending_cohort = copy.deepcopy(state.get("pending_cohort"))
         if self.pending_cohort is not None:
@@ -549,12 +601,15 @@ class HistoricalOpponents:
             probabilities = self.probabilities()
             atomic_json(self.directory / "status.json", dict(
                 **self.metrics(), progress=self.progress, active_id=self.active_id,
+                sampling=self.sampling_contract(),
                 pending_cohort=copy.deepcopy(self.pending_cohort),
                 unfinished_historical_games=sum(s.opponent_id is not None or s.teammate_id is not None for s in pool.slots),
                 scenarios=[dict(id=k, target_fraction=v, started=self.scenario_started[k],
                                 actual_fraction=self.scenario_started[k] / max(1, self.started),
                                 results=self.scenario_results.get(k, {})) for k, v in self.role_targets().items()],
                 opponents=[dict(e, probability=probabilities.get(e["id"], 0.),
+                                win_rate=self.win_rates.get(e["id"], .5) if self.settings.historical_sampling == "win_rate_distance" else None,
+                                win_rate_results=self.win_rate_results.get(e["id"], {}),
                                 results=self.results.get(e["id"], {}),
                                 teammate_results=self.teammate_results.get(e["id"], {})) for e in self.panel()],
                 rank=self.context.rank, world_size=self.context.world_size))

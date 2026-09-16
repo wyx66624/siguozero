@@ -342,6 +342,45 @@ class CpuWorkerTests(unittest.TestCase):
         finally:
             worker.close()
 
+    def test_argmax_new_games_keep_random_layouts_and_ai_uses_joint_maximum(self):
+        _, _, _, path = self.snapshot("four_dark")
+        app = Application({"runs": [], "cpu_threads": 1}, ROOT)
+        entry = {"_path": path, "mode": "four_dark", "dead_rules_enabled": True}
+        layouts = []
+        try:
+            with patch.object(app.monitor, "resolve_checkpoint", return_value=entry):
+                for seed in (42, 43):
+                    created = app.create_game({"checkpoint_id": "test:live", "seat": 0,
+                                               "temperature": 0, "seed": seed})
+                    self.assertEqual(created["model"]["temperature"], 0)
+                    self.assertEqual(created["model"]["layout_temperature"], 0.3)
+                    # Rebuild the same frozen model/layout using the worker's seed.
+                    torch.manual_seed(seed)
+                    engine = InferenceEngine.from_checkpoint(path, device="cpu", temporal_cache_entries=8)
+                    game, history = engine.new_game(seed=seed, layout_temperature=0.3)
+                    layouts.append(dict(game.pieces))
+                    game.step((0, 0))
+                    history.append_after_step(game)
+                    moved = app.game_command({"session_id": created["session_id"],
+                                              "action": [0, 0], "expected_ply": 0}, "move")
+                    self.assertGreater(len(moved["frames"]), 1)
+                    for frame in moved["frames"][1:]:
+                        state = history.state_for(game)
+                        with torch.inference_mode():
+                            _, probabilities = engine.policy.distributions([state])
+                        expected = state.legal_actions[int(probabilities[0].argmax())]
+                        game.step(expected)
+                        history.append_after_step(game)
+                        action = game.observe(0).history[-1].action
+                        self.assertEqual(frame["history"][-1]["action"], list(action))
+                    app.game_command({"session_id": created["session_id"]}, "close")
+                self.assertNotEqual(layouts[0], layouts[1])
+                for temperature in (True, "argmax", -1, 0.01, 2.1, float("nan"), float("inf")):
+                    with self.subTest(temperature=temperature), self.assertRaisesRegex(ValueError, "温度"):
+                        app.create_game({"checkpoint_id": "test:live", "temperature": temperature})
+        finally:
+            app.close()
+
     @unittest.skipUnless(os.name == "posix", "local console launcher uses WSL/Linux")
     def test_service_shutdown_reaps_its_cpu_worker(self):
         _, _, _, path = self.snapshot("four_dark")

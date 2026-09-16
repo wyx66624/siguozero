@@ -160,9 +160,25 @@ class AdaptiveLearningRateTests(unittest.TestCase):
             self.assertLessEqual(metrics["optimizer/policy_lr_next"], 2e-5)
             self.assertGreaterEqual(metrics["optimizer/policy_lr_next"], 1e-6)
             self.assertIn("policy/final_kl", metrics)
+            self.assertEqual(metrics["policy/target_kl"], settings.target_kl)
+            self.assertAlmostEqual(metrics["policy/early_stop_kl_threshold"],
+                                   settings.target_kl * settings.early_stop_kl_multiple)
+            self.assertEqual(metrics["optimizer/policy_epochs_max"], settings.policy_epochs)
             resumed = SelfPlayTrainer(settings, run_directory=directory)
             try:
                 self.assertEqual(trainer.lr_controller.state_dict(), resumed.lr_controller.state_dict())
+            finally:
+                resumed.logger.close()
+            # Retuning the guard applies new thresholds while retaining the
+            # learned LR multiplier, EMA, cooldown and optimizer moments.
+            relaxed = replace(settings, target_kl=.02, early_stop_kl_multiple=2.)
+            resumed = SelfPlayTrainer(relaxed, run_directory=directory)
+            try:
+                self.assertEqual(trainer.lr_controller.state_dict(), resumed.lr_controller.state_dict())
+                self.assertEqual(resumed.lr_controller.target_kl, .02)
+                self.assertEqual(resumed.lr_controller.high_kl_multiple, 2.)
+                self.assertEqual(resumed.policy_optimizer.param_groups[0]["lr"],
+                                 trainer.policy_optimizer.param_groups[0]["lr"])
             finally:
                 resumed.logger.close()
             saved["trainer_state"].pop("adaptive_learning_rate")

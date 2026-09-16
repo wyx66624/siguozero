@@ -269,6 +269,7 @@ class PolicyState:
     mode: TrainingMode
     records: Sequence[StateTokenRecord]
     legal_actions: tuple[tuple[int, int], ...]
+    centralized: bool = False
     _legal_array: np.ndarray | None = field(default=None, init=False, repr=False, compare=False, hash=False)
 
     @property

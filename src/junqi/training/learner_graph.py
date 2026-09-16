@@ -67,6 +67,11 @@ class PackedLearnerGraph:
         if not 0 < n <= self.SAMPLES or model.config.max_sequence_tokens < self.TOKENS // self.SEQUENCES:
             return False
         states = [s.value_state or s.state for s in samples] if self.critic else [s.state for s in samples]
+        centralized = self.critic and not hasattr(model, 'draw_value_head')
+        if any(state.centralized != centralized for state in states):
+            raise ValueError('learner graph actor/critic observation contract mismatch')
+        if centralized and any(s.old_draw_value != 0 or s.draw_value_target != 0 for s in samples):
+            raise ValueError('a scalar MAPPO critic cannot receive auxiliary draw targets')
         if any(not hasattr(s.records, 'copy_rows') for s in states):
             return False
         groups = history_prefix_groups(states)
@@ -150,7 +155,9 @@ class PackedLearnerGraph:
         clip,coefficient,opening_coefficient,adaptive,upper_base,bonus,minimum,maximum=d['hyper'].unbind()
         if self.critic:
             outcome=model.value_head(contexts).squeeze(-1).float()
-            common=model.draw_value_head(contexts).squeeze(-1).float()
+            has_components=hasattr(model, 'draw_value_head')
+            common=(model.draw_value_head(contexts).squeeze(-1).float()
+                    if has_components else torch.zeros_like(outcome))
             values=outcome+common
             old,targets,old_common,common_targets=meta[:,:4].unbind(-1)
             # Match the public critic's component subtraction, including BF16 rounding.
@@ -159,7 +166,8 @@ class PackedLearnerGraph:
             clipped=old_outcome+(outcome-old_outcome).clamp(-clip,clip)
             common_clipped=old_common+(common-old_common).clamp(-clip,clip)
             mse=mean(torch.maximum((outcome-target_outcome).square(),(clipped-target_outcome).square()))
-            mse=mse+mean(torch.maximum((common-common_targets).square(),(common_clipped-common_targets).square()))
+            if has_components:
+                mse=mse+mean(torch.maximum((common-common_targets).square(),(common_clipped-common_targets).square()))
             loss=.5*coefficient*mse
             metrics=torch.stack((loss,mean((values-targets).square()),mean(values),mean(targets),
                 mean((common-common_targets).square()),mean(common),mean(common_targets))).detach()

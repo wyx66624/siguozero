@@ -99,6 +99,7 @@ class ModelConfig:
     temporal_layers: int = 8
     temporal_heads: int = 8
     temporal_ffn_dim: int = 1024
+    token_fusion_hidden_dim: int = 0
     layout_dim: int = 256
     layout_layers: int = 8
     layout_heads: int = 8
@@ -132,6 +133,8 @@ class ModelConfig:
             raise ValueError("board dimension and chunk size must be positive")
         if self.temporal_dim != 2 * self.board_dim:
             raise ValueError("temporal_dim must equal action_dim + board_dim")
+        if type(self.token_fusion_hidden_dim) is not int or self.token_fusion_hidden_dim < 0:
+            raise ValueError("token_fusion_hidden_dim must be a nonnegative integer")
         for dim, heads, label in (
             (self.temporal_dim, self.temporal_heads, "temporal"),
             (self.layout_dim, self.layout_heads, "layout"),
@@ -646,6 +649,8 @@ class GamePolicyTransformer(nn.Module):
         self.board_encoder = WholeBoardEncoder(self.config)
         self.action_encoder = PublicActionEncoder(self.config.board_dim)
         temporal_dim = self.config.temporal_dim
+        self.token_fusion = (SwiGLU(temporal_dim, self.config.token_fusion_hidden_dim, self.config.dropout)
+                             if self.config.token_fusion_hidden_dim else nn.Identity())
         self.position_embedding = nn.Embedding(
             self.config.max_sequence_tokens, temporal_dim
         )
@@ -1075,7 +1080,7 @@ class GamePolicyTransformer(nn.Module):
         scalar = lambda values: torch.tensor(
             values, dtype=torch.long, device=self.device
         ).unsqueeze(1)
-        tokens = torch.cat((actions, board_globals.unsqueeze(1)), dim=-1)
+        tokens = self.token_fusion(torch.cat((actions, board_globals.unsqueeze(1)), dim=-1))
         return (
             tokens
             + self.position_embedding(
@@ -1606,7 +1611,7 @@ class GamePolicyTransformer(nn.Module):
         action_embeddings = self.action_encoder(
             batch.action_fields, batch.action_present
         )
-        tokens = torch.cat((action_embeddings, board_globals), dim=-1)
+        tokens = self.token_fusion(torch.cat((action_embeddings, board_globals), dim=-1))
         positions = torch.arange(time_steps, device=self.device).unsqueeze(0)
         tokens = (
             tokens
@@ -1839,7 +1844,7 @@ class GamePolicyTransformer(nn.Module):
         ).view(batch, times, -1)
         fields = rows[:, :, width:]
         actions = self.action_encoder(_action_fields_with_countdown(fields), fields[..., 5].bool())
-        hidden = (torch.cat((actions, board), dim=-1) + self.position_embedding(positions)
+        hidden = (self.token_fusion(torch.cat((actions, board), dim=-1)) + self.position_embedding(positions)
                 + self.mode_embedding(torch.full((batch, 1), spec.mode_index, dtype=torch.long, device=rows.device))
                 + self.no_interaction_embedding(fields[..., 6].long())
                 + self.active_embedding(fields[..., 7].long())
@@ -1860,6 +1865,8 @@ class GamePolicyTransformer(nn.Module):
     ) -> list[Tensor] | tuple[Tensor, Tensor]:
         """DDP-compatible entry point for policy likelihood training."""
 
+        if any(state.centralized for state in states):
+            raise ValueError("actor training cannot consume centralized critic observations")
         if ppo_actions is not None:
             return self.ppo_statistics(states, ppo_actions, pack_sequences=pack_sequences)
         return self.log_probs_for_action_groups(
@@ -1992,6 +1999,8 @@ class GamePolicyTransformer(nn.Module):
 
     def ppo_statistics(self, states: Sequence[PolicyState], actions: Sequence[tuple[int, int]],
                        *, pack_sequences: bool = False) -> tuple[Tensor, Tensor]:
+        if any(state.centralized for state in states):
+            raise ValueError("actor statistics cannot consume centralized critic observations")
         if len(states) != len(actions):
             raise ValueError("PPO actions must match the state batch")
         features = (self._encode_full(states, pack_prefixes=True)
@@ -2014,6 +2023,8 @@ class GamePolicyTransformer(nn.Module):
         temperature: float = 1.0,
         pack_sequences: bool = False,
     ) -> list[Tensor]:
+        if any(state.centralized for state in states):
+            raise ValueError("actor likelihoods cannot consume centralized critic observations")
         if len(states) != len(actions_by_state):
             raise ValueError("states and action groups must have the same length")
         features = (self._encode_full(states, pack_prefixes=True)
@@ -2078,6 +2089,8 @@ class GamePolicyTransformer(nn.Module):
         CDF sampling; other paths use multinomial. Both sample the joint policy.
         """
 
+        if any(state.centralized for state in states):
+            raise ValueError("actor sampling cannot consume centralized critic observations")
         if count <= 0:
             raise ValueError("sample count must be positive")
         if temperature <= 0:
@@ -2235,6 +2248,40 @@ class GameValueTransformer(GamePolicyTransformer):
         common = self.draw_value_head(features.context).squeeze(-1).float()
         total = outcome + common
         return torch.stack((total, common), dim=-1) if return_components else total
+
+
+class GameCentralValueTransformer(GamePolicyTransformer):
+    """MAPPO global-state backbone with one scalar team-return head.
+
+    Actor and critic have independent parameters. The critic may have fewer
+    temporal blocks; all other backbone dimensions and token fusion match.
+    """
+
+    def __init__(self, config: ModelConfig) -> None:
+        super().__init__(config)
+        del self.source_query
+        del self.destination_query
+        self.value_head = nn.Linear(config.temporal_dim, 1)
+        nn.init.zeros_(self.value_head.weight)
+        nn.init.zeros_(self.value_head.bias)
+
+    def initialize_from_policy(self, policy: GamePolicyTransformer) -> None:
+        from dataclasses import replace
+        if (self.config.temporal_layers > policy.config.temporal_layers
+                or replace(self.config, temporal_layers=policy.config.temporal_layers) != policy.config):
+            raise ValueError("MAPPO critic must share actor backbone dimensions and use at most its depth")
+        own = self.state_dict()
+        backbone = {key: value for key, value in policy.state_dict().items() if key in own}
+        missing, unexpected = self.load_state_dict(backbone, strict=False)
+        if set(missing) != {"value_head.weight", "value_head.bias"} or unexpected:
+            raise RuntimeError("MAPPO actor/critic backbone mismatch")
+
+    def forward(self, states: Sequence[PolicyState], *, pack_sequences: bool = False) -> Tensor:
+        if any(not state.centralized for state in states):
+            raise ValueError("MAPPO critic requires explicitly marked global-state histories")
+        features = (self._encode_full(states, pack_prefixes=True)
+                    if pack_sequences else self.encode(states))
+        return self.value_head(features.context).squeeze(-1).float()
 
 
 def _layout_rule_mask() -> Tensor:

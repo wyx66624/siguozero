@@ -1,0 +1,37 @@
+{
+  "checkpoint_update": 3879,
+  "identical_rollout_inputs": true,
+  "samples": 98304,
+  "variants": {
+    "before": {
+      "optimizer/policy_lr": 1.2955771553743807e-06,
+      "policy/target_kl": 0.015,
+      "policy/early_stop_kl_threshold": 0.0225,
+      "optimizer/policy_epochs": 1.8229166666666667,
+      "optimizer/policy_early_stopped": 1.0,
+      "policy/final_kl": 0.0045386250130832195,
+      "policy/minibatch_kl_max": 0.032422348856925964,
+      "policy/final_clip_fraction": 0.01708984375,
+      "optimizer/policy_lr_next": 1.2955517814889627e-06,
+      "policy_steps": 350,
+      "critic_steps": 576,
+      "sample_visits": 179200
+    },
+    "after": {
+      "optimizer/policy_lr": 1.2955771553743807e-06,
+      "policy/target_kl": 0.02,
+      "policy/early_stop_kl_threshold": 0.04,
+      "optimizer/policy_epochs": 2.5416666666666665,
+      "optimizer/policy_early_stopped": 1.0,
+      "policy/final_kl": 0.006514742039144039,
+      "policy/minibatch_kl_max": 0.05173312500119209,
+      "policy/final_clip_fraction": 0.02294921875,
+      "optimizer/policy_lr_next": 1.2955517814889627e-06,
+      "policy_steps": 488,
+      "critic_steps": 576,
+      "sample_visits": 249856
+    }
+  },
+  "policy_sample_visit_increase_fraction": 0.39428571428571435,
+  "limitations": "One matched PPO update verifies data reuse and policy movement, not strength or long-term stability."
+}

@@ -17,7 +17,7 @@ import time
 import torch
 
 from .arena import sha256_file
-from .checkpoint_format import CHECKPOINT_FORMAT_VERSION
+from .checkpoint_format import checkpoint_format_for_model
 from .inference_weights import prepare_matrix_packs
 
 
@@ -83,7 +83,7 @@ class HistoricalWeightCache:
 
     def _prepare(self, payload):
         if (payload.get("mode") != self.settings.mode.value
-                or payload.get("format_version") != CHECKPOINT_FORMAT_VERSION
+                or payload.get("format_version") != checkpoint_format_for_model(self.settings.model)
                 or payload.get("dead_rules_enabled") != self.settings.dead_rules_enabled
                 or payload.get("config", {}).get("no_capture_draw_plies") != self.settings.no_capture_draw_plies):
             raise ValueError("historical opponent checkpoint contract mismatch")

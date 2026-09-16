@@ -130,8 +130,8 @@ class Application:
         if type(seat) is not int or not 0 <= seat < count:
             raise ValueError("无效座位")
         temperature = data.get("temperature", 0.7)
-        if type(temperature) not in (int, float) or not 0.1 <= temperature <= 2:
-            raise ValueError("温度须在 0.1 至 2 之间")
+        if type(temperature) not in (int, float) or not (temperature == 0 or 0.1 <= temperature <= 2):
+            raise ValueError("温度须为 0（argmax）或在 0.1 至 2 之间")
         seed = data.get("seed", secrets.randbelow(2**31))
         if type(seed) is not int or not 0 <= seed < 2**31:
             raise ValueError("无效随机种子")

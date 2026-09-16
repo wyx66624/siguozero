@@ -4,12 +4,17 @@ from dataclasses import replace
 import json
 import math
 from pathlib import Path
+import random
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
+import yaml
 
-from junqi.training.entropy import AdaptiveEntropyCoefficient, phase_entropy_ratios, policy_entropy_bonus
+from junqi.training.entropy import (
+    AdaptiveEntropyCoefficient, phase_entropy_ratios, policy_entropy_bonus, scheduled_entropy_targets,
+)
 from junqi.training.ppo import PPOSample, policy_ppo_loss
 from junqi.training.losses import policy_grpo_loss
 from junqi.training.rollout import PolicyGroup
@@ -177,11 +182,149 @@ class AdaptiveEntropyTests(unittest.TestCase):
         legacy = TrainingSettings.from_yaml(config, 'four_dark', tiny=True)
         self.assertIsNone(legacy.entropy_opening_maximum)
         local = TrainingSettings.from_yaml(config.parent / 'local_4090_training.yaml', 'four_dark', tiny=True)
-        self.assertEqual(local.entropy_opening_maximum, .04)
-        self.assertEqual(local.entropy_maximum, .02)
+        self.assertEqual(local.entropy_opening_maximum, .02)
+        self.assertEqual(local.entropy_maximum, .01)
         for maximum in (True, '0.04', float('nan'), float('inf'), 0., .004, .009):
             with self.subTest(maximum=maximum), self.assertRaisesRegex(ValueError, 'entropy'):
                 replace(training_settings(), entropy_opening_maximum=maximum).validate()
+
+    def test_entropy_schedule_interpolates_phases_and_clamps_endpoints(self):
+        settings = training_settings(entropy_target_schedule=((0, .5, .4), (100, .4, .3), (200, .3, .2)))
+        for steps, opening, other in ((-1, .5, .4), (0, .5, .4), (50, .45, .35),
+                                       (100, .4, .3), (150, .35, .25), (200, .3, .2), (999, .3, .2)):
+            with self.subTest(steps=steps):
+                targets = scheduled_entropy_targets(settings, steps)
+                self.assertAlmostEqual(targets['opening'], opening)
+                self.assertAlmostEqual(targets['other'], other)
+        self.assertEqual(scheduled_entropy_targets(training_settings(), 3_000_000_000),
+                         {'opening': .6, 'other': .6})
+        self.assertEqual(scheduled_entropy_targets(training_settings(entropy_opening_target_ratio=.55), 100),
+                         {'opening': .55, 'other': .6})
+
+    def test_local_entropy_annealing_is_isolated_to_four_dark(self):
+        config = Path(__file__).parents[1] / 'configs/local_4090_training.yaml'
+        settings = TrainingSettings.from_yaml(config, 'four_dark', tiny=True)
+        self.assertEqual(settings.entropy_minimum, .001)
+        self.assertEqual(settings.entropy_coefficient, .01)  # Layout entropy stays unchanged.
+        for steps, target in ((324_000_000, .5), (350_000_000, .5), (925_000_000, .45),
+                              (1_500_000_000, .4), (2_250_000_000, .375), (3_000_000_000, .35)):
+            for value in scheduled_entropy_targets(settings, steps).values():
+                self.assertAlmostEqual(value, target)
+        for mode in ('two_player', 'double_open'):
+            other = TrainingSettings.from_yaml(config, mode, tiny=True)
+            self.assertFalse(other.entropy_target_schedule)
+            self.assertEqual(other.entropy_minimum, .005)
+            self.assertEqual(other.entropy_maximum, .02)
+            self.assertEqual(other.entropy_opening_maximum, .04)
+            self.assertEqual(scheduled_entropy_targets(other, 3_000_000_000), {'opening': .6, 'other': .6})
+
+    def test_entropy_schedule_rejects_invalid_knots_and_disabled_feedback(self):
+        settings = training_settings()
+        invalid = (None, {}, 'linear', ((0, .5, .5),), ((1, .5, .5), (10, .4, .4)),
+                   ((0, .5, .5), (0, .4, .4)), ((0, .5, .5), (-1, .4, .4)),
+                   ((0, .5, .5), (True, .4, .4)), ((0, .5, .5), (10., .4, .4)),
+                   ((0, .5, .5), (10, .6, .4)), ((0, .5, .5), (10, .4, .6)),
+                   ((0, .5, .5), (10, .4)), ((0, .5, .5), (10, .4, 0)),
+                   ((0, .5, .5), (10, True, .4)), ((0, .5, .5), (10, math.nan, .4)),
+                   ((0, .5, .5), (10, .4, math.inf)), ((0, .5, .5), 'bad'))
+        for schedule in invalid:
+            with self.subTest(schedule=schedule), self.assertRaisesRegex(ValueError, 'entropy'):
+                replace(settings, entropy_target_schedule=schedule).validate()
+        for value in (True, '0.5', 0, 1.1, math.nan, math.inf):
+            with self.subTest(target=value), self.assertRaisesRegex(ValueError, 'entropy'):
+                replace(settings, entropy_opening_target_ratio=value).validate()
+        schedule = ((0, .5, .5), (100, .4, .4))
+        with self.assertRaisesRegex(ValueError, 'entropy'):
+            replace(settings, entropy_target_schedule=schedule, adaptive_entropy=False).validate()
+        with self.assertRaisesRegex(ValueError, 'entropy'):
+            training_settings('two_player', entropy_target_schedule=schedule)
+
+    def test_invalid_entropy_mode_overrides_do_not_silently_disable_schedule(self):
+        config = Path(__file__).parents[1] / 'configs/bootstrap.yaml'
+        data = yaml.safe_load(config.read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config.yaml'
+            for overrides in (None, [], {'four_drak': {}}, {'four_dark': []}):
+                data['learner']['entropy_coefficient']['mode_overrides'] = overrides
+                path.write_text(yaml.safe_dump(data))
+                with self.subTest(overrides=overrides), self.assertRaisesRegex(ValueError, 'entropy'):
+                    TrainingSettings.from_yaml(path, 'four_dark', tiny=True)
+
+    def test_annealing_resume_clamps_coefficients_and_preserves_training_state(self):
+        def assert_tree_equal(actual, expected):
+            if isinstance(expected, torch.Tensor):
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            elif isinstance(expected, dict):
+                self.assertEqual(actual.keys(), expected.keys())
+                for key in expected:
+                    assert_tree_equal(actual[key], expected[key])
+            elif isinstance(expected, (tuple, list)):
+                self.assertEqual(len(actual), len(expected))
+                for a, b in zip(actual, expected):
+                    assert_tree_equal(a, b)
+            else:
+                self.assertEqual(actual, expected)
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = training_settings(entropy_opening_maximum=.04)
+            trainer = SelfPlayTrainer(settings, run_directory=directory)
+            trainer.train()
+            for phase, coefficient, ema in (('opening', .028, .62), ('other', .012, .59)):
+                c = trainer.entropy_controllers[phase]
+                c.coefficient, c.entropy_ema, c.updates = coefficient, ema, 3000
+            trainer.save_checkpoint(reason='entropy-annealing-test', archive=False)
+            saved = torch.load(trainer.checkpoints.latest_path, map_location='cpu', weights_only=False)
+            trainer.logger.close()
+            settings = replace(settings, entropy_minimum=.001, entropy_maximum=.01,
+                               entropy_opening_maximum=.02, entropy_target_ratio=.5,
+                               entropy_target_schedule=((0, .5, .5), (16, .4, .3), (32, .35, .25)))
+            resumed = SelfPlayTrainer(settings, run_directory=directory)
+            try:
+                self.assertEqual(resumed.update, saved['update'])
+                self.assertEqual(resumed.cumulative, saved['trainer_state']['cumulative'])
+                self.assertEqual(resumed.cumulative['environment_plies'], 8)
+                for name in ('policy', 'layout', 'critic', 'reference_layout',
+                             'policy_optimizer', 'layout_optimizer', 'critic_optimizer'):
+                    assert_tree_equal(getattr(resumed, name).state_dict(), saved[name])
+                assert_tree_equal(resumed.pool.state_dict(), saved['trainer_state']['base_game_pool'])
+                assert_tree_equal(torch.get_rng_state(), saved['rng_state']['torch_cpu'])
+                self.assertEqual(random.getstate(), saved['rng_state']['python'])
+                for phase, ceiling, target in (('opening', .02, .45), ('other', .01, .4)):
+                    c = resumed.entropy_controllers[phase]
+                    old = saved['trainer_state']['adaptive_entropy'][phase]
+                    self.assertEqual(c.coefficient, ceiling)
+                    self.assertEqual(c.entropy_ema, old['entropy_ema'])
+                    self.assertEqual(c.updates, old['updates'])
+                    self.assertAlmostEqual(c.target_ratio, target)
+                    c.observe(old['entropy_ema'])
+                    self.assertLess(c.coefficient, ceiling)
+            finally:
+                resumed.logger.close()
+
+    def test_target_uses_round_start_steps_and_feedback_updates_once_across_minibatches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = training_settings(ppo_minibatch_samples=2, policy_epochs=2,
+                entropy_target_schedule=((0, .5, .5), (8, .4, .3), (16, .35, .25)))
+            trainer = SelfPlayTrainer(settings, run_directory=directory)
+            trainer.cumulative['environment_plies'] = 4
+            # Observe the real optimizer entry; targets must be set before any batch.
+            original = trainer._update_ppo_minibatches
+            def check_targets(*args, **kwargs):
+                self.assertAlmostEqual(trainer.entropy_controllers['opening'].target_ratio, .45)
+                self.assertAlmostEqual(trainer.entropy_controllers['other'].target_ratio, .4)
+                return original(*args, **kwargs)
+            with patch.object(trainer, '_update_ppo_minibatches', side_effect=check_targets):
+                trainer.train()
+            metrics = json.loads((trainer.run_directory / 'latest_metrics.json').read_text())
+            self.assertGreater(metrics['optimizer/policy_steps'], 1)
+            self.assertEqual(trainer.entropy_controllers['opening'].updates, 1)
+            self.assertEqual(metrics['policy/entropy_target_schedule_environment_plies'], 4)
+            self.assertEqual(metrics['cumulative/environment_plies'], 12)
+            self.assertAlmostEqual(metrics['policy/opening_entropy_target_ratio'], .45)
+            self.assertAlmostEqual(metrics['policy/other_entropy_target_ratio'], .4)
+            self.assertEqual(metrics['policy/entropy_target_schedule_end_environment_plies'], 16)
+            self.assertEqual(metrics['policy/opening_entropy_target_final'], .35)
+            self.assertEqual(metrics['policy/other_entropy_target_final'], .25)
 
     def test_opening_ceiling_resume_preserves_state_and_increases_actual_opening_gradient(self):
         with tempfile.TemporaryDirectory() as directory:

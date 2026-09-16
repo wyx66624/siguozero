@@ -22,4 +22,13 @@ test('missing historical fields do not show false learning rate values', () => {
  const html=context.renderLearningRate({'optimizer/adaptive_lr_enabled':1,'optimizer/lr_reason':'<unsafe>'});
  assert.ok(html.includes('&lt;unsafe&gt;'));
  assert.ok(!html.includes('NaN')&&!html.includes('Infinity'));
+ assert.ok(html.includes('KL 目标</span><strong class="">—'));
+});
+
+test('KL limits and completed epochs use the active run metrics', () => {
+ const html=context.renderLearningRate({'optimizer/adaptive_lr_enabled':1,
+  'policy/target_kl':.02,'policy/early_stop_kl_threshold':.04,
+  'optimizer/policy_epochs':2.75,'optimizer/policy_epochs_max':3});
+ for(const value of ['KL 目标','小批次 KL 早停阈值','0.02','0.04','2.75 / 3'])assert.ok(html.includes(value),value);
+ assert.ok(!html.includes('0.015'));
 });

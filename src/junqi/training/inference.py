@@ -1,4 +1,4 @@
-"""Checkpoint-backed stochastic layout and move inference APIs."""
+"""Checkpoint-backed layout sampling and stochastic or argmax move inference."""
 
 from __future__ import annotations
 
@@ -116,8 +116,9 @@ class InferenceEngine:
         *,
         seed: int | None = None,
         max_plies: int | None = None,
+        layout_temperature: float = 0.7,
     ) -> tuple[JunqiGame, GameHistory]:
-        samples = self.sample_layouts()
+        samples = self.sample_layouts(temperature=layout_temperature)
         game = new_game(
             self.mode,
             setups=[sample.setup for sample in samples],
@@ -139,9 +140,24 @@ class InferenceEngine:
         *,
         temperature: float = 1.0,
     ) -> tuple[int, int]:
+        """Sample a move, or use the highest joint move probability at temperature 0."""
         if game.is_terminal:
             raise ValueError("cannot infer an action for a terminal game")
         state = history.state_for(game)
+        if temperature == 0:
+            # Compare complete legal moves at the original policy temperature.
+            # Greedy source selection can miss the highest-probability move.
+            with torch.inference_mode(), torch.autocast(
+                device_type=self.actor.device_type,
+                dtype=self.actor.amp_dtype or torch.float32,
+                enabled=self.actor.amp_dtype is not None
+                and self.actor.device_type in ("cuda", "npu"),
+            ):
+                logs = self.policy.log_probs_for_action_groups(
+                    [state], [state.legal_actions]
+                )[0]
+                index = int(logs.argmax().item())
+            return state.legal_actions[index]
         actions, _logs = self.actor.sample(
             [state], count=1, temperature=temperature
         )
@@ -217,7 +233,8 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
     parser.set_defaults(dead_rules_enabled=None)
     parser.add_argument("--games", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260902)
-    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--temperature", type=float, default=1.0,
+                        help="move sampling temperature; 0 selects the highest-probability legal move")
     parser.add_argument("--max-plies", type=int, default=None)
     parser.add_argument("--output", default=None, help="optional JSONL output path")
     return parser

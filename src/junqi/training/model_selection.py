@@ -15,7 +15,8 @@ import torch
 
 from .accelerator import empty_cache
 from .arena import ARENA_VERSION, MatchSettings, atomic_json, run_match, sha256_file, synchronized_error
-from .checkpoint import CHECKPOINT_FORMAT_VERSION, capture_rng_state, restore_rng_state
+from .checkpoint import capture_rng_state, restore_rng_state
+from .checkpoint_format import checkpoint_format_for_model
 from .distributed import DistributedContext
 from .inference import InferenceEngine
 from .models import GamePolicyTransformer, PieceConditionedLayoutPointerDecoder
@@ -326,7 +327,7 @@ class ModelSelection:
                           layout: PieceConditionedLayoutPointerDecoder,
                           *, update: int) -> dict[str, Any]:
         return {
-            "format_version": CHECKPOINT_FORMAT_VERSION, "update": update,
+            "format_version": checkpoint_format_for_model(self.settings.model), "update": update,
             "mode": self.settings.mode.value, "algorithm": self.settings.algorithm,
             "dead_rules_enabled": self.settings.dead_rules_enabled,
             "reason": "model_selection_inference_only",
@@ -437,7 +438,7 @@ class ModelSelection:
                         # only its persisted target field used the GRPO name.
                         contract["step_budget_target"] = contract.pop("target_continuation_plies")
                         contract["step_budget_counter"] = (
-                            "environment_plies" if contract.get("algorithm") == "ppo"
+                            "environment_plies" if contract.get("algorithm") in ("ppo", "mappo")
                             else "continuation_plies"
                         )
                     if self.state["last_evaluated_update"] > update:

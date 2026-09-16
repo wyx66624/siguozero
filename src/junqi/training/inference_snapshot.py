@@ -9,7 +9,7 @@ import uuid
 
 import torch
 
-from .checkpoint import CHECKPOINT_FORMAT_VERSION
+from .checkpoint_format import checkpoint_format_for_model
 
 
 def export_inference_snapshot(directory, policy, layout, settings, update):
@@ -17,7 +17,7 @@ def export_inference_snapshot(directory, policy, layout, settings, update):
     directory.mkdir(parents=True, exist_ok=True)
     name = f"policy_{update:09d}_{uuid.uuid4().hex[:8]}.pt"
     payload = {
-        "format_version": CHECKPOINT_FORMAT_VERSION, "update": update,
+        "format_version": checkpoint_format_for_model(settings.model), "update": update,
         "mode": settings.mode.value, "algorithm": settings.algorithm,
         "dead_rules_enabled": settings.dead_rules_enabled,
         "reason": "live_inference_only", "config": settings.serializable(),

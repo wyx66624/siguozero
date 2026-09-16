@@ -23,6 +23,9 @@ from ..training.inference import InferenceEngine
 from .replay import ReplayRecorder
 
 
+PLAY_LAYOUT_TEMPERATURE = 0.3
+
+
 def board_geometry(board):
     points = []
     four = board.point_count == 129
@@ -65,12 +68,16 @@ class CpuGame:
                 raise ValueError("模型包含非 CPU 参数或非有限数值")
         if torch.cuda.is_initialized():
             raise RuntimeError("CPU worker unexpectedly initialized CUDA")
-        self.game, self.history = self.engine.new_game(seed=self.seed)
+        self.game, self.history = self.engine.new_game(
+            seed=self.seed, layout_temperature=PLAY_LAYOUT_TEMPERATURE,
+        )
         self.metadata = {"checkpoint": Path(request["checkpoint"]).name,
                          "update": self.engine.checkpoint_update, "mode": self.engine.mode.value,
                          "device": "cpu", "cuda_initialized": torch.cuda.is_initialized(),
                          "cuda_visible_devices": os.environ["CUDA_VISIBLE_DEVICES"],
                          "pid": os.getpid(), "threads": torch.get_num_threads(), "seed": self.seed,
+                         "temperature": self.temperature,
+                         "layout_temperature": PLAY_LAYOUT_TEMPERATURE,
                          "dead_rules_enabled": self.engine.policy.config.dead_rules_enabled}
         self.inference_seconds = 0.0
         self.ai_moves = 0

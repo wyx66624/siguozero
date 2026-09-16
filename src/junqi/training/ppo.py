@@ -22,6 +22,7 @@ from .models import GameValueTransformer, PieceConditionedLayoutPointerDecoder
 from .rollout import BaseGamePool, FrozenPolicyActor, LayoutOutcome, RolloutMetrics
 from .rewards import DEFAULT_DRAW_REWARD, flag_capture_utility, terminal_utility
 from .entropy import policy_entropy_bonus
+from .futile_attack import step_with_evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +54,7 @@ class PPOTransition:
     learnable: bool = True
     value_state: PolicyState | None = None
     flag_capture_reward: float = 0.0
+    futile_attack_reward: float = 0.0
 
 
 def generalized_advantages(
@@ -84,7 +86,8 @@ def generalized_advantages(
             raise ValueError("only a terminal transition can be a draw")
         # A flag capture can coincide with a max-plies draw. Only the draw
         # penalty is shared by both teams; the capture component changes sign.
-        common_reward = item.reward - item.flag_capture_reward if item.terminal_draw else 0.0
+        common_reward = (item.reward - item.flag_capture_reward - item.futile_attack_reward
+                         if item.terminal_draw else 0.0)
         old_outcome = item.old_value - item.old_draw_value
         common_factor = 0.0 if item.terminal else discount
         factor = common_factor * item.next_team_sign
@@ -137,6 +140,14 @@ class FrozenValueActor:
     def values(self, states: Sequence[PolicyState]) -> list[float]:
         return [total for total, _draw in self.estimates(states)]
 
+    def _estimate_batch(self, states, *, pack_sequences=False):
+        if hasattr(self.critic, "draw_value_head"):
+            return self.critic(states, pack_sequences=pack_sequences, return_components=True).cpu().tolist()
+        # MAPPO uses one scalar V head. The zero is only an adapter for legacy
+        # PPO callers; it is not a predicted component or an auxiliary loss.
+        return [(value, 0.0) for value in self.critic(
+            states, pack_sequences=pack_sequences).cpu().tolist()]
+
     def estimates(self, states: Sequence[PolicyState]) -> list[tuple[float, float]]:
         """Return total and shared-draw values from the same encoder pass."""
         values = []
@@ -149,7 +160,7 @@ class FrozenValueActor:
             while start < len(states):
                 size = min(self.max_batch_size, len(states) - start)
                 try:
-                    batch = self.critic(states[start:start + size], return_components=True).cpu().tolist()
+                    batch = self._estimate_batch(states[start:start + size])
                 except RuntimeError as error:
                     if not is_out_of_memory(error, device_type) or size <= 1:
                         raise
@@ -186,8 +197,7 @@ class FrozenValueActor:
                 size = min(self.max_batch_size, len(groups) - start)
                 indices = [i for group in groups[start:start + size] for i in group]
                 try:
-                    values = self.critic([states[i] for i in indices], pack_sequences=True,
-                                         return_components=True).cpu().tolist()
+                    values = self._estimate_batch([states[i] for i in indices], pack_sequences=True)
                 except RuntimeError as error:
                     if not is_out_of_memory(error, device_type) or size <= 1:
                         raise
@@ -227,6 +237,7 @@ def collect_ppo_samples(
     pipeline_groups: int = 1,
     draw_reward: float = DEFAULT_DRAW_REWARD,
     flag_capture_reward: float = 0.0,
+    futile_attack_penalty: float = 0.0,
 ) -> tuple[list[PPOSample], list[LayoutOutcome], RolloutMetrics]:
     """Take exactly count real self-play actions, without cloned continuations."""
 
@@ -252,11 +263,11 @@ def collect_ppo_samples(
                 return collect_pipelined(pool, actor, critic, layout, count=count,
                     behavior_version=behavior_version, discount=discount, gae_lambda=gae_lambda,
                     environment=environment, groups=pipeline_groups, draw_reward=draw_reward,
-                    flag_capture_reward=flag_capture_reward)
+                    flag_capture_reward=flag_capture_reward, futile_attack_penalty=futile_attack_penalty)
             return _collect_parallel_ppo_samples(
                 pool, actor, critic, layout, count=count, behavior_version=behavior_version,
                 discount=discount, gae_lambda=gae_lambda, environment=environment, draw_reward=draw_reward,
-                flag_capture_reward=flag_capture_reward)
+                flag_capture_reward=flag_capture_reward, futile_attack_penalty=futile_attack_penalty)
         finally:
             if owned:
                 environment.close()
@@ -293,7 +304,7 @@ def collect_ppo_samples(
             if player is None:
                 raise RuntimeError("terminal game remained in PPO pool")
             team = slot.game.team_of(player)
-            result = slot.game.step(sampled[0])
+            result, futile_attack = step_with_evidence(slot.game, sampled[0], enabled=futile_attack_penalty > 0)
             metrics.record_environment_steps()
             slot.history.append_after_step(slot.game)
             terminal = slot.game.is_terminal
@@ -302,14 +313,16 @@ def collect_ppo_samples(
             capture_reward = flag_capture_utility(slot.game, result.flag_captured_owner,
                                                   player=player, coefficient=flag_capture_reward)
             metrics.record_flag_capture(result.flag_captured_owner, capture_reward, terminal=terminal)
+            futile_reward = metrics.record_futile_attack(futile_attack, futile_attack_penalty)
             next_player = slot.game.current_player
             sign = (1 if terminal or slot.game.team_of(next_player) == team else -1)
             traces[index].append(PPOTransition(
                 state=state, action=sampled[0], old_log_prob=float(log[0]),
-                old_value=value[0], old_draw_value=value[1], reward=reward + capture_reward, terminal=terminal,
+                old_value=value[0], old_draw_value=value[1], reward=reward + capture_reward + futile_reward, terminal=terminal,
                 terminal_draw=terminal and outcome == 0,
                 next_team_sign=sign,
                 flag_capture_reward=capture_reward,
+                futile_attack_reward=futile_reward,
             ))
             if terminal:
                 metrics.base_games_completed += 1
@@ -354,7 +367,7 @@ def collect_ppo_samples(
 
 def _collect_parallel_ppo_samples(pool, actor, critic, layout, *, count,
                                   behavior_version, discount, gae_lambda, environment, draw_reward,
-                                  flag_capture_reward):
+                                  flag_capture_reward, futile_attack_penalty):
     started = time.perf_counter()
     pool.fill(layout, behavior_version)
     array_history = actor.policy.config.ppo_array_history
@@ -367,7 +380,7 @@ def _collect_parallel_ppo_samples(pool, actor, critic, layout, *, count,
             critic.critic.start_ppo_inference_cache(capacity=capacity, behavior_version=behavior_version)
     metrics = RolloutMetrics()
     boundary = time.perf_counter()
-    environment.begin(pool)
+    environment.begin(pool, track_futile_attacks=futile_attack_penalty > 0)
     metrics.environment_sync_seconds += time.perf_counter() - boundary
     metrics.environment_workers = len(environment.processes)
     initial_worker_seconds = environment.worker_seconds
@@ -405,10 +418,12 @@ def _collect_parallel_ppo_samples(pool, actor, critic, layout, *, count,
             capture_reward = flag_capture_utility(slot.game, row.flag_captured_owner,
                                                   player=player, coefficient=flag_capture_reward)
             metrics.record_flag_capture(row.flag_captured_owner, capture_reward, terminal=row.terminal)
+            futile_reward = metrics.record_futile_attack(row.futile_attack, futile_attack_penalty)
             traces[index].append(PPOTransition(
                 state=state, action=sampled[0], old_log_prob=float(log[0]), old_value=value[0], old_draw_value=value[1],
-                reward=(terminal_utility(row.reward, draw_reward=draw_reward) if row.terminal else 0.) + capture_reward,
+                reward=(terminal_utility(row.reward, draw_reward=draw_reward) if row.terminal else 0.) + capture_reward + futile_reward,
                 flag_capture_reward=capture_reward,
+                futile_attack_reward=futile_reward,
                 terminal_draw=row.terminal and row.reward == 0,
                 terminal=row.terminal, next_team_sign=row.next_team_sign))
             if row.terminal:
@@ -546,6 +561,8 @@ def critic_ppo_loss(
         raise ValueError("critic requires a nonempty batch")
     options = {"pack_sequences": True} if sequence_training else {}
     has_components = hasattr(getattr(critic, "module", critic), "draw_value_head")
+    if not has_components and any(s.old_draw_value != 0 or s.draw_value_target != 0 for s in samples):
+        raise ValueError("a scalar critic cannot receive auxiliary draw targets")
     predictions = critic([sample.value_state or sample.state for sample in samples],
                          **({"return_components": True} if has_components else {}), **options).float()
     values, common = predictions.unbind(-1) if has_components else (predictions, torch.zeros_like(predictions))
@@ -557,7 +574,7 @@ def critic_ppo_loss(
     common_clipped = old_common + (common - old_common).clamp(-clip_epsilon, clip_epsilon)
     outcome_mse = torch.maximum((outcome - outcome_targets).square(), (clipped - outcome_targets).square()).mean()
     common_mse = torch.maximum((common - common_targets).square(), (common_clipped - common_targets).square()).mean()
-    mse = outcome_mse + common_mse
+    mse = outcome_mse + common_mse if has_components else outcome_mse
     loss = 0.5 * value_coefficient * mse
     names = ("loss/critic_total", "critic/value_mse", "critic/value_mean", "critic/target_mean",
              "critic/draw_value_mse", "critic/draw_value_mean", "critic/draw_target_mean")
