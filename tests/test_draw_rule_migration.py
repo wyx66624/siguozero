@@ -44,7 +44,7 @@ class DrawRuleMigrationTests(unittest.TestCase):
         # Test both observation paths used by serial and process-based PPO.
         for count in (60, 69, 70):
             game.no_interaction_plies = count
-            observation = game.observe(0)
+            observation = game.observe(0, include_inventory_masks=True)
             record = _record_from_observation(observation, None)
             self.assertEqual(record.no_interaction_plies, count)
             row = observation_rows(game, TrainingMode.FOUR_DARK)[0]
@@ -71,23 +71,13 @@ class DrawRuleMigrationTests(unittest.TestCase):
         trainer.update = 11
         self.assertFalse(trainer._periodic_checkpoint_due())
 
-    def test_v6_resume_preserves_actor_critic_adam_history_and_progress(self):
+    def test_multihot_rule_resume_preserves_actor_critic_adam_history_and_progress(self):
         with tempfile.TemporaryDirectory() as directory:
             legacy = settings(max_game_plies=2000, no_capture_draw_plies=60)
             original = SelfPlayTrainer(legacy, run_directory=directory, auto_resume=False)
             original.train()
             path = original.checkpoints.latest_path
             payload = torch.load(path, weights_only=False)
-            payload['format_version'] = 6
-            for key, model in (('policy', original.policy), ('critic', original.critic)):
-                weight = payload[key]['no_interaction_embedding.weight'][:61].clone()
-                payload[key]['no_interaction_embedding.weight'] = weight
-                names = [name for name, _ in model.named_parameters()]
-                parameter_id = payload[key + '_optimizer']['param_groups'][0]['params'][
-                    names.index('no_interaction_embedding.weight')]
-                moments = payload[key + '_optimizer']['state'][parameter_id]
-                for moment in ('exp_avg', 'exp_avg_sq'):
-                    moments[moment] = moments[moment][:61].clone()
             payload['trainer_state']['base_game_pool'].pop('no_capture_draw_plies')
             torch.save(payload, path)
             expected = copy.deepcopy(payload['trainer_state']['cumulative'])
@@ -104,14 +94,12 @@ class DrawRuleMigrationTests(unittest.TestCase):
                     ('critic', resumed.critic, resumed.critic_optimizer),
                 ):
                     parameter = model.no_interaction_embedding.weight
-                    torch.testing.assert_close(parameter[:61], payload[key]['no_interaction_embedding.weight'], rtol=0, atol=0)
-                    torch.testing.assert_close(parameter[61:], parameter[60:61].expand(10, -1), rtol=0, atol=0)
+                    torch.testing.assert_close(parameter, payload[key]['no_interaction_embedding.weight'], rtol=0, atol=0)
                     names = [name for name, _ in model.named_parameters()]
                     parameter_id = payload[key + '_optimizer']['param_groups'][0]['params'][names.index('no_interaction_embedding.weight')]
                     for moment in ('exp_avg', 'exp_avg_sq'):
                         saved = payload[key + '_optimizer']['state'][parameter_id][moment]
-                        torch.testing.assert_close(optimizer.state[parameter][moment][:61], saved, rtol=0, atol=0)
-                        self.assertEqual(optimizer.state[parameter][moment][61:].count_nonzero(), 0)
+                        torch.testing.assert_close(optimizer.state[parameter][moment], saved, rtol=0, atol=0)
                 for before, after in zip(original.pool.slots, resumed.pool.slots):
                     self.assertEqual(dict(before.game.pieces), dict(after.game.pieces))
                     self.assertEqual(before.game.no_interaction_plies, after.game.no_interaction_plies)
@@ -122,7 +110,7 @@ class DrawRuleMigrationTests(unittest.TestCase):
                 resumed.train()  # An actual Adam update catches incompatible moment shapes.
                 self.assertEqual(resumed.update, 2)
                 saved = torch.load(path, weights_only=False)
-                self.assertEqual(saved['format_version'], 9)
+                self.assertEqual(saved['format_version'], 15)
                 self.assertEqual(saved['trainer_state']['draw_rule_migration']['update'], 1)
                 self.assertEqual(saved['trainer_state']['last_checkpoint_environment_plies'], resumed.cumulative['environment_plies'])
             finally:

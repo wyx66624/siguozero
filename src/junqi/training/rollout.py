@@ -76,6 +76,10 @@ class RolloutMetrics:
     flag_capture_reward_abs_sum: float = 0.0
     futile_attacks: int = 0
     futile_attack_reward_abs_sum: float = 0.0
+    bombed_commanders: int = 0
+    bombed_army_commanders: int = 0
+    bombed_division_commanders: int = 0
+    bomb_reward_sum: float = 0.0
     wall_seconds: float = 0.0
     actor_inference_seconds: float = 0.0
     environment_step_seconds: float = 0.0
@@ -110,6 +114,11 @@ class RolloutMetrics:
         self.futile_attack_reward_abs_sum += coefficient
         return -coefficient
 
+    def record_bomb(self, kind: str, reward: float) -> None:
+        field = f"bombed_{kind}s"
+        setattr(self, field, getattr(self, field) + 1)
+        self.bomb_reward_sum += reward
+
     def as_dict(self) -> dict[str, float | int]:
         return {
             "rollout/policy_samples": self.policy_samples,
@@ -130,6 +139,10 @@ class RolloutMetrics:
             "rollout/futile_attacks": self.futile_attacks,
             "rollout/futile_attack_rate": self.futile_attacks / max(1, self.policy_samples),
             "rollout/futile_attack_reward_abs_sum": self.futile_attack_reward_abs_sum,
+            "rollout/bombed_commanders": self.bombed_commanders,
+            "rollout/bombed_army_commanders": self.bombed_army_commanders,
+            "rollout/bombed_division_commanders": self.bombed_division_commanders,
+            "rollout/bomb_reward_sum": self.bomb_reward_sum,
             "rollout/wall_seconds": self.wall_seconds,
             "rollout/actor_inference_seconds": self.actor_inference_seconds,
             "rollout/environment_step_work_seconds": self.environment_step_seconds,
@@ -356,7 +369,7 @@ class BaseGamePool:
             dead_rules_enabled=self.dead_rules_enabled,
         )
         history = GameHistory.initialize(
-            game, self.mode, max_transitions=self.max_transitions
+            game, self.mode, max_transitions=self.max_transitions,
         )
         scenario = None
         if self.historical is not None and self.historical.active:
@@ -384,6 +397,7 @@ class BaseGamePool:
             # Version 5 stores only endpoint/actor action histories.
             "format_version": 5,
             "centralized_critic": self.centralized_critic,
+            "inventory_encoding": True,
             "historical_opponents": self.historical.state_dict() if self.historical is not None and self.historical.enabled else None,
             "mode": self.mode.value,
             "dead_rules_enabled": self.dead_rules_enabled,
@@ -405,6 +419,8 @@ class BaseGamePool:
             raise ValueError("base-game-pool mode does not match trainer mode")
         if state.get("centralized_critic", False) is not self.centralized_critic:
             raise ValueError("actor/critic observation contract changed across resume")
+        if state.get("inventory_encoding") is not True:
+            raise ValueError("inventory encoding is required across resume; legacy encoding is unsupported")
         restored_dead_rules = state["dead_rules_enabled"]
         if not isinstance(restored_dead_rules, bool):
             raise ValueError("invalid base-game-pool dead-rule marker")
@@ -456,6 +472,9 @@ class BaseGamePool:
                 "no_interaction_plies": game.no_interaction_plies,
                 "passes_remaining": game.passes_remaining,
                 "public_candidates": dict(game.public_candidates),
+                "inventory_knowledge": game._inventory.state_dict(),
+                "critic_inventory_slots": (None if game._critic_inventory_slots is None
+                                           else dict(game._critic_inventory_slots)),
                 "known_identities": [
                     dict(known) for known in game.known_identities
                 ],
@@ -497,6 +516,8 @@ class BaseGamePool:
             ply_count=int(raw_game["ply_count"]),
             no_interaction_plies=int(raw_game["no_interaction_plies"]),
             public_candidates=raw_game["public_candidates"],
+            inventory_knowledge=raw_game.get("inventory_knowledge"),
+            critic_inventory_slots=raw_game.get("critic_inventory_slots"),
             known_identities=raw_game["known_identities"],
             known_casualties=raw_game["known_casualties"],
             public_history=raw_game["public_history"],
@@ -506,6 +527,18 @@ class BaseGamePool:
             raise ValueError("checkpoint base-game slot unexpectedly terminal")
         restore_evidence(game, raw_game.get("futile_attack_evidence"))
         history = GameHistory.from_state_dict(state["history"])
+        if game._inventory is None:
+            raise ValueError("inventory knowledge/history does not match the pool")
+        if raw_game["inventory_knowledge"].get("version") != 3:
+            raise ValueError("actor inventory checkpoint is missing confirmed piece slots")
+        for viewer, player in enumerate(history.players):
+            masks = [0] * mode_spec(self.mode).point_count
+            for point in game._pieces:
+                masks[game._boards[viewer].encode(point)] = game.inventory_mask(viewer, point)
+            if tuple(masks) != player.records[-1].inventory_masks:
+                raise ValueError("actor piece slots do not match the saved private history")
+        if self.centralized_critic and game._critic_inventory_slots is None:
+            raise ValueError("MAPPO inventory checkpoint is missing critic piece slots")
         if history.mode is not self.mode:
             raise ValueError("base-game history mode does not match pool")
         if (
@@ -538,6 +571,12 @@ class BaseGamePool:
                 raise ValueError("MAPPO checkpoint is missing global histories")
             critic_history = CentralizedHistory.from_state_dict(state["critic_history"])
             global_history = critic_history.history
+            for viewer, player in enumerate(global_history.players):
+                masks = [0] * mode_spec(self.mode).point_count
+                for point, slot in game._critic_inventory_slots.items():
+                    masks[game._boards[viewer].encode(point)] = 1 << slot
+                if tuple(masks) != player.records[-1].inventory_masks:
+                    raise ValueError("critic piece slots do not match the saved global history")
             if (global_history.mode is not self.mode
                     or any(a.dead_rules_enabled != b.dead_rules_enabled
                            or a.max_transitions != b.max_transitions or len(a.records) != len(b.records)

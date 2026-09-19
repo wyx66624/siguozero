@@ -9,7 +9,7 @@
 | 情况 | 行为 |
 | --- | --- |
 | 最终代表性 KL 高于 0.04（2 倍目标 0.02） | 下一轮学习率乘 0.8，限幅后生效 |
-| 本轮触发过 KL/clip 早停，或最终裁剪比例高于 0.1 | 清空稳定计数，暂停回升 |
+| 本轮触发过 KL 早停 | 清空稳定计数，暂停回升 |
 | 最终 KL 和其 EMA 都低于 0.01，连续稳定 5 轮 | 下一轮学习率乘 1.03，限幅后生效 |
 | 正常区间 | 保持倍率，继续基础调度 |
 | 调整后的 5 轮冷却期 | 暂停回升；可信的高 KL 仍可降速 |
@@ -40,7 +40,6 @@ stable_updates: 5
 cooldown_updates: 5
 ema_decay: 0.8
 probe_samples: 2048
-recovery_clip_fraction: 0.1
 ```
 
 `initial` 是基础计划的峰值；实际值受倍率及 `maximum` 限制。新控制器只用于 PPO；GRPO 保留既有反馈方式。PPO 的 `adaptive: false` 关闭动态反馈与额外检测，仍对实际学习率应用上下限。
@@ -54,6 +53,7 @@ Critic 保持现有与策略学习率的比例关系，其实际上下限按该�
 检测只对已有样本引用进行片段抽样，保留连续历史编码的复用，排除冻结席位动作，使用独立随机数生成器，不消耗采样/训练随机序列。使用已有策略模型进行无梯度计算，不加载旧模型，不存储整批旧 logits，不修改模型权重或梯度。各微批次统计在设备上累计，只传输少量标量；跨 rank 按实际学习样本数汇总。
 
 网页展示本轮学习率、下一轮学习率、上下限、最终 KL/EMA、稳定计数、冷却期及调整原因。
+Clip 探针值和小批次峰值仅作监控，不作为学习率暂停回升或下降的条件；PPO 损失裁剪保留。
 KL 目标、早停阈值和实际训练遍数分别读取 `policy/target_kl`、`policy/early_stop_kl_threshold`、
 `optimizer/policy_epochs` 和 `optimizer/policy_epochs_max`，旧记录缺少阈值时显示未知。
 详细日志另记录 `policy/minibatch_kl_max`、`policy/minibatch_clip_max`、`optimizer/policy_stop_kl`、`optimizer/policy_stop_clip` 和 `timing/lr_probe_seconds`。后者包含样本选择与最终模型检测，可用于核对新增耗时。

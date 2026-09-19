@@ -8,7 +8,7 @@ import subprocess
 import time
 import urllib.request
 
-UNIT = "siguozero-monitor.service"
+UNIT = os.environ.get("SIGUOZERO_MONITOR_SERVICE", "siguozero-monitor.service")
 MARKER = "# Managed by SiguoZero monitor service installer."
 
 

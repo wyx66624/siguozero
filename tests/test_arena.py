@@ -192,9 +192,8 @@ class ArenaTests(ArenaFixtures, unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "two_player"):
             validate_engines(candidate, opponent)
         opponent.mode = TrainingMode.TWO_PLAYER
-        opponent.policy.config = replace(opponent.policy.config, dead_rules_enabled=False)
         with self.assertRaisesRegex(ValueError, "dead rules"):
-            validate_engines(candidate, opponent)
+            replace(opponent.policy.config, dead_rules_enabled=False)
 
     def test_score_and_ci_use_complete_pairs_not_individual_games(self):
         from junqi.training.arena import MatchSettings, summarize_games

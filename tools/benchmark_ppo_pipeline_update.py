@@ -53,6 +53,7 @@ def main():
     parser.add_argument('--sampling-graphs', action='store_true')
     parser.add_argument('--full-policy-epochs', action='store_true',
                         help='benchmark only: hold optimizer work fixed by disabling KL early exit')
+    parser.add_argument('--profile-cpu', help='diagnostic only: write cProfile and per-phase GC timings')
     parser.add_argument("--moves-per-game", type=int, default=64)
     parser.add_argument('--transitions-per-update', type=int,
                         help='hold the exact global update size fixed for arbitrary pool sizes')
@@ -221,7 +222,33 @@ def main():
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     start = last_boundary = time.perf_counter()
-    trainer.train()
+    if args.profile_cpu:
+        import cProfile
+        profiler = cProfile.Profile()
+        gc_rows, gc_started = {}, None
+        def record_gc(phase, info):
+            nonlocal gc_started
+            if phase == 'start':
+                gc_started = (time.perf_counter(), trainer.phase, info['generation'])
+            elif gc_started is not None:
+                then, training_phase, generation = gc_started
+                key = f'{training_phase}/generation_{generation}'
+                row = gc_rows.setdefault(key, dict(count=0, seconds=0.0))
+                row['count'] += 1
+                row['seconds'] += time.perf_counter() - then
+                gc_started = None
+        gc.callbacks.append(record_gc)
+        try:
+            with profiler:
+                trainer.train()
+        finally:
+            gc.callbacks.remove(record_gc)
+            profile_path = Path(args.profile_cpu)
+            profile_path.parent.mkdir(parents=True, exist_ok=True)
+            profiler.dump_stats(str(profile_path))
+            profile_path.with_suffix('.gc.json').write_text(json.dumps(gc_rows, indent=2) + '\n')
+    else:
+        trainer.train()
     torch.cuda.synchronize()
     seconds = time.perf_counter() - start
     steps = trainer.cumulative["environment_plies"] - counts_before["environment_plies"]

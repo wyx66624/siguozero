@@ -75,11 +75,11 @@ def new_game(
     dead_rules_enabled: bool = True,
     no_capture_draw_plies: int = 70,
 ) -> JunqiGame:
-    """Create a rules-engine game whose information mode exactly matches profile."""
+    """Create a game with candidate tracking enabled before its first move."""
 
     spec = mode_spec(mode)
     if spec.variant is GameVariant.FOUR_PLAYER:
-        return JunqiGame.new_four_player(
+        game = JunqiGame.new_four_player(
             setups=setups,
             seed=seed,
             information_mode=spec.information_mode,
@@ -87,11 +87,14 @@ def new_game(
             no_interaction_draw_plies=no_capture_draw_plies,
             max_plies=max_plies,
         )
-    return JunqiGame.new_two_player(
-        setups=setups,
-        seed=seed,
-        information_mode=spec.information_mode,
-        dead_rules_enabled=dead_rules_enabled,
-        no_interaction_draw_plies=no_capture_draw_plies,
-        max_plies=max_plies,
-    )
+    else:
+        game = JunqiGame.new_two_player(
+            setups=setups,
+            seed=seed,
+            information_mode=spec.information_mode,
+            dead_rules_enabled=dead_rules_enabled,
+            no_interaction_draw_plies=no_capture_draw_plies,
+            max_plies=max_plies,
+        )
+    game.enable_inventory_tracking()
+    return game

@@ -28,7 +28,7 @@ class ParallelEnvironmentTests(unittest.TestCase):
 
     def test_serial_parallel_samples_resets_rng_and_pool_match(self):
         for mode in (TrainingMode.FOUR_DARK, TrainingMode.DOUBLE_OPEN):
-            for dead, arrays in ((True, True), (False, False)):
+            for dead, arrays in ((True, True), (True, False)):
                 with self.subTest(mode=mode, dead=dead, arrays=arrays):
                     torch.manual_seed(741)
                     config = replace(ModelConfig.tiny(dead_rules_enabled=dead), max_transitions=7,

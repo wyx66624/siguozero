@@ -233,15 +233,15 @@ class PPOTests(unittest.TestCase):
         self.assertEqual(settings.anchor_batch, 12288)
         self.assertEqual(settings.model.inference_temporal_cache_entries, 576)
 
-    def test_no_dead_rules_and_real_step_budget(self):
+    def test_multihot_and_real_step_budget(self):
         settings = TrainingSettings.from_yaml(
-            CONFIG, TrainingMode.FOUR_DARK, tiny=True, dead_rules_enabled=False,
+            CONFIG, TrainingMode.FOUR_DARK, tiny=True, dead_rules_enabled=True,
             overrides={"device": "cpu", "anchor_batch": 8, "policy_microbatch": 2,
                        "total_updates": 3, "target_environment_plies": 8},
         )
         with tempfile.TemporaryDirectory() as directory:
             trainer = SelfPlayTrainer(settings, run_directory=directory)
-            self.assertEqual(trainer.critic.board_encoder.casualty_feature_dim, 0)
+            self.assertEqual(trainer.critic.board_encoder.casualty_feature_dim, 75)
             trainer.train()
             self.assertEqual(trainer.update, 1)
             self.assertEqual(trainer.cumulative["environment_plies"], 8)

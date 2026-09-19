@@ -142,9 +142,9 @@ class ActionEncoderTests(unittest.TestCase):
                 old["records"][1]["action"] = (0, 1, 0, 0, 0, 4, 0, 0)
                 with self.assertRaisesRegex(ValueError, "source, destination and actor"):
                     PlayerHistory.from_state_dict(old)
-        require_current_checkpoint({"format_version": CHECKPOINT_FORMAT_VERSION})
+        require_current_checkpoint({"format_version": CHECKPOINT_FORMAT_VERSION, "config": {"model": {"board_encoder_type": "whole_board_inventory_multihot_linear"}}})
         for old in (4, 5):
-            with self.assertRaisesRegex(ValueError, "version 6"):
+            with self.assertRaisesRegex(ValueError, "version 15"):
                 require_current_checkpoint({"format_version": old})
 
     def test_cached_and_full_history_policy_critic_agree_after_multiple_actions(self):
@@ -173,7 +173,7 @@ class ActionEncoderTests(unittest.TestCase):
             settings = TrainingSettings.from_yaml(config_path, TrainingMode.FOUR_DARK, model_scale=scale)
             self.assertEqual(settings.model.action_encoder_type, ACTION_ENCODER_TYPE)
         for field, value, error in (("input_dim", 8, "exactly six"),
-                                    ("output_dim", 128, "equal output"),
+                                    ("output_dim", 128, "action_dim \\+ board_dim"),
                                     ("architecture", "field_embeddings", "unsupported action encoder")):
             data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             data["models"]["policy"]["action_encoder"][field] = value

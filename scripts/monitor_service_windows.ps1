@@ -2,10 +2,14 @@ param(
     [switch]$Register,
     [switch]$Run,
     [switch]$Remove,
-    [string]$Distribution = 'Ubuntu-24.04'
+    [string]$Distribution = 'Ubuntu-24.04',
+    [string]$TaskName = 'SiguoZero Monitor',
+    [string]$ServiceName = 'siguozero-monitor.service'
 )
 $ErrorActionPreference = 'Stop'
-$taskName = 'SiguoZero Monitor'
+if ($TaskName -match '["\r\n]' -or $ServiceName -notmatch '^[a-zA-Z0-9_.-]+\.service$') {
+    throw 'Invalid task or service name.'
+}
 $scriptPath = $PSCommandPath
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $outputDirectory = Join-Path $projectRoot 'output/local_console'
@@ -20,7 +24,7 @@ if ($Register) {
         throw 'A task with this name exists and is not owned by this installer.'
     }
     if ($scriptPath.Contains('"') -or $Distribution -match '["\r\n]') { throw 'Unsupported path or distribution name.' }
-    $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -File "' + $scriptPath + '" -Run -Distribution "' + $Distribution + '"'
+    $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -File "' + $scriptPath + '" -Run -Distribution "' + $Distribution + '" -TaskName "' + $TaskName + '" -ServiceName "' + $ServiceName + '"'
     $action = New-ScheduledTaskAction -Execute $powershellPath -Argument $arguments -WorkingDirectory $projectRoot
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $taskIdentity
     $principal = New-ScheduledTaskPrincipal -UserId $taskIdentity -LogonType Interactive -RunLevel Limited
@@ -45,7 +49,7 @@ if ($Register) {
     # This PowerShell host is already hidden by the scheduled-task action. Keep
     # wsl.exe in the foreground and let PowerShell pass native arguments: WSL's
     # option parser can treat manually added quotes as part of a distro name.
-    & (Join-Path $env:WINDIR 'System32/wsl.exe') --distribution $Distribution --user root --exec /usr/bin/python3 $linuxScript `
+    & (Join-Path $env:WINDIR 'System32/wsl.exe') --distribution $Distribution --user root --exec /usr/bin/env "SIGUOZERO_MONITOR_SERVICE=$ServiceName" /usr/bin/python3 $linuxScript `
         1> (Join-Path $outputDirectory 'windows-keeper.stdout.log') `
         2> (Join-Path $outputDirectory 'windows-keeper.stderr.log')
     exit $LASTEXITCODE

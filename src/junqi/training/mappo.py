@@ -7,6 +7,7 @@ be obtained by negation: a drawn game penalizes both teams equally.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import gc
 import time
 from typing import Sequence
 
@@ -14,6 +15,7 @@ from .encoding import PolicyState
 from .ppo import PPOSample
 from .rewards import DEFAULT_DRAW_REWARD, flag_capture_utility, terminal_utility
 from .rollout import LayoutOutcome, RolloutMetrics
+from .tactical_rewards import BOMB_REWARD_FIELDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +67,7 @@ def collect_mappo_samples(
     pool, actor, critic, layout, *, count, behavior_version, discount, gae_lambda,
     environment_workers=1, environment=None, pipeline_groups=1,
     draw_reward=DEFAULT_DRAW_REWARD, flag_capture_reward=0.0, futile_attack_penalty=0.0,
+    bomb_commander_reward=0.0, bomb_army_commander_reward=0.0, bomb_division_commander_reward=0.0,
 ):
     """Collect private actions and global values without changing step budgets."""
     if type(count) is not int or count <= 0:
@@ -80,18 +83,39 @@ def collect_mappo_samples(
     from .ppo_environment import ParallelPPOEnvironment
     owned = environment is None
     environment = environment or ParallelPPOEnvironment(environment_workers)
+    # Collection creates many acyclic history views and IPC tuples. Reference
+    # counts still reclaim them immediately; defer only cyclic scans until the
+    # temporary traces have gone away, rather than repeatedly scanning a growing
+    # batch. Restore the caller's GC state even after a worker/inference failure.
+    collect_cycles = gc.isenabled()
+    result = None
+    if collect_cycles:
+        gc.disable()
     try:
-        return _collect(pool, actor, critic, layout, count=count, behavior_version=behavior_version,
-                        discount=discount, gae_lambda=gae_lambda, environment=environment,
-                        groups=pipeline_groups, draw_reward=draw_reward,
-                        flag_capture_reward=flag_capture_reward, futile_attack_penalty=futile_attack_penalty)
+        result = _collect(pool, actor, critic, layout, count=count, behavior_version=behavior_version,
+                          discount=discount, gae_lambda=gae_lambda, environment=environment,
+                          groups=pipeline_groups, draw_reward=draw_reward,
+                          flag_capture_reward=flag_capture_reward, futile_attack_penalty=futile_attack_penalty,
+                          bomb_rewards=dict(zip(BOMB_REWARD_FIELDS, (
+                              bomb_commander_reward, bomb_army_commander_reward, bomb_division_commander_reward), strict=True)))
+        return result
     finally:
-        if owned:
-            environment.close()
+        try:
+            if owned:
+                environment.close()
+        finally:
+            if collect_cycles:
+                boundary = time.perf_counter()
+                try:
+                    gc.collect()
+                finally:
+                    gc.enable()
+                if result is not None:
+                    result[2].wall_seconds += time.perf_counter() - boundary
 
 
 def _collect(pool, actor, critic, layout, *, count, behavior_version, discount, gae_lambda,
-             environment, groups, draw_reward, flag_capture_reward, futile_attack_penalty):
+             environment, groups, draw_reward, flag_capture_reward, futile_attack_penalty, bomb_rewards):
     started = time.perf_counter()
     historical = pool.historical
     if historical is not None:
@@ -178,6 +202,12 @@ def _collect(pool, actor, critic, layout, *, count, behavior_version, discount, 
                                             player=t, coefficient=flag_capture_reward) for t in (0, 1)]
             rewards = [reward + capture for reward, capture in zip(rewards, captures, strict=True)]
             metrics.record_flag_capture(row.flag_captured_owner, captures[team], terminal=row.terminal)
+            if row.bombed_kind is not None:
+                bomb_reward = bomb_rewards[row.bombed_kind]
+                # Credit the bomb's team, including defensive explosions and
+                # frozen teammates. Explosion rewards are not zero-sum.
+                rewards[slot.game.team_of(row.bomb_owner)] += bomb_reward
+                metrics.record_bomb(row.bombed_kind, bomb_reward)
             # This non-zero-sum penalty belongs only to the acting learner's
             # team. Do not turn an opponent's futile move into a positive bonus.
             rewards[team] += metrics.record_futile_attack(row.futile_attack, futile_attack_penalty,

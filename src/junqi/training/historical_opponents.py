@@ -58,6 +58,7 @@ class HistoricalOpponents:
         self.rng = random.Random(settings.seed + 7949 + 1_000_003 * context.rank)
         self.q, self.results = {}, {}
         self.win_rates, self.win_rate_results = {}, {}
+        self.loss_rates = {}
         self.active_id = None
         self.active_probability = 1.0
         self.active_panel_size = 0
@@ -243,7 +244,12 @@ class HistoricalOpponents:
         self.progress = int(environment_plies)
         if self._checkpoint_cpu_state is not None and self._checkpoint_cpu_state[:2] == (update, self.progress):
             return self._checkpoint_cpu_state[2]
-        if not self.enabled or self.progress < self.checkpoint_threshold:
+        archive_threshold = self.checkpoint_threshold
+        if self.settings.historical_sampling == "strength" and self.settings.checkpoint_interval_environment_plies:
+            # Retain every periodic model version independently of the later
+            # opponent-admission gate; full optimizer archives may be rotated.
+            archive_threshold = min(archive_threshold, self.settings.checkpoint_interval_environment_plies)
+        if not self.enabled or self.progress < archive_threshold:
             return None
         if any(e["update"] == update and e["environment_plies"] == self.progress for e in self.entries):
             return None
@@ -254,6 +260,19 @@ class HistoricalOpponents:
         panel = self.panel()
         if not panel:
             return {}
+        if self.settings.historical_sampling == "strength":
+            # Match the main project's P(learner loses | decisive game) softmax.
+            if self.settings.historical_checkpoint_start_fraction is not None:
+                panel = [e for e in panel if e["environment_plies"] >= self.checkpoint_threshold]
+            if not panel:
+                return {}
+            strengths = [self.loss_rates.get(e["id"], self.settings.historical_initial_loss_rate) for e in panel]
+            high = max(strengths)
+            weights = [math.exp(max(-60., (value - high) / self.settings.historical_win_rate_temperature))
+                       for value in strengths]
+            total, uniform = sum(weights), self.settings.historical_uniform_fraction
+            return {e["id"]: (1 - uniform) * w / total + uniform / len(panel)
+                    for e, w in zip(panel, weights, strict=True)}
         if self.settings.historical_sampling == "win_rate_distance":
             distances = [abs(self.win_rates.get(e["id"], .5) - .5) for e in panel]
             nearest = min(distances)
@@ -301,6 +320,12 @@ class HistoricalOpponents:
                     teammate_fraction=self.settings.historical_teammate_fraction)
 
     def sampling_contract(self):
+        if self.settings.historical_sampling == "strength":
+            return dict(strategy="strength", temperature=self.settings.historical_win_rate_temperature,
+                        ema_alpha=self.settings.historical_win_rate_ema_alpha, draws="excluded",
+                        metric="learner_loss_rate", denominator="wins+losses",
+                        prior=f"learner_loss_rate={self.settings.historical_initial_loss_rate:g}",
+                        uniform_fraction=self.settings.historical_uniform_fraction)
         if self.settings.historical_sampling == "win_rate_distance":
             return dict(strategy="win_rate_distance", temperature=self.settings.historical_win_rate_temperature,
                         ema_alpha=self.settings.historical_win_rate_ema_alpha, target=.5,
@@ -468,6 +493,15 @@ class HistoricalOpponents:
         # Only the fixed-current-teammate stratum informs opponent quality.
         if scenario != "historical_opponents":
             return
+        if self.settings.historical_sampling == "strength":
+            record(self.win_rate_results, opponent)
+            if reward == 0:
+                return
+            rate = self.loss_rates.get(opponent, self.settings.historical_initial_loss_rate)
+            alpha = self.settings.historical_win_rate_ema_alpha
+            self.loss_rates[opponent] = (1 - alpha) * rate + alpha * float(reward < 0)
+            self.quality_update_games += 1
+            return
         if self.settings.historical_sampling == "win_rate_distance":
             # Estimate P(current team wins), not the draw-adjusted arena score.
             # EMA follows a changing learner instead of averaging its lifetime.
@@ -487,6 +521,7 @@ class HistoricalOpponents:
     def state_dict(self):
         return dict(version=2, contract=self.contract(), mix_contract=self.mix_contract(),
                     sampling_contract=self.sampling_contract(), win_rates=dict(self.win_rates),
+                    loss_rates=dict(self.loss_rates),
                     win_rate_results=copy.deepcopy(self.win_rate_results),
                     entries=copy.deepcopy(self.panel()), progress=self.progress,
                     rng=self.rng.getstate(), q=dict(self.q), results=copy.deepcopy(self.results),
@@ -520,6 +555,12 @@ class HistoricalOpponents:
             if not pristine:
                 raise ValueError("historical sampling changed after mixed games started; explicit migration required")
         win_rates = copy.deepcopy(state.get("win_rates", {}))
+        loss_rates = copy.deepcopy(state.get("loss_rates", {}))
+        if any(type(rate) not in (int, float) or not math.isfinite(rate) or not 0 <= rate <= 1
+               for rate in loss_rates.values()):
+            raise ValueError("invalid saved historical loss rate")
+        if self.settings.historical_sampling == "strength" and state.get("quality_update_games", 0) and "loss_rates" not in state:
+            raise ValueError("historical strength estimates missing from checkpoint")
         if any(isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate)
                or not 0 <= rate <= 1 for rate in win_rates.values()):
             raise ValueError("invalid saved historical win rate")
@@ -537,6 +578,7 @@ class HistoricalOpponents:
             setattr(self, name, copy.deepcopy(state[name]))
         self.rng.setstate(state["rng"])
         self.win_rates = win_rates
+        self.loss_rates = loss_rates
         self.win_rate_results = copy.deepcopy(state.get("win_rate_results", {}))
         self.active_panel_size = state.get("active_panel_size", len(self.panel()))
         self.pending_cohort = copy.deepcopy(state.get("pending_cohort"))
@@ -608,6 +650,8 @@ class HistoricalOpponents:
                                 actual_fraction=self.scenario_started[k] / max(1, self.started),
                                 results=self.scenario_results.get(k, {})) for k, v in self.role_targets().items()],
                 opponents=[dict(e, probability=probabilities.get(e["id"], 0.),
+                                loss_rate=(self.loss_rates.get(e["id"], self.settings.historical_initial_loss_rate)
+                                           if self.settings.historical_sampling == "strength" else None),
                                 win_rate=self.win_rates.get(e["id"], .5) if self.settings.historical_sampling == "win_rate_distance" else None,
                                 win_rate_results=self.win_rate_results.get(e["id"], {}),
                                 results=self.results.get(e["id"], {}),

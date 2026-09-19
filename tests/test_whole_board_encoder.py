@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import replace
+from dataclasses import asdict, replace
 import unittest
+from pathlib import Path
+import tempfile
+import numpy as np
+import torch
+import yaml
 
-try:
-    import torch
-except ModuleNotFoundError as error:
-    raise unittest.SkipTest("PyTorch training extra is not installed") from error
-
+from junqi.inventory import INVENTORY_ENCODER_TYPE
 from junqi.training.checkpoint import CHECKPOINT_FORMAT_VERSION, require_current_checkpoint
-from junqi.training.encoding import (
-    BOARD_CODE_VOCAB_SIZE, BOARD_PAD_CODE, MAX_BOARD_POINTS, GameHistory,
-)
-from junqi.training.models import (
-    GamePolicyTransformer, ModelConfig, WholeBoardEncoder, collate_policy_states,
-)
+from junqi.training.encoding import BOARD_PAD_CODE, MAX_BOARD_POINTS, GameHistory
+from junqi.training.history_arrays import HistoryArrayView, record_array
+from junqi.training.models import GamePolicyTransformer, ModelConfig, WholeBoardEncoder, collate_policy_states
 from junqi.training.modes import TrainingMode, new_game
+from junqi.training.settings import TrainingSettings
 
 
 class WholeBoardEncoderTests(unittest.TestCase):
@@ -24,83 +23,86 @@ class WholeBoardEncoderTests(unittest.TestCase):
     def setUpClass(cls):
         torch.set_num_threads(1)
 
-    def test_all_modes_use_one_whole_vector_projection_without_point_tokens(self):
-        for dead_rules in (False, True):
-            config = ModelConfig.tiny(dead_rules_enabled=dead_rules)
-            encoder = WholeBoardEncoder(config)
-            self.assertEqual(list(encoder.children()), [encoder.projection])
-            self.assertIsInstance(encoder.projection, torch.nn.Linear)
-            for mode in TrainingMode:
-                with self.subTest(dead_rules=dead_rules, mode=mode):
-                    game = new_game(mode, seed=501, dead_rules_enabled=dead_rules)
-                    state = GameHistory.initialize(game, mode).state_for(game)
-                    batch = collate_policy_states([state], device="cpu", dead_rules_enabled=dead_rules)
-                    seen = []
-                    handle = encoder.projection.register_forward_pre_hook(
-                        lambda module, args: seen.append(tuple(args[0].shape)))
-                    output = encoder(batch.board_codes, batch.point_mask, batch.mode_ids, batch.casualty_bits)
-                    handle.remove()
-                    width = MAX_BOARD_POINTS * BOARD_CODE_VOCAB_SIZE + 3 + (75 if dead_rules else 0) + 4
-                    self.assertEqual(seen, [(1, width)])
-                    self.assertEqual(output.shape, (1, config.board_dim))
-                    self.assertTrue(torch.isfinite(output).all())
-                    output.square().sum().backward()
-                    self.assertGreater(float(encoder.projection.weight.grad.abs().sum()), 0)
-                    encoder.zero_grad(set_to_none=True)
+    def test_all_modes_default_to_multihot_without_point_tokens(self):
+        config = ModelConfig.tiny()
+        self.assertEqual(config.board_encoder_type, INVENTORY_ENCODER_TYPE)
+        encoder = WholeBoardEncoder(config)
+        self.assertEqual(list(encoder.children()), [encoder.projection])
+        self.assertEqual(encoder.input_dim, MAX_BOARD_POINTS * 26 + 3 + 75 + 4)
+        for mode in TrainingMode:
+            with self.subTest(mode=mode):
+                game = new_game(mode, seed=501)
+                state = GameHistory.initialize(game, mode).state_for(game)
+                batch = collate_policy_states([state], device='cpu')
+                self.assertIsNotNone(game._inventory)
+                self.assertEqual(batch.inventory_masks.shape, batch.board_codes.shape)
+                output = encoder(batch.board_codes, batch.point_mask, batch.mode_ids,
+                                 batch.casualty_bits, batch.passes_remaining, batch.inventory_masks)
+                self.assertEqual(output.shape, (1, config.board_dim))
+                self.assertTrue(torch.isfinite(output).all())
+                output.square().sum().backward()
+                self.assertGreater(float(encoder.projection.weight.grad.abs().sum()), 0)
+                encoder.zero_grad(set_to_none=True)
 
-    def test_vector_preserves_categories_positions_modes_and_padding(self):
-        encoder = WholeBoardEncoder(ModelConfig.tiny(dead_rules_enabled=False))
-        codes = torch.tensor([[30, 31, BOARD_PAD_CODE], [31, 30, BOARD_PAD_CODE]])
+    def test_vector_preserves_candidate_slots_ownership_positions_and_padding(self):
+        encoder = WholeBoardEncoder(ModelConfig.tiny())
+        codes = torch.tensor([[30, 1, BOARD_PAD_CODE], [1, 30, BOARD_PAD_CODE]])
         mask = torch.tensor([[True, True, False], [True, True, False]])
-        vector = encoder.encode_vector(codes, mask, torch.tensor([0, 1]), None)
+        slots = torch.tensor([[1, 3, 0], [3, 1, 0]])
+        modes, casualties = torch.tensor([0, 1]), torch.zeros(2, 75)
+        vector = encoder.encode_vector(codes, mask, modes, casualties, inventory_masks=slots)
         expected = torch.zeros_like(vector)
-        for row, (first, second) in enumerate(((30, 31), (31, 30))):
-            expected[row, first] = 1
-            expected[row, BOARD_CODE_VOCAB_SIZE + second] = 1
-            expected[row, encoder.board_feature_dim + row] = 1
+        expected[:, 0] = expected[:, 26] = 1
+        expected[0, 27] = expected[1, 1] = 1
+        expected[:, 25] = torch.tensor([1, 2])
+        expected[:, 51] = torch.tensor([2, 1])
+        expected[0, encoder.board_feature_dim] = expected[1, encoder.board_feature_dim + 1] = 1
         expected[:, -4:] = 4
         torch.testing.assert_close(vector, expected)
         padded_codes = torch.nn.functional.pad(codes, (0, 126), value=BOARD_PAD_CODE)
         padded_mask = torch.nn.functional.pad(mask, (0, 126), value=False)
+        padded_slots = torch.nn.functional.pad(slots, (0, 126), value=0)
         torch.testing.assert_close(
-            encoder(codes, mask, torch.tensor([0, 1]), None),
-            encoder(padded_codes, padded_mask, torch.tensor([0, 1]), None),
-        )
-        # An empty real square is a category; a missing/padded square is absent.
-        empty = encoder.encode_vector(torch.tensor([[0]]), torch.tensor([[True]]), torch.tensor([0]), None)
-        absent = encoder.encode_vector(torch.tensor([[0]]), torch.tensor([[False]]), torch.tensor([0]), None)
-        self.assertEqual(float((empty - absent).sum()), 1)
+            encoder(codes, mask, modes, casualties, inventory_masks=slots),
+            encoder(padded_codes, padded_mask, modes, casualties, inventory_masks=padded_slots))
+        values = (torch.tensor([[0]]), torch.tensor([0]), casualties[:1])
+        empty = encoder.encode_vector(values[0], torch.tensor([[True]]), values[1], values[2], inventory_masks=torch.tensor([[0]]))
+        absent = encoder.encode_vector(values[0], torch.tensor([[False]]), values[1], values[2], inventory_masks=torch.tensor([[0]]))
+        torch.testing.assert_close(empty, absent)
 
-    def test_casualties_are_part_of_the_same_projection_and_removed_when_disabled(self):
-        enabled = WholeBoardEncoder(ModelConfig.tiny())
-        disabled = WholeBoardEncoder(ModelConfig.tiny(dead_rules_enabled=False))
-        self.assertEqual(enabled.projection.weight.numel() - disabled.projection.weight.numel(), 75 * 32)
+    def test_candidate_masks_and_casualties_are_required(self):
+        encoder = WholeBoardEncoder(ModelConfig.tiny())
         codes, mask, modes = torch.tensor([[30]]), torch.tensor([[True]]), torch.tensor([0])
         dead = torch.zeros(1, 75)
         dead[0, 7] = 1
-        vector = enabled.encode_vector(codes, mask, modes, dead)
+        vector = encoder.encode_vector(codes, mask, modes, dead, inventory_masks=torch.ones_like(codes))
         torch.testing.assert_close(vector[:, -79:-4], dead)
-        with self.assertRaisesRegex(ValueError, "absent"):
-            disabled(codes, mask, modes, dead)
-        with self.assertRaisesRegex(ValueError, "casualty_bits"):
-            enabled(codes, mask, modes, None)
+        with self.assertRaisesRegex(ValueError, 'candidate masks'):
+            encoder(codes, mask, modes, dead)
+        with self.assertRaisesRegex(ValueError, 'casualty_bits'):
+            encoder(codes, mask, modes, None, inventory_masks=torch.ones_like(codes))
 
-    def test_invalid_categories_cannot_alias_another_point_or_auxiliary_field(self):
-        encoder = WholeBoardEncoder(ModelConfig.tiny(dead_rules_enabled=False))
-        for codes, modes in (([[139]], [0]), ([[-1]], [0]), ([[0]], [-1]), ([[0]], [3])):
-            with self.subTest(codes=codes, modes=modes), self.assertRaises(RuntimeError):
-                encoder.encode_vector(
-                    torch.tensor(codes), torch.tensor([[True]]), torch.tensor(modes), None
-                )
+    def test_legacy_history_is_rejected_instead_of_dropping_candidates(self):
+        mode = TrainingMode.FOUR_DARK
+        game = new_game(mode, seed=504)
+        history = GameHistory.initialize(game, mode)
+        serialized = history.state_dict()
+        for player in serialized['players']:
+            for record in player['records']:
+                record.pop('inventory_masks')
+        with self.assertRaisesRegex(ValueError, 'inventory candidate masks'):
+            GameHistory.from_state_dict(serialized)
+        with self.assertRaisesRegex(ValueError, 'inventory candidate masks'):
+            record_array(replace(history.players[0].records[0], inventory_masks=None), mode, True)
+        with self.assertRaisesRegex(ValueError, 'observation width'):
+            HistoryArrayView(mode, True, (0, 0), 0, (np.zeros((1, 129 + 75 + 14), dtype=np.int16),))
 
-    def test_repeated_cached_state_needs_no_board_encoding_and_matches_uncached_policy(self):
+    def test_repeated_cached_state_matches_uncached_policy(self):
         for mode in TrainingMode:
-            config = ModelConfig.tiny()
-            model = GamePolicyTransformer(config).eval()
+            model = GamePolicyTransformer(ModelConfig.tiny()).eval()
             reference = copy.deepcopy(model)
             game = new_game(mode, seed=503)
-            history = GameHistory.initialize(game, mode, max_transitions=16)
-            state = history.state_for(game)
+            state = GameHistory.initialize(game, mode, max_transitions=16).state_for(game)
             model.start_inference_board_cache()
             with torch.inference_mode():
                 first = model.encode([state])
@@ -109,21 +111,44 @@ class WholeBoardEncoderTests(unittest.TestCase):
                 self.assertEqual(model._board_encoder_tokens, count)
                 torch.testing.assert_close(cached.context, first.context)
                 logs = model([state], [state.legal_actions])[0]
-                expected = reference([state], [state.legal_actions])[0]
-                torch.testing.assert_close(logs, expected)
+                torch.testing.assert_close(logs, reference([state], [state.legal_actions])[0])
                 self.assertAlmostEqual(float(logs.exp().sum()), 1.0, places=5)
                 sampled, sampled_logs = model.sample_action_groups([state], count=8)
                 self.assertTrue(all(action in state.legal_actions for action in sampled[0]))
-                recomputed = reference([state], sampled)[0]
-                torch.testing.assert_close(sampled_logs[0], recomputed)
+                torch.testing.assert_close(sampled_logs[0], reference([state], sampled)[0])
 
-    def test_old_spatial_checkpoints_are_rejected_before_loading_weights(self):
-        require_current_checkpoint({"format_version": CHECKPOINT_FORMAT_VERSION})
-        with self.assertRaisesRegex(ValueError, "whole-board linear.*version 6"):
-            require_current_checkpoint({"format_version": 4})
-        with self.assertRaisesRegex(ValueError, "unsupported board encoder"):
-            replace(ModelConfig.tiny(), board_encoder_type="graph_transformer")
+    def test_old_board_architectures_are_rejected_before_loading_weights(self):
+        payload = {'format_version': CHECKPOINT_FORMAT_VERSION, 'config': {'model': asdict(ModelConfig.tiny())}}
+        require_current_checkpoint(payload)
+        for version in range(4, 15):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, 'multihot.*version 15'):
+                require_current_checkpoint({**payload, 'format_version': version})
+        for architecture in ('whole_board_one_hot_linear', 'graph_transformer'):
+            with self.subTest(architecture=architecture):
+                with self.assertRaisesRegex(ValueError, 'unsupported board encoder'):
+                    replace(ModelConfig.tiny(), board_encoder_type=architecture)
+                with self.assertRaisesRegex(ValueError, 'multihot'):
+                    require_current_checkpoint({**payload, 'config': {'model': {'board_encoder_type': architecture}}})
+        with self.assertRaisesRegex(ValueError, '3436 board inputs'):
+            require_current_checkpoint({**payload, 'policy': {'board_encoder.projection.weight': torch.empty(32, 129 * 139 + 82)}})
+
+    def test_yaml_cannot_select_the_removed_encoder_even_with_tiny_or_scale_overrides(self):
+        base = yaml.safe_load((Path(__file__).parents[1] / 'configs/bootstrap.yaml').read_text(encoding='utf-8'))
+        for scope in ('policy', 'four_player'):
+            data = copy.deepcopy(base)
+            if scope == 'policy':
+                data['models']['policy']['board_encoder']['architecture'] = 'whole_board_one_hot_linear'
+            else:
+                data['models']['four_player']['board_encoder_type'] = 'whole_board_one_hot_linear'
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'old_encoder.yaml'
+                path.write_text(yaml.safe_dump(data), encoding='utf-8')
+                for tiny in (False, True):
+                    for scale in ('bootstrap', 'main', 'extended'):
+                        with self.subTest(scope=scope, tiny=tiny, scale=scale):
+                            with self.assertRaisesRegex(ValueError, 'unsupported board encoder'):
+                                TrainingSettings.from_yaml(path, TrainingMode.FOUR_DARK, tiny=tiny, model_scale=scale)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

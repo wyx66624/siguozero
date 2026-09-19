@@ -6,7 +6,6 @@ immutable training histories and synchronizes complete games at rollout bounds.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import lru_cache
 import io
 import os
@@ -17,22 +16,25 @@ import subprocess
 import sys
 import time
 import traceback
+from typing import NamedTuple
 
 import numpy as np
 
 from ..game import GameConfig, JunqiGame
 from .packed_observation import observation_rows
 from .futile_attack import step_with_evidence
+from .tactical_rewards import bomb_event
 
 
-@dataclass(frozen=True, slots=True)
-class EnvironmentState:
+class EnvironmentState(NamedTuple):
     player: int | None
     legal_actions: tuple[tuple[int, int], ...]
 
 
-@dataclass(frozen=True, slots=True)
-class EnvironmentStep:
+class EnvironmentStep(NamedTuple):
+    # These immutable messages cross the pipes once per move. Tuple reduction
+    # avoids dataclass field introspection and Python setattr loops on every
+    # unpickle, without changing their fields or retaining referee game objects.
     index: int
     state: EnvironmentState
     records: np.ndarray
@@ -43,6 +45,8 @@ class EnvironmentStep:
     flag_captured_owner: int | None = None
     futile_attack: bool = False
     centralized_records: np.ndarray | None = None
+    bomb_owner: int | None = None
+    bombed_kind: str | None = None
 
 
 def environment_state(game):
@@ -61,11 +65,13 @@ def _advance(index, game, action, mode, *, track_futile_attacks=False, centraliz
     centralized_rows = None
     if centralized_critic:
         from .mappo_encoding import centralized_observation_rows
-        centralized_rows = centralized_observation_rows(game, mode)
+        centralized_rows = centralized_observation_rows(game, mode, public_rows=rows)
+    bomb_owner, bombed_kind = bomb_event(result)
     return EnvironmentStep(index, environment_state(game), rows, terminal,
                            rewards[player] if terminal else 0., rewards,
                            1 if terminal or game.team_of(game.current_player) == team else -1,
-                           result.flag_captured_owner, futile_attack, centralized_rows)
+                           result.flag_captured_owner, futile_attack, centralized_rows,
+                           bomb_owner, bombed_kind)
 
 
 @lru_cache(maxsize=2)

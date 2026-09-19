@@ -117,7 +117,10 @@ class FutileAttackTests(unittest.TestCase):
         self.assertTrue(penalized)
 
     def test_tracking_works_without_exact_identity_rules_and_disabled_path_is_plain_rules(self):
-        game, _ = prepare(dead=False)
+        game = position(dead=False)
+        step_with_evidence(game, action(game, FIRST, TARGET), enabled=True)
+        while game.current_player != 0:
+            step_with_evidence(game, (0, 0), enabled=True)
         self.assertTrue(step_with_evidence(game, action(game, SECOND, TARGET), enabled=True)[1])
         game = position()
         step_with_evidence(game, action(game, FIRST, TARGET), enabled=False)

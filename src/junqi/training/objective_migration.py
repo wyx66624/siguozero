@@ -82,3 +82,26 @@ def reconcile_futile_attack_objective(payload, settings, *, adopt: bool = False)
     config["futile_attack_penalty"] = target
     config["futile_attack_ema_decay"] = settings.futile_attack_ema_decay
     config["target_environment_plies"] = settings.target_environment_plies
+
+
+def reconcile_bomb_objective(payload, settings, *, adopt: bool = False):
+    from .tactical_rewards import BOMB_REWARD_FIELDS
+    config = payload["config"]
+    old = {field: float(config.get(field, 0.0)) for field in BOMB_REWARD_FIELDS.values()}
+    target = {field: float(getattr(settings, field)) for field in BOMB_REWARD_FIELDS.values()}
+    if old == target and (not any(target.values()) or
+                          config.get("target_environment_plies") == settings.target_environment_plies):
+        return
+    if not adopt:
+        raise RuntimeError("bomb rewards changed across resume; use --adopt-bomb-rewards to preserve state and adopt them explicitly")
+    state = payload["trainer_state"]
+    state["bomb_objective_migration"] = {
+        "update": int(payload["update"]),
+        "environment_plies": state.get("cumulative", {}).get("environment_plies", 0),
+        "from_rewards": old, "to_rewards": target,
+        "from_target_environment_plies": config.get("target_environment_plies"),
+        "to_target_environment_plies": settings.target_environment_plies,
+        "scope": "future_mappo_transitions_only", "perspective": "bomb_owner_team",
+        "schedule": "linear_global_steps_zero_at_half_budget", "terminal_reward": "additive",
+    }
+    config.update(target)

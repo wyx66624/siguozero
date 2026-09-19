@@ -19,34 +19,38 @@ from .accelerator import (
 )
 
 
-# Version 6 uses a five-number coordinate/player action projection and histories
-# without event outcome features. Version 5's action embeddings are incompatible.
-from .checkpoint_format import CHECKPOINT_FORMAT_VERSION, SUPPORTED_CHECKPOINT_FORMAT_VERSIONS, checkpoint_format_for_model
+from .checkpoint_format import (ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION, CHECKPOINT_FORMAT_VERSION,
+                                SUPPORTED_CHECKPOINT_FORMAT_VERSIONS, checkpoint_format_for_model)
 
 
 def require_current_checkpoint(payload: dict[str, Any]) -> None:
     if payload.get("format_version") not in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS:
         raise ValueError(
             f"unsupported checkpoint format: {payload.get('format_version')!r}; "
-            "supported architecture versions are 6 through 10. "
+            "exclusive-slot inventory multihot checkpoint architectures require version 15 or 16. "
             "Use a new run directory; old board/action encoder weights are incompatible."
         )
-    if payload.get("format_version") in (8, 9, 10):
+    version = payload.get("format_version")
+    model = payload.get("config", {}).get("model", {})
+    architecture = checkpoint_format_for_model(model)
+    if version != architecture:
+        raise ValueError("checkpoint version does not match board/action encoding; use a new run directory")
+    if version in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS:
         for name in ("policy", "critic", "reference_policy"):
             weights = payload.get(name) or {}
             action = weights.get("action_encoder.projection.weight")
-            if action is not None and (action.ndim != 2 or action.shape[1] != 6):
-                raise ValueError("version 8+ checkpoint requires six action inputs")
+            expected_action = 10 if version == ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION else 6
+            if action is not None and (action.ndim != 2 or action.shape[1] != expected_action):
+                raise ValueError(f"version {version} checkpoint requires {expected_action} action inputs")
+            if version == ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION and any(key in weights for key in (
+                    "no_interaction_embedding.weight", "active_embedding.weight", "revealed_embedding.weight")):
+                raise ValueError("joint action checkpoint must not contain separate countdown/alive/revealed embeddings")
             board = weights.get("board_encoder.projection.weight")
-            if payload["format_version"] >= 9 and board is not None:
-                from .encoding import BOARD_CODE_VOCAB_SIZE
-                expected = 129 * BOARD_CODE_VOCAB_SIZE + 3 + (75 if payload["dead_rules_enabled"] else 0) + 4
+            if board is not None:
+                expected = 129 * 26 + 3 + 75 + 4
                 if board.ndim != 2 or board.shape[1] != expected:
-                    raise ValueError("version 9+ checkpoint requires four pass inputs on the board encoder")
-    if payload.get("format_version") == 10:
-        model = payload.get("config", {}).get("model", {})
-        if checkpoint_format_for_model(model) != 10:
-            raise ValueError("version 10 checkpoint requires the concat-token SwiGLU contract")
+                    raise ValueError("inventory multihot checkpoint requires 3436 board inputs")
+    if version in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS:
         weights = payload.get("critic")
         if payload.get("algorithm") == "mappo" and weights is not None:
             if "value_head.weight" not in weights or any(key.startswith("draw_value_head.") for key in weights):
@@ -229,49 +233,6 @@ class CheckpointManager:
         return payload
 
 
-def _extend_counter_optimizer_state(optimizer: torch.optim.Optimizer, model: nn.Module) -> None:
-    """Preserve old Adam moments; new input rows/columns have zero moments."""
-    for name, parameter in model.named_parameters():
-        if name not in ("no_interaction_embedding.weight", "action_encoder.projection.weight", "board_encoder.projection.weight"):
-            continue
-        state = optimizer.state.get(parameter, {})
-        for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
-            value = state.get(key)
-            if (name == "no_interaction_embedding.weight" and value is not None and value.shape == (61, parameter.shape[1])
-                    and parameter.shape[0] == 71):
-                state[key] = torch.cat((value, value.new_zeros((10, value.shape[1]))), dim=0)
-            elif (name == "action_encoder.projection.weight" and value is not None
-                  and value.shape == (parameter.shape[0], 5) and parameter.shape[1] == 6):
-                state[key] = torch.cat((value, value.new_zeros((value.shape[0], 1))), dim=1)
-            elif (name == "board_encoder.projection.weight" and value is not None
-                  and value.shape == (parameter.shape[0], parameter.shape[1] - 4)):
-                state[key] = torch.cat((value, value.new_zeros((value.shape[0], 4))), dim=1)
-
-
-def _legacy_critic_state(payload, critic):
-    """Only known pre-v8 checkpoints may omit the shared draw-value head."""
-    weights, optimizer = payload["critic"], payload["critic_optimizer"]
-    if payload["format_version"] not in (6, 7):
-        return weights, optimizer
-    added = [name for name, _ in critic.named_parameters() if name.startswith("draw_value_head.")
-             and name not in weights]
-    if not added:
-        return weights, optimizer
-    if set(added) != {"draw_value_head.weight", "draw_value_head.bias"}:
-        raise RuntimeError("legacy critic contains a partial draw-value head")
-    groups = optimizer["param_groups"]
-    if len(groups) != 1 or len(groups[0]["params"]) + len(added) != len(list(critic.parameters())):
-        raise RuntimeError("legacy critic optimizer parameter order is incompatible")
-    weights = dict(weights)
-    parameters = dict(critic.named_parameters())
-    for name in added:
-        weights[name] = torch.zeros_like(parameters[name], device="cpu")
-    next_id = max(groups[0]["params"], default=-1) + 1
-    optimizer = {**optimizer, "param_groups": [
-        {**groups[0], "params": [*groups[0]["params"], *range(next_id, next_id + len(added))]}]}
-    return weights, optimizer
-
-
 def restore_training_state(
     payload: dict[str, Any],
     *,
@@ -305,10 +266,14 @@ def restore_training_state(
             "use a new run directory for a different algorithm or architecture"
         )
     if expected_algorithm == "mappo":
-        if (critic is None or payload.get("format_version") != 10
+        if (critic is None or payload.get("format_version") != checkpoint_format_for_model(policy.config)
                 or payload.get("config", {}).get("critic_layers") != critic.config.temporal_layers):
             raise RuntimeError("MAPPO architecture/critic depth changed across resume")
         saved_model = payload.get("config", {}).get("model", {})
+        if ((saved_model.get("action_dim") or saved_model.get("board_dim")) != policy.config.action_embedding_dim
+                or saved_model.get("board_encoder_type") != policy.config.board_encoder_type
+                or saved_model.get("action_encoder_type", "coordinates_player_linear") != policy.config.action_encoder_type):
+            raise RuntimeError("MAPPO board/action encoding changed across resume; use a new run directory")
         for name in ("board_dim", "temporal_dim", "temporal_layers", "temporal_heads", "token_fusion_hidden_dim"):
             if saved_model.get(name) != getattr(policy.config, name):
                 raise RuntimeError(f"MAPPO model configuration changed across resume: {name}")
@@ -322,12 +287,9 @@ def restore_training_state(
         reference_policy.load_state_dict(payload["reference_policy"], strict=True)
     reference_layout.load_state_dict(payload["reference_layout"], strict=True)
     policy_optimizer.load_state_dict(payload["policy_optimizer"])
-    _extend_counter_optimizer_state(policy_optimizer, policy)
     layout_optimizer.load_state_dict(payload["layout_optimizer"])
     if critic is not None and critic_optimizer is not None:
-        critic_weights, critic_moments = _legacy_critic_state(payload, critic)
-        critic.load_state_dict(critic_weights, strict=True)
-        critic_optimizer.load_state_dict(critic_moments)
-        _extend_counter_optimizer_state(critic_optimizer, critic)
+        critic.load_state_dict(payload["critic"], strict=True)
+        critic_optimizer.load_state_dict(payload["critic_optimizer"])
     restore_rng_state(payload["rng_state"], accelerator_device)
     return int(payload["update"]), dict(payload.get("trainer_state", {}))

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 import tempfile
 import unittest
@@ -39,8 +39,8 @@ class ObservationEncodingTests(unittest.TestCase):
             self.assertEqual(policy.board_encoder.projection.out_features, 128)
             self.assertEqual(policy.action_encoder.projection.out_features, 128)
             self.assertEqual(critic.value_head.in_features, 256)
-            self.assertEqual(sum(p.numel() for p in policy.parameters()), 36_327_426)
-            self.assertEqual(sum(p.numel() for p in critic.parameters()), 36_212_354)
+            self.assertEqual(sum(p.numel() for p in policy.parameters()), 34_461_570)
+            self.assertEqual(sum(p.numel() for p in critic.parameters()), 34_346_498)
         original = TrainingSettings.from_yaml(config_path, TrainingMode.TWO_PLAYER, model_scale="main")
         self.assertEqual((original.model.board_dim, original.model.temporal_dim,
                           original.model.temporal_ffn_dim), (256, 512, 2048))
@@ -58,72 +58,19 @@ class ObservationEncodingTests(unittest.TestCase):
             )
             self.assertEqual(settings.policy_microbatch, expected)
 
-    def test_dead_rule_switch_changes_model_and_run_directory(self) -> None:
-        from junqi.training.models import GamePolicyTransformer, parameter_count
+    def test_multihot_requires_dead_rules_and_preserves_run_directory(self) -> None:
+        from junqi.training.models import ModelConfig
         from junqi.training.modes import TrainingMode
         from junqi.training.settings import TrainingSettings
-
         config_path = Path(__file__).parents[1] / "configs" / "bootstrap.yaml"
-        enabled = TrainingSettings.from_yaml(
-            config_path,
-            TrainingMode.TWO_PLAYER,
-            tiny=True,
-            dead_rules_enabled=True,
-        )
-        disabled = TrainingSettings.from_yaml(
-            config_path,
-            TrainingMode.TWO_PLAYER,
-            tiny=True,
-            dead_rules_enabled=False,
-        )
-        self.assertEqual(
-            enabled.resolve_run_directory("runs/two_player").name,
-            "with_dead_rules",
-        )
-        self.assertEqual(
-            disabled.resolve_run_directory("runs/two_player").name,
-            "without_dead_rules",
-        )
+        enabled = TrainingSettings.from_yaml(config_path, TrainingMode.TWO_PLAYER, tiny=True)
+        self.assertEqual(enabled.resolve_run_directory("runs/two_player").name, "with_dead_rules")
         with self.assertRaisesRegex(ValueError, "contradicts"):
             enabled.resolve_run_directory("runs/two_player/without_dead_rules")
-
-        enabled_policy = GamePolicyTransformer(enabled.model)
-        disabled_policy = GamePolicyTransformer(disabled.model)
-        self.assertEqual(enabled_policy.board_encoder.casualty_feature_dim, 75)
-        self.assertEqual(disabled_policy.board_encoder.casualty_feature_dim, 0)
-        self.assertEqual(enabled_policy.board_encoder.input_dim - disabled_policy.board_encoder.input_dim, 75)
-        self.assertGreater(
-            parameter_count(enabled_policy), parameter_count(disabled_policy)
-        )
-
-    def test_disabled_dead_rules_build_no_casualty_tensor(self) -> None:
-        from junqi.training.encoding import GameHistory
-        from junqi.training.models import (
-            GamePolicyTransformer,
-            ModelConfig,
-            collate_policy_states,
-        )
-        from junqi.training.modes import TrainingMode, new_game
-
-        model = GamePolicyTransformer(
+        with self.assertRaisesRegex(ValueError, "requires deterministic dead rules"):
+            TrainingSettings.from_yaml(config_path, TrainingMode.TWO_PLAYER, tiny=True, dead_rules_enabled=False)
+        with self.assertRaisesRegex(ValueError, "requires deterministic dead rules"):
             ModelConfig.tiny(dead_rules_enabled=False)
-        ).eval()
-        states = []
-        for mode in TrainingMode:
-            game = new_game(mode, seed=91, dead_rules_enabled=False)
-            history = GameHistory.initialize(game, mode)
-            state = history.state_for(game)
-            states.append(state)
-            self.assertIsNone(state.records[0].known_casualty_bits)
-            batch = collate_policy_states(
-                [state], device="cpu", dead_rules_enabled=False
-            )
-            self.assertIsNone(batch.casualty_bits)
-            self.assertEqual(model.encode([state]).context.shape, (1, 64))
-        with self.assertRaisesRegex(ValueError, "requires casualty"):
-            collate_policy_states(
-                [states[-1]], device="cpu", dead_rules_enabled=True
-            )
 
     def test_configuration_rejects_per_seat_model_instances(self) -> None:
         import yaml
@@ -676,7 +623,7 @@ class CheckpointTests(unittest.TestCase):
                 policy_optimizer=policy_optimizer,
                 layout_optimizer=layout_optimizer,
                 trainer_state={"marker": 9},
-                config={"model": {}},
+                config={"model": asdict(policy.config)},
                 archive=True,
                 reason="test",
             )

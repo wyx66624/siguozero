@@ -137,6 +137,8 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
                         help="adopt the configured PPO flag reward for future steps, preserving the complete latest checkpoint")
     parser.add_argument("--adopt-futile-attack-penalty", action="store_true",
                         help="adopt the temporary PPO known-losing-attack penalty while preserving the complete latest checkpoint")
+    parser.add_argument("--adopt-bomb-rewards", action="store_true",
+                        help="adopt the temporary MAPPO bomb rewards for future steps, preserving the complete latest checkpoint")
     parser.add_argument("--adopt-champion-evaluation", action="store_true",
                         help="switch future evaluations to the historical champion while preserving training state and completed reports")
     parser.add_argument("--adopt-pass-rule", action="store_true",
@@ -361,6 +363,7 @@ def main(
             adopt_draw_penalty=args.adopt_draw_penalty,
             adopt_flag_capture_reward=args.adopt_flag_capture_reward,
             adopt_futile_attack_penalty=args.adopt_futile_attack_penalty,
+            adopt_bomb_rewards=args.adopt_bomb_rewards,
             adopt_champion_evaluation=args.adopt_champion_evaluation,
             adopt_pass_rule=args.adopt_pass_rule,
             expand_game_pool=args.expand_game_pool,

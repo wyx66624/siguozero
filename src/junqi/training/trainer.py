@@ -91,6 +91,7 @@ class SelfPlayTrainer:
         adopt_draw_penalty: bool = False,
         adopt_flag_capture_reward: bool = False,
         adopt_futile_attack_penalty: bool = False,
+        adopt_bomb_rewards: bool = False,
         adopt_champion_evaluation: bool = False,
         adopt_pass_rule: bool = False,
         expand_game_pool: bool = False,
@@ -104,6 +105,7 @@ class SelfPlayTrainer:
         self.adopt_draw_penalty = adopt_draw_penalty
         self.adopt_flag_capture_reward = adopt_flag_capture_reward
         self.adopt_futile_attack_penalty = adopt_futile_attack_penalty
+        self.adopt_bomb_rewards = adopt_bomb_rewards
         self.adopt_pass_rule = adopt_pass_rule
         self.expand_game_pool = expand_game_pool
         self.reset_oom_batch_limits = reset_oom_batch_limits
@@ -114,6 +116,7 @@ class SelfPlayTrainer:
         self.draw_objective_migration = None
         self.flag_capture_objective_migration = None
         self.futile_attack_objective_migration = None
+        self.bomb_objective_migration = None
         from .futile_attack import FutileAttackPenalty
         self.futile_attack_controller = FutileAttackPenalty(
             settings.futile_attack_penalty, settings.target_environment_plies, settings.futile_attack_ema_decay)
@@ -156,7 +159,11 @@ class SelfPlayTrainer:
         self.run_directory = settings.resolve_run_directory(run_directory).resolve()
         if self.distributed.primary:
             self.run_directory.mkdir(parents=True, exist_ok=True)
-            had_existing_run_artifacts = any(self.run_directory.iterdir())
+            # Storage may be provisioned as empty mounts/junctions before the
+            # first run. Any file or nonempty directory still requires latest.pt.
+            had_existing_run_artifacts = any(not (
+                path.name in ("checkpoints", "historical_opponents")
+                and path.is_dir() and not any(path.iterdir())) for path in self.run_directory.iterdir())
         else:
             had_existing_run_artifacts = False
         self.distributed.barrier()
@@ -205,8 +212,13 @@ class SelfPlayTrainer:
             target_kl=settings.target_kl, high_kl_multiple=settings.early_stop_kl_multiple,
             increase_factor=settings.lr_increase_factor, decrease_factor=settings.lr_decrease_factor,
             stable_updates=settings.lr_stable_updates, cooldown_updates=settings.lr_cooldown_updates,
-            ema_decay=settings.lr_ema_decay, recovery_clip_fraction=settings.lr_recovery_clip_fraction,
+            ema_decay=settings.lr_ema_decay,
+            kl_band_lower=settings.lr_kl_band_lower, kl_band_upper=settings.lr_kl_band_upper,
         ) if settings.adaptive_learning_rate else None)
+        if settings.lr_increase_on_full_epochs or settings.lr_kl_band_lower is not None:
+            # Fresh runs start at the floor; resumes below retain their actual
+            # previous LR instead of jumping to the feedback controller ceiling.
+            self.lr_controller.scale = settings.minimum_learning_rate / settings.maximum_learning_rate
         self.entropy_opening_plies = min(settings.entropy_opening_plies, settings.model.max_transitions)
         entropy_targets = scheduled_entropy_targets(settings, 0)
         self.entropy_controllers = {
@@ -366,8 +378,9 @@ class SelfPlayTrainer:
         self._export_live_inference()
         self._install_signal_handlers()
         if resumed and (adopt_current_draw_rules or adopt_draw_penalty or adopt_pass_rule or
-                        adopt_flag_capture_reward or adopt_champion_evaluation or adopt_futile_attack_penalty):
+                        adopt_flag_capture_reward or adopt_champion_evaluation or adopt_futile_attack_penalty or adopt_bomb_rewards):
             self.save_checkpoint(reason="champion_evaluation_migration" if adopt_champion_evaluation else
+                                 "bomb_objective_migration" if adopt_bomb_rewards else
                                  "futile_attack_objective_migration" if adopt_futile_attack_penalty else
                                  "flag_capture_objective_migration" if adopt_flag_capture_reward else
                                  "pass_rule_migration" if adopt_pass_rule else
@@ -523,6 +536,7 @@ class SelfPlayTrainer:
         resolved["draw_objective_migration"] = self.draw_objective_migration
         resolved["flag_capture_objective_migration"] = self.flag_capture_objective_migration
         resolved["futile_attack_objective_migration"] = self.futile_attack_objective_migration
+        resolved["bomb_objective_migration"] = self.bomb_objective_migration
         resolved["pass_rule_migration"] = self.pass_rule_migration
         resolved["initialized_from"] = (
             None if self.initialize_from is None else str(self.initialize_from)
@@ -562,13 +576,7 @@ class SelfPlayTrainer:
         self.reference_layout.load_state_dict(self.layout.state_dict())
         if self.critic is not None:
             if payload.get("algorithm") == self.settings.algorithm and "critic" in payload:
-                # Weight-only initialization also accepts the pre-draw head.
-                weights = dict(payload["critic"])
-                if self.settings.algorithm == "ppo" and payload["format_version"] in (6, 7):
-                    for name in ("draw_value_head.weight", "draw_value_head.bias"):
-                        if name not in weights:
-                            weights[name] = torch.zeros_like(self.critic.state_dict()[name])
-                self.critic.load_state_dict(weights, strict=True)
+                self.critic.load_state_dict(payload["critic"], strict=True)
             else:
                 self.critic.initialize_from_policy(self.policy)
         self.logger.event(f"initialized model weights from {path}; new optimizers and counters")
@@ -592,6 +600,10 @@ class SelfPlayTrainer:
         from .objective_migration import reconcile_draw_objective, reconcile_flag_capture_objective
         reconcile_draw_objective(payload, self.settings, adopt=self.adopt_draw_penalty)
         reconcile_flag_capture_objective(payload, self.settings, adopt=self.adopt_flag_capture_reward)
+        # Check the original saved budget before the older penalty migration
+        # updates it, so neither objective silently adopts a new decay horizon.
+        from .objective_migration import reconcile_bomb_objective
+        reconcile_bomb_objective(payload, self.settings, adopt=self.adopt_bomb_rewards)
         from .objective_migration import reconcile_futile_attack_objective
         reconcile_futile_attack_objective(payload, self.settings, adopt=self.adopt_futile_attack_penalty)
         self.update, trainer_state = restore_training_state(
@@ -618,6 +630,33 @@ class SelfPlayTrainer:
             self.lr_controller.load_state_dict(trainer_state.get("adaptive_learning_rate"),
                 legacy_scale=self.policy_lr_scale,
                 scheduled=self._scheduled_learning_rate(self.update + 1))
+            if self.settings.lr_increase_on_full_epochs or self.settings.lr_kl_band_lower is not None:
+                saved_config = payload.get("config", {})
+                saved_controller = trainer_state.get("adaptive_learning_rate") or {}
+                adopting_band = (self.settings.lr_kl_band_lower is not None
+                                 and saved_config.get("lr_kl_band_lower") is None)
+                if adopting_band:
+                    # Discard the old controller's pending 50%/40% jump. Start
+                    # the new observation window at the actual saved rate.
+                    rate = self.policy_optimizer.param_groups[0]["lr"]
+                    self.logger.event(f"LR feedback changed to KL band "
+                        f"[{self.settings.lr_kl_band_lower}, {self.settings.lr_kl_band_upper}]; "
+                        f"preserved actual LR={rate:.8g}; reset KL trend observations")
+                elif (saved_config.get("lr_increase_on_full_epochs", False)
+                      or saved_config.get("lr_kl_band_lower") is not None):
+                    # The multiplier is relative to the ceiling in this mode.
+                    # Preserve the saved next rate even if that ceiling changes.
+                    saved_scale = saved_controller.get("scale", self.policy_lr_scale)
+                    saved_maximum = saved_config["maximum_learning_rate"]
+                    rate = min(saved_maximum, max(saved_config["minimum_learning_rate"],
+                                                 saved_maximum * saved_scale))
+                else:
+                    # Switching from warmup/cosine must not reinterpret scale=1
+                    # as permission to jump immediately to the new 1e-4 bound.
+                    rate = self.policy_optimizer.param_groups[0]["lr"]
+                    self.logger.event(f"LR feedback changed to constant-reference control; preserved actual LR={rate:.8g}")
+                self.lr_controller.scale = rate / self.settings.maximum_learning_rate
+                self.lr_controller.rate(self.settings.maximum_learning_rate)
             self.policy_lr_scale = self.lr_controller.scale
         for phase, controller in self.entropy_controllers.items():
             controller.load_state_dict(trainer_state.get("adaptive_entropy", {}).get(phase))
@@ -683,6 +722,7 @@ class SelfPlayTrainer:
         self.draw_objective_migration = trainer_state.get("draw_objective_migration")
         self.flag_capture_objective_migration = trainer_state.get("flag_capture_objective_migration")
         self.futile_attack_objective_migration = trainer_state.get("futile_attack_objective_migration")
+        self.bomb_objective_migration = trainer_state.get("bomb_objective_migration")
         if self.settings.futile_attack_penalty and "futile_attack_penalty" not in trainer_state:
             raise RuntimeError("enabled futile attack penalty has no saved decay state")
         self.futile_attack_controller.load_state_dict(trainer_state.get("futile_attack_penalty"))
@@ -830,6 +870,10 @@ class SelfPlayTrainer:
 
     def _scheduled_learning_rate(self, update: int) -> float:
         settings = self.settings
+        if settings.lr_increase_on_full_epochs or settings.lr_kl_band_lower is not None:
+            # A constant reference makes feedback changes actual LR changes,
+            # with no independent warmup rise or late cosine reduction.
+            return settings.maximum_learning_rate
         if update <= settings.warmup_updates:
             fraction = update / max(settings.warmup_updates, 1)
             scheduled = settings.policy_learning_rate * fraction
@@ -1086,7 +1130,10 @@ class SelfPlayTrainer:
     ) -> dict[str, float]:
         # One target per complete learner update, held across minibatches/epochs.
         targets = self._sync_entropy_targets()
-        if self.settings.algorithm in ("ppo", "mappo") and len(groups) > self.settings.ppo_minibatch_samples:
+        if self.settings.algorithm in ("ppo", "mappo") and (
+            len(groups) > self.settings.ppo_minibatch_samples or self.settings.lr_increase_on_full_epochs
+            or self.settings.lr_kl_band_lower is not None
+        ):
             metrics = self._update_ppo_minibatches(groups, critic=False)
         else:
             metrics = self._update_policy_batch(groups)
@@ -1115,7 +1162,8 @@ class SelfPlayTrainer:
                 metrics[f"{prefix}_ratio_ema"] = controller.entropy_ema
         metrics["optimizer/adaptive_lr_enabled"] = float(self.lr_controller is not None)
         metrics.update({"policy/target_kl": self.settings.target_kl,
-                        "policy/early_stop_kl_threshold": self.settings.target_kl * self.settings.early_stop_kl_multiple,
+                         "policy/early_stop_kl_threshold": self._policy_kl_stop_threshold(),
+                         "policy/early_stop_kl_probe_only": float(self.settings.lr_kl_band_lower is not None),
                         "policy/early_stop_clip_fraction": self.settings.early_stop_clip_fraction,
                         "optimizer/policy_epochs_max": self.settings.policy_epochs})
         if self.lr_controller is not None:
@@ -1130,7 +1178,10 @@ class SelfPlayTrainer:
         probe = diagnostic_sequences(samples, limit=self.settings.lr_probe_samples,
             sequence_length=self.settings.ppo_max_samples_per_sequence,
             seed=self.settings.seed + 1_000_003 * (self.update + 1) + self.distributed.rank)
-        totals = torch.zeros(2, device=self.device)
+        moment_names = ("policy/approx_kl_old", "policy/clip_fraction", "policy/entropy",
+                        "policy/opening_entropy_ratio_mass", "policy/opening_entropy_fraction",
+                        "policy/other_entropy_ratio_mass", "policy/other_entropy_fraction")
+        totals = torch.zeros(len(moment_names), device=self.device)
         was_training = self.policy.training
         self.policy.eval()
         try:
@@ -1141,34 +1192,55 @@ class SelfPlayTrainer:
                     with self._autocast():
                         output = policy_ppo_loss(self.policy, chunk,
                             clip_epsilon=self.settings.clip_epsilon, entropy_coefficient=0.,
+                            opening_entropy_coefficient=0., entropy_opening_plies=self.entropy_opening_plies,
                             policy_clip=self._policy_clip(),
                             sequence_training=self._sequence_training_enabled(), defer_metrics=True)
-                    totals += torch.stack([output.metrics["policy/approx_kl_old"],
-                                           output.metrics["policy/clip_fraction"]]) * len(chunk)
+                    totals += torch.stack([output.metrics[key] for key in moment_names]) * len(chunk)
         finally:
             self.policy.train(was_training)
-        values = totals.cpu().tolist()  # one transfer, only two scalar moments
-        sums = self.distributed.sum_metrics(dict(kl=values[0], clip=values[1], count=len(probe)))
+        values = totals.cpu().tolist()  # one transfer, scalar moments only
+        sums = self.distributed.sum_metrics(dict(zip(
+            ("kl", "clip", "entropy", "opening_ratio", "opening_count", "other_ratio", "other_count"),
+            values, strict=True)) | {"count": len(probe)})
         count = sums["count"]
         result = {"policy/final_probe_samples": count,
                   "timing/lr_probe_seconds": self.distributed.reduce_float(
                       time.perf_counter() - started, operation="max")}
         if count:
             result.update({"policy/final_kl": sums["kl"] / count,
-                           "policy/final_clip_fraction": sums["clip"] / count})
+                           "policy/final_clip_fraction": sums["clip"] / count,
+                           "policy/final_entropy": sums["entropy"] / count})
+            eligible = sums["opening_count"] + sums["other_count"]
+            if eligible:
+                result["policy/final_entropy_ratio"] = (sums["opening_ratio"] + sums["other_ratio"]) / eligible
+            for phase in ("opening", "other"):
+                if sums[f"{phase}_count"]:
+                    result[f"policy/final_{phase}_entropy_ratio"] = sums[f"{phase}_ratio"] / sums[f"{phase}_count"]
         return result
 
     def _finish_learning_rate(self, samples, metrics) -> dict:
         controller = self.lr_controller
-        diagnostics = (self._final_policy_diagnostics(samples)
+        diagnostics = ({key: value for key, value in metrics.items()
+                        if key.startswith("policy/final_") or key == "timing/lr_probe_seconds"}
+                       if "policy/final_probe_samples" in metrics else
+                       self._final_policy_diagnostics(samples)
                        if metrics.get("optimizer/policy_steps", 0) > 0 else
                        {"policy/final_probe_samples": 0., "timing/lr_probe_seconds": 0.})
         next_base = self._scheduled_learning_rate(self.update + 2)
+        completion_mode = self.settings.lr_increase_on_full_epochs
+        band_mode = self.settings.lr_kl_band_lower is not None
+        kl_feedback = diagnostics.get("policy/final_kl")
+        if completion_mode and kl_feedback is not None:
+            kl_feedback = max(kl_feedback, metrics.get("policy/minibatch_kl_max", 0.),
+                              metrics.get("policy/epoch_kl_max", 0.))
         next_lr, direction = controller.observe(scheduled=next_base,
-            kl=diagnostics.get("policy/final_kl"),
-            clip_fraction=diagnostics.get("policy/final_clip_fraction"),
-            early_stopped=bool(metrics.get("optimizer/policy_early_stopped", 0)),
-            allow_increase=self.update + 1 > self.settings.warmup_updates)
+            kl=kl_feedback,
+            # A clip-only early stop is not a learning-rate feedback signal.
+            early_stopped=bool(metrics.get("optimizer/policy_stop_kl", 0)),
+            allow_increase=completion_mode or band_mode or self.update + 1 > self.settings.warmup_updates,
+            full_epochs_completed=(metrics.get("optimizer/policy_epochs", 0) >= self.settings.policy_epochs
+                and metrics.get("optimizer/policy_first_pass_coverage", 0) == 1.
+                if completion_mode else None))
         self.policy_lr_scale = controller.scale
         diagnostics.update({"optimizer/policy_lr_next": next_lr,
             "optimizer/policy_lr_min": self.settings.minimum_learning_rate,
@@ -1178,15 +1250,30 @@ class SelfPlayTrainer:
             "optimizer/lr_direction": direction,
             "optimizer/lr_reason": controller.reason,
             "optimizer/lr_stable_count": controller.stable_count,
+            "optimizer/lr_stable_direction": controller.stable_direction,
             "optimizer/lr_stable_required": controller.stable_updates,
             "optimizer/lr_cooldown": controller.cooldown,
             "optimizer/lr_scale_reduced": float(direction < 0),
             "optimizer/lr_scale_increased": float(direction > 0),
             "optimizer/critic_lr": self.critic_optimizer.param_groups[0]["lr"],
+            "optimizer/lr_feedback_kl_only": 1.,
+            "policy/lr_kl_feedback": kl_feedback or 0.,
+            "optimizer/lr_increase_on_full_epochs": float(completion_mode),
+            "optimizer/lr_kl_band_enabled": float(band_mode),
         })
+        if band_mode:
+            diagnostics.update({"optimizer/lr_kl_band_lower": self.settings.lr_kl_band_lower,
+                "optimizer/lr_kl_band_upper": self.settings.lr_kl_band_upper,
+                "optimizer/lr_increase_factor": self.settings.lr_increase_factor,
+                "optimizer/lr_decrease_factor": self.settings.lr_decrease_factor,
+                "optimizer/lr_cooldown_updates": self.settings.lr_cooldown_updates})
         if controller.kl_ema is not None:
             diagnostics["policy/final_kl_ema"] = controller.kl_ema
         return diagnostics
+
+    def _policy_kl_stop_threshold(self) -> float:
+        upper = getattr(self.settings, "lr_kl_band_upper", None)
+        return upper if upper is not None else self.settings.target_kl * self.settings.early_stop_kl_multiple
 
     def _ppo_optimizer_batches(self, samples):
         if self._sequence_training_enabled():
@@ -1207,27 +1294,62 @@ class SelfPlayTrainer:
         epochs = self.settings.critic_epochs if critic else self.settings.policy_epochs
         aggregate: dict[str, float] = {}
         processed = steps = 0
+        eligible_total = sum(getattr(sample, "learnable", True) for sample in samples)
+        eligible_processed = 0
         stop = False
         max_kl = max_clip = 0.
         stop_kl = stop_clip = False
-        for _ in range(epochs):
+        epoch_diagnostics: dict[str, float] = {}
+        final_diagnostics: dict[str, float] = {}
+        probe_seconds = max_epoch_kl = 0.
+        band_mode = getattr(self.settings, "lr_kl_band_lower", None) is not None
+        kl_stop_threshold = self._policy_kl_stop_threshold()
+        probe_epochs = not critic and (getattr(self.settings, "lr_increase_on_full_epochs", False) or band_mode)
+        for epoch in range(epochs):
+            epoch_start = processed
+            epoch_steps = steps
+            entropy_sum = 0.
             for batch in self._ppo_optimizer_batches(samples):
                 metrics = (self._update_critic_batch(batch, epochs=1) if critic
                            else self._update_policy_batch(batch, epochs=1))
                 for key, value in metrics.items():
                     aggregate[key] = aggregate.get(key, 0.) + value * len(batch)
                 processed += len(batch)
+                entropy_sum += metrics.get("policy/entropy", 0.) * len(batch)
+                eligible_processed += sum(getattr(sample, "learnable", True) for sample in batch)
                 steps += int(metrics.get("optimizer/critic_steps" if critic else "optimizer/policy_steps", 1))
                 if not critic:
                     max_kl = max(max_kl, metrics["policy/approx_kl_old"])
                     max_clip = max(max_clip, metrics["policy/clip_fraction"])
-                    stop_kl = metrics["policy/approx_kl_old"] > self.settings.early_stop_kl_multiple * self.settings.target_kl
-                    stop_clip = metrics["policy/clip_fraction"] > self.settings.early_stop_clip_fraction
+                    if not band_mode:
+                        stop_kl |= metrics["policy/approx_kl_old"] > kl_stop_threshold
+                    stop_clip |= metrics["policy/clip_fraction"] > self.settings.early_stop_clip_fraction
                 if not critic and (
                     stop_kl or stop_clip
-                ):
+                ) and processed >= self.settings.ppo_min_policy_epochs * len(samples):
                     stop = True
                     break
+            if probe_epochs:
+                # The deterministic sample selection is identical within this
+                # update, so epoch endpoints compare the same observations.
+                final_diagnostics = self._final_policy_diagnostics(samples)
+                probe_seconds += final_diagnostics["timing/lr_probe_seconds"]
+                epoch_kl = final_diagnostics.get("policy/final_kl", 0.)
+                max_epoch_kl = max(max_epoch_kl, epoch_kl)
+                stop_kl |= epoch_kl > kl_stop_threshold
+                stop_clip |= final_diagnostics.get("policy/final_clip_fraction", 0.) > self.settings.early_stop_clip_fraction
+                if (stop_kl or stop_clip) and processed >= self.settings.ppo_min_policy_epochs * len(samples):
+                    stop = True
+                prefix = f"policy/epoch_{epoch + 1}/"
+                epoch_diagnostics.update({prefix + key.removeprefix("policy/"): value
+                    for key, value in final_diagnostics.items() if key.startswith("policy/")})
+                epoch_diagnostics.update({prefix + "coverage": (processed - epoch_start) / len(samples),
+                    prefix + "optimizer_steps": float(steps - epoch_steps),
+                    prefix + "training_entropy": entropy_sum / max(1, processed - epoch_start)})
+                self.logger.event(f"update={self.update + 1} ppo_epoch={epoch + 1}/{epochs} "
+                    f"coverage={(processed - epoch_start) / len(samples):.6f} "
+                    f"KL={epoch_kl:.6f} entropy={final_diagnostics.get('policy/final_entropy', 0.):.6f} "
+                    f"clip={final_diagnostics.get('policy/final_clip_fraction', 0.):.6f} stop_kl={int(stop_kl)}")
             if stop:
                 break
         aggregate = {key: value / processed for key, value in aggregate.items()}
@@ -1237,9 +1359,17 @@ class SelfPlayTrainer:
         if not critic:
             aggregate.update({"policy/minibatch_kl_max": max_kl,
                 "policy/minibatch_clip_max": max_clip,
-                "optimizer/policy_early_stopped": float(stop),
+                "optimizer/policy_early_stopped": float(stop and processed < epochs * len(samples)),
+                "optimizer/policy_first_pass_samples": float(min(eligible_processed, eligible_total)),
+                "optimizer/policy_first_pass_coverage": min(1., eligible_processed / max(1, eligible_total)),
+                "optimizer/policy_minimum_epochs": float(self.settings.ppo_min_policy_epochs),
                 "optimizer/policy_stop_kl": float(stop_kl),
                 "optimizer/policy_stop_clip": float(stop_clip)})
+            if probe_epochs:
+                aggregate.update(epoch_diagnostics)
+                aggregate.update(final_diagnostics)
+                aggregate["policy/epoch_kl_max"] = max_epoch_kl
+                aggregate["timing/lr_probe_seconds"] = probe_seconds
         return aggregate
 
     def _update_policy_batch(
@@ -1318,8 +1448,9 @@ class SelfPlayTrainer:
             epochs_completed += 1
             aggregate = epoch_metrics
             if (
-                epoch_metrics.get("policy/approx_kl_old", epoch_metrics.get("policy/kl_reference", 0.0))
-                > self.settings.early_stop_kl_multiple * self.settings.target_kl
+                (self.settings.lr_kl_band_lower is None and
+                 epoch_metrics.get("policy/approx_kl_old", epoch_metrics.get("policy/kl_reference", 0.0))
+                 > self._policy_kl_stop_threshold())
                 or epoch_metrics["policy/clip_fraction"]
                 > self.settings.early_stop_clip_fraction
             ):
@@ -1330,11 +1461,12 @@ class SelfPlayTrainer:
         if self.settings.algorithm in ("ppo", "mappo"):
             kl = aggregate.get("policy/approx_kl_old", 0.)
             clipped = aggregate.get("policy/clip_fraction", 0.)
+            stop_for_kl = self.settings.lr_kl_band_lower is None and kl > self._policy_kl_stop_threshold()
             aggregate.update({"policy/minibatch_kl_max": kl, "policy/minibatch_clip_max": clipped,
-                "optimizer/policy_stop_kl": float(kl > self.settings.early_stop_kl_multiple * self.settings.target_kl),
+                "optimizer/policy_stop_kl": float(stop_for_kl),
                 "optimizer/policy_stop_clip": float(clipped > self.settings.early_stop_clip_fraction),
                 "optimizer/policy_early_stopped": float(
-                    kl > self.settings.early_stop_kl_multiple * self.settings.target_kl
+                    stop_for_kl
                     or clipped > self.settings.early_stop_clip_fraction)})
         if self.settings.algorithm not in ("ppo", "mappo") and aggregate.get("policy/kl_reference", 0.0) > 2 * self.settings.target_kl:
             self.policy_lr_scale = max(0.1, self.policy_lr_scale * 0.5)
@@ -1505,6 +1637,7 @@ class SelfPlayTrainer:
             "draw_objective_migration": self.draw_objective_migration,
             "flag_capture_objective_migration": self.flag_capture_objective_migration,
             "futile_attack_objective_migration": self.futile_attack_objective_migration,
+            "bomb_objective_migration": self.bomb_objective_migration,
             "futile_attack_penalty": self.futile_attack_controller.state_dict(),
             "policy_lr_scale": self.policy_lr_scale,
             "adaptive_learning_rate": (self.lr_controller.state_dict()
@@ -1709,6 +1842,9 @@ class SelfPlayTrainer:
             "flag_captures",
             "nonterminal_flag_captures",
             "futile_attacks",
+            "bombed_commanders",
+            "bombed_army_commanders",
+            "bombed_division_commanders",
         )
         aggregated = RolloutMetrics()
         for field in summed_fields:
@@ -1726,6 +1862,7 @@ class SelfPlayTrainer:
         aggregated.futile_attack_reward_abs_sum = self.distributed.reduce_float(
             metrics.futile_attack_reward_abs_sum, operation="sum"
         )
+        aggregated.bomb_reward_sum = self.distributed.reduce_float(metrics.bomb_reward_sum, operation="sum")
         aggregated.actor_inference_seconds = self.distributed.reduce_float(
             metrics.actor_inference_seconds, operation="max"
         )
@@ -1755,7 +1892,10 @@ class SelfPlayTrainer:
         # budget; every actually executed branch transition must still count.
         count = min(self.local_anchor_batch, math.ceil(remaining / self.distributed.world_size))
         cutoff_remaining = self.futile_attack_controller.stop_environment_plies - self.cumulative["environment_plies"]
-        if self.settings.futile_attack_penalty and cutoff_remaining >= self.distributed.world_size:
+        from .tactical_rewards import BOMB_REWARD_FIELDS
+        shaping = self.settings.futile_attack_penalty or any(
+            getattr(self.settings, field, 0.0) for field in BOMB_REWARD_FIELDS.values())
+        if shaping and cutoff_remaining >= self.distributed.world_size:
             count = min(count, cutoff_remaining // self.distributed.world_size)
         return count
 
@@ -1766,6 +1906,12 @@ class SelfPlayTrainer:
         if self.futile_attack_controller.stop_environment_plies - progress < self.distributed.world_size:
             return 0.0
         return self.futile_attack_controller.coefficient(progress)
+
+    def _bomb_reward_coefficients(self):
+        from .tactical_rewards import BOMB_REWARD_FIELDS, halfway_reward_scale
+        scale = halfway_reward_scale(self.cumulative["environment_plies"], self.settings.target_environment_plies,
+                                     world_size=self.distributed.world_size)
+        return {field: getattr(self.settings, field) * scale for field in BOMB_REWARD_FIELDS.values()}
 
     def _gather_layout_outcomes(self, outcomes: Sequence[LayoutOutcome]) -> None:
         self.layout_buffer.advance(self.update + 1, minimum_version=self._layout_minimum_version())
@@ -1827,6 +1973,7 @@ class SelfPlayTrainer:
                 )
                 base_collection_started = time.perf_counter()
                 futile_attack_coefficient = self._futile_attack_coefficient()
+                bomb_rewards = self._bomb_reward_coefficients()
                 if self.settings.algorithm in ("ppo", "mappo"):
                     self.phase = f"{self.settings.algorithm}_trajectory_collection"
                     if (self.settings.rollout_environment_workers > 1 or self.settings.algorithm == "mappo") and self._ppo_environment is None:
@@ -1849,8 +1996,10 @@ class SelfPlayTrainer:
                         draw_reward=self.settings.draw_reward,
                         flag_capture_reward=self.settings.flag_capture_reward,
                         futile_attack_penalty=futile_attack_coefficient,
+                        **(bomb_rewards if self.settings.algorithm == "mappo" else {}),
                     )
                     groups = self._normalize_ppo_batch(samples)
+                    del samples  # Normalized samples retain every required history.
                     if not self.settings.ppo_deferred_values:
                         actor.max_batch_size = min(actor.max_batch_size, value_actor.max_batch_size)
                     base_collection_seconds = 0.0
@@ -1934,6 +2083,10 @@ class SelfPlayTrainer:
                         time.perf_counter() - layout_backward_started,
                         operation="max",
                     )
+                # Do not keep a completed batch alive while collecting the next
+                # one. Histories still needed by live games/layout buffers have
+                # their own references; this drops only consumed training data.
+                del groups, layout_outcomes
                 self.update = next_update
 
                 for key, value in (
@@ -1978,6 +2131,9 @@ class SelfPlayTrainer:
                     "rules/max_passes_per_player": self.settings.max_passes_per_player,
                     "training/draw_reward": self.settings.draw_reward,
                     "training/flag_capture_reward": self.settings.flag_capture_reward,
+                    **{f"training/{field}": value for field, value in bomb_rewards.items()},
+                    **{f"training/{field}_initial": getattr(self.settings, field) for field in bomb_rewards},
+                    "training/bomb_reward_stop_environment_plies": (self.settings.target_environment_plies or 0) // 2,
                     "training/futile_attack_penalty": futile_attack_coefficient,
                     "training/futile_attack_penalty_initial": self.settings.futile_attack_penalty,
                     "training/futile_attack_penalty_next": self._futile_attack_coefficient(),

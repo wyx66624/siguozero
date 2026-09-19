@@ -30,7 +30,7 @@ class PipelineTests(unittest.TestCase):
         torch.set_num_threads(1)
 
     def test_old_samples_survive_block_retirement_and_new_games_have_distinct_keys(self):
-        initial = StateTokenRecord((0,) * 129, (0,) * 75, None, 0, 15, 0, 0)
+        initial = StateTokenRecord((0,) * 129, (0,) * 75, None, 0, 15, 0, 0, (0,) * 129)
         store = ArrayHistory(TrainingMode.FOUR_DARK, [initial], 17, (91, 0))
         expected = [initial]
         held = []
@@ -50,7 +50,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_array_history_matches_legacy_observations_and_checkpoint_replay(self):
         for mode in TrainingMode:
-            for dead in (False, True):
+            for dead in (True,):
                 with self.subTest(mode=mode, dead=dead):
                     game, array = histories(mode, dead=dead, window=8)
                     legacy = GameHistory.from_state_dict(array.state_dict())

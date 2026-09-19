@@ -108,45 +108,24 @@ class DrawPenaltyTests(unittest.TestCase):
                 rows = observation_rows(game, mode)
                 self.assertTrue((rows[:, -8] == count).all())
         encoder = PublicActionEncoder(8)
-        old_weight = torch.randn(8, 5)
-        bias = torch.randn(8)
-        encoder.load_state_dict({'projection.weight': old_weight, 'projection.bias': bias})
-        values = torch.randn(3, 6)
-        torch.testing.assert_close(encoder(values, torch.ones(3, dtype=torch.bool)),
-                                  torch.nn.functional.linear(values[:, :5], old_weight, bias))
-        self.assertEqual(encoder.projection.weight[:, 5].count_nonzero(), 0)
+        with self.assertRaises(RuntimeError):
+            encoder.load_state_dict({'projection.weight': torch.randn(8, 5), 'projection.bias': torch.randn(8)})
 
-    def test_v7_migration_preserves_weights_moments_progress_and_histories(self):
+    def test_multihot_reward_migration_preserves_weights_moments_progress_and_histories(self):
         with tempfile.TemporaryDirectory() as directory:
             old_settings = settings(draw_reward=0., max_game_plies=3)
             original = SelfPlayTrainer(old_settings, run_directory=directory, auto_resume=False)
             original.train()
             path = original.checkpoints.latest_path
             payload = torch.load(path, weights_only=False)
-            payload['format_version'] = 7
-            for kind, model in (('policy', original.policy), ('critic', original.critic)):
-                weights = payload[kind]
-                weights['action_encoder.projection.weight'] = weights['action_encoder.projection.weight'][:, :5].clone()
-                optimizer = payload[kind + '_optimizer']
-                names = [name for name, _ in model.named_parameters()]
-                ids = optimizer['param_groups'][0]['params']
-                state = optimizer['state'][ids[names.index('action_encoder.projection.weight')]]
-                for moment in ('exp_avg', 'exp_avg_sq'):
-                    state[moment] = state[moment][:, :5].clone()
-                if kind == 'critic':
-                    for name in ('draw_value_head.weight', 'draw_value_head.bias'):
-                        weights.pop(name)
-                    for parameter_id in ids[-2:]:
-                        optimizer['state'].pop(parameter_id, None)
-                    optimizer['param_groups'][0]['params'] = ids[:-2]
             torch.save(payload, path)
             expected_pool = copy.deepcopy(payload['trainer_state']['base_game_pool'])
             target = replace(old_settings, draw_reward=-.15, total_updates=2)
             with self.assertRaisesRegex(RuntimeError, 'adopt-draw-penalty'):
                 SelfPlayTrainer(target, run_directory=directory, adopt_pass_rule=True)
-            # Frozen old inference snapshots are still usable without rewriting their files.
+            # Existing multihot inference snapshots stay usable without rewriting their files.
             engine = InferenceEngine.from_checkpoint(path, device='cpu')
-            self.assertEqual(engine.policy.action_encoder.projection.weight[:, 5].count_nonzero(), 0)
+            torch.testing.assert_close(engine.policy.action_encoder.projection.weight, payload['policy']['action_encoder.projection.weight'])
             resumed = SelfPlayTrainer(target, run_directory=directory, adopt_draw_penalty=True, adopt_pass_rule=True)
             try:
                 self.assertEqual(resumed.update, 1)
@@ -157,21 +136,17 @@ class DrawPenaltyTests(unittest.TestCase):
                                                ('critic', resumed.critic, resumed.critic_optimizer)):
                     for name, weight in payload[kind].items():
                         actual = model.state_dict()[name]
-                        if name == 'action_encoder.projection.weight':
-                            actual = actual[:, :5]
                         torch.testing.assert_close(actual, weight, rtol=0, atol=0)
                     parameter = model.action_encoder.projection.weight
                     ids = payload[kind + '_optimizer']['param_groups'][0]['params']
                     names = [name for name, _ in model.named_parameters()]
                     saved = payload[kind + '_optimizer']['state'][ids[names.index('action_encoder.projection.weight')]]
                     for moment in ('exp_avg', 'exp_avg_sq'):
-                        torch.testing.assert_close(optimizer.state[parameter][moment][:, :5], saved[moment], rtol=0, atol=0)
-                        self.assertEqual(optimizer.state[parameter][moment][:, 5].count_nonzero(), 0)
-                self.assertEqual(resumed.critic.draw_value_head.weight.count_nonzero(), 0)
+                        torch.testing.assert_close(optimizer.state[parameter][moment], saved[moment], rtol=0, atol=0)
                 resumed.train()
                 self.assertEqual(resumed.update, 2)
                 saved = torch.load(path, weights_only=False)
-                self.assertEqual(saved['format_version'], 9)
+                self.assertEqual(saved['format_version'], 15)
                 self.assertEqual(saved['config']['draw_reward'], -.15)
                 self.assertEqual(saved['trainer_state']['draw_objective_migration']['update'], 1)
             finally:

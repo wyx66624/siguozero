@@ -93,6 +93,9 @@ def clean_numbers(value):
 class Monitor:
     def __init__(self, config, root):
         self.root = Path(root).resolve()
+        self.target_days = float(config.get("target_days", 20))
+        if not math.isfinite(self.target_days) or self.target_days <= 0:
+            raise ValueError("target_days must be finite and positive")
         self.outcomes = OutcomeStore(self.root / "output/local_console/outcomes.sqlite3")
         self.specs = []
         for spec in config["runs"]:
@@ -306,6 +309,8 @@ class Monitor:
                 "cycle_rate": cycle_rate, "inner_rate": steps / seconds if seconds > 0 else None,
                 "rate_updates": max(0, len(window) - 1), "eta_seconds": remaining / cycle_rate if cycle_rate else None,
                 "required_rate_20d": remaining / (20 * 86400),
+                "target_days": self.target_days,
+                "required_rate_target": remaining / (self.target_days * 86400),
                 "metrics_age": now - latest["timestamp_unix"] if latest.get("timestamp_unix") is not None else None,
                 "metrics": latest, "resource": heartbeat if fresh else {}, "chart": chart,
                 "outcomes": outcomes, "evaluation_outcomes": evaluation_outcomes(run, selection, spec["mode"]),

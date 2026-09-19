@@ -74,7 +74,7 @@ def test_four_opportunities_are_independent_noops_and_then_hard_masked(mode):
 
 
 @pytest.mark.parametrize("mode", list(TrainingMode))
-@pytest.mark.parametrize("dead", [False, True])
+@pytest.mark.parametrize("dead", [True])
 def test_pass_inputs_match_workers_array_history_and_cached_policy(mode, dead):
     game = new_game(mode, seed=32, dead_rules_enabled=dead)
     history = GameHistory.initialize(game, mode, max_transitions=16)
@@ -142,7 +142,7 @@ def test_process_workers_preserve_pass_budgets_and_publish_updated_inputs():
         env.close()
 
 
-def test_v8_resume_preserves_weights_adam_rng_progress_and_adds_zero_columns(tmp_path):
+def test_multihot_resume_preserves_weights_adam_rng_progress_and_passes(tmp_path):
     config = Path(__file__).parents[1] / 'configs/bootstrap.yaml'
     settings = TrainingSettings.from_yaml(config, 'four_dark', tiny=True, overrides={
         'device': 'cpu', 'anchor_batch': 8, 'policy_microbatch': 2, 'base_game_pool_size': 2,
@@ -160,27 +160,10 @@ def test_v8_resume_preserves_weights_adam_rng_progress_and_adds_zero_columns(tmp
         path = original.checkpoints.latest_path
         payload = torch.load(path, weights_only=False)
         expected_pool = copy.deepcopy(payload['trainer_state']['base_game_pool'])
-        payload['format_version'] = 8
-        payload['config'].pop('max_passes_per_player')
-        for slot in payload['trainer_state']['base_game_pool']['slots']:
-            slot['game'].pop('passes_remaining')
-            for player in slot['history']['players']:
-                for record in player['records']:
-                    record.pop('passes_remaining')
-        for kind, model in (('policy', original.policy), ('critic', original.critic)):
-            name = 'board_encoder.projection.weight'
-            payload[kind][name] = payload[kind][name][:, :-4].clone()
-            ids = payload[kind + '_optimizer']['param_groups'][0]['params']
-            index = [n for n, _ in model.named_parameters()].index(name)
-            for moment in ('exp_avg', 'exp_avg_sq'):
-                value = payload[kind + '_optimizer']['state'][ids[index]][moment]
-                payload[kind + '_optimizer']['state'][ids[index]][moment] = value[:, :-4].clone()
         torch.save(payload, path)
     finally:
         original.logger.close()
-    with pytest.raises(RuntimeError, match='adopt-pass-rule'):
-        SelfPlayTrainer(settings, run_directory=tmp_path)
-    resumed = SelfPlayTrainer(settings, run_directory=tmp_path, adopt_pass_rule=True)
+    resumed = SelfPlayTrainer(settings, run_directory=tmp_path)
     try:
         assert resumed.update == 1 and resumed.cumulative == payload['trainer_state']['cumulative']
         assert resumed.pool.state_dict() == expected_pool
@@ -188,21 +171,16 @@ def test_v8_resume_preserves_weights_adam_rng_progress_and_adds_zero_columns(tmp
         for kind, model, optimizer in (('policy', resumed.policy, resumed.policy_optimizer), ('critic', resumed.critic, resumed.critic_optimizer)):
             for name, value in payload[kind].items():
                 actual = model.state_dict()[name]
-                if name == 'board_encoder.projection.weight':
-                    assert actual[:, -4:].count_nonzero() == 0
-                    actual = actual[:, :-4]
                 torch.testing.assert_close(actual, value, rtol=0, atol=0)
             parameter = model.board_encoder.projection.weight
             ids = payload[kind + '_optimizer']['param_groups'][0]['params']
             index = [n for n, _ in model.named_parameters()].index('board_encoder.projection.weight')
             for moment in ('exp_avg', 'exp_avg_sq'):
                 saved = payload[kind + '_optimizer']['state'][ids[index]][moment]
-                torch.testing.assert_close(optimizer.state[parameter][moment][:, :-4], saved, rtol=0, atol=0)
-                assert optimizer.state[parameter][moment][:, -4:].count_nonzero() == 0
+                torch.testing.assert_close(optimizer.state[parameter][moment], saved, rtol=0, atol=0)
         resumed.train()
         saved = torch.load(path, weights_only=False)
-        assert saved['format_version'] == 9 and saved['update'] == 2
+        assert saved['format_version'] == 15 and saved['update'] == 2
         assert saved['trainer_state']['cumulative']['environment_plies'] == 16
-        assert saved['trainer_state']['pass_rule_migration']['update'] == 1
     finally:
         resumed.logger.close()

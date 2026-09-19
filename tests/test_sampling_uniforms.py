@@ -160,8 +160,10 @@ class SamplingUniformTests(unittest.TestCase):
         actor = FrozenPolicyActor(policy, max_batch_size=4)
         uniforms = torch.rand((5, 2, 2), generator=torch.Generator().manual_seed(25))
         original_uniforms = uniforms.clone()
+        class PrivateState(int):
+            centralized = False
         with patch("junqi.training.rollout.empty_cache") as empty_cache:
-            actions, logs = actor.sample(list(range(5)), count=2, sampling_uniforms=uniforms, return_log_probs=False)
+            actions, logs = actor.sample([PrivateState(i) for i in range(5)], count=2, sampling_uniforms=uniforms, return_log_probs=False)
         self.assertEqual(actions, [[(state, sample) for sample in range(2)] for state in range(5)])
         self.assertEqual(logs, [])
         self.assertEqual(actor.max_batch_size, 2)

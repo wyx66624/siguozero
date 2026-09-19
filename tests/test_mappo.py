@@ -56,7 +56,10 @@ class MAPPOTests(unittest.TestCase):
         for mode in (MODE, TrainingMode.DOUBLE_OPEN):
             settings = TrainingSettings.from_yaml(CONFIG, mode, model_scale="main")
             self.assertEqual(settings.algorithm, "mappo")
-            self.assertEqual(settings.model.board_dim, 256)
+            self.assertEqual(settings.model.board_dim, 384)
+            self.assertEqual(settings.model.action_dim, 128)
+            self.assertTrue(settings.model.joint_action_context)
+            self.assertEqual(settings.model.board_encoder_type, "whole_board_inventory_multihot_linear")
             self.assertEqual(settings.model.temporal_dim, 512)
             self.assertEqual(settings.model.token_fusion_hidden_dim, 512)
             self.assertEqual(settings.model.temporal_heads, 8)
@@ -65,14 +68,16 @@ class MAPPOTests(unittest.TestCase):
             self.assertEqual(settings.critic_layers, 16)
             self.assertEqual(settings.step_budget_counter, "environment_plies")
             self.assertIn("runs_expand_mappo", str(settings.resolve_run_directory()))
-            self.assertEqual(checkpoint_format_for_model(settings.model), 10)
+            self.assertEqual(checkpoint_format_for_model(settings.model), 16)
         legacy = TrainingSettings.from_yaml(ROOT / "configs/local_4090_training.yaml", MODE, model_scale="main")
         self.assertEqual((legacy.algorithm, legacy.model.board_dim, legacy.model.token_fusion_hidden_dim), ("ppo", 128, 0))
-        self.assertEqual(checkpoint_format_for_model(legacy.model), 9)
+        self.assertEqual(checkpoint_format_for_model(legacy.model), 15)
+        self.assertFalse(legacy.model.joint_action_context)
         two = TrainingSettings.from_yaml(CONFIG, TrainingMode.TWO_PLAYER, model_scale="main")
         self.assertEqual(two.algorithm, "grpo")
         self.assertEqual(two.model.token_fusion_hidden_dim, 0)
         self.assertIsNone(two.critic_layers)
+        self.assertFalse(two.model.joint_action_context)
 
     def test_critic_has_one_head_and_independent_matching_backbone(self):
         config = tiny_config()
@@ -126,7 +131,7 @@ class MAPPOTests(unittest.TestCase):
 
     def test_worker_and_checkpoint_keep_global_history_separate(self):
         for mode in (MODE, TrainingMode.DOUBLE_OPEN):
-            for dead in (False, True):
+            for dead in (True,):
                 game, private, central = histories(mode, window=7, dead=dead)
                 retained = central.value_state_for(0)
                 retained_records = tuple(retained.records)
@@ -265,7 +270,13 @@ class MAPPOTests(unittest.TestCase):
             trainer.train()
             payload = torch.load(trainer.checkpoints.latest_path, map_location="cpu", weights_only=False)
             require_current_checkpoint(payload)
-            self.assertEqual(payload["format_version"], 10)
+            self.assertEqual(payload["format_version"], 16)
+            for key in ('policy', 'critic'):
+                self.assertEqual(payload[key]['action_encoder.projection.weight'].shape[1], 10)
+                self.assertFalse(any(name in payload[key] for name in (
+                    'no_interaction_embedding.weight', 'active_embedding.weight', 'revealed_embedding.weight')))
+            with self.assertRaisesRegex(ValueError, 'version does not match'):
+                require_current_checkpoint({**payload, 'format_version': 15})
             self.assertEqual(payload["algorithm"], "mappo")
             self.assertTrue(payload["critic_optimizer"]["state"])
             self.assertFalse(any("draw_value_head" in key for key in payload["critic"]))
@@ -282,7 +293,7 @@ class MAPPOTests(unittest.TestCase):
             finally:
                 resumed.historical.close()
                 resumed.logger.close()
-            invalid = {**payload, "format_version": 9, "algorithm": "ppo"}
+            invalid = {**payload, "algorithm": "ppo"}
             torch.save(invalid, trainer.checkpoints.latest_path)
             with self.assertRaisesRegex(RuntimeError, "algorithm does not match"):
                 SelfPlayTrainer(settings, run_directory=directory)

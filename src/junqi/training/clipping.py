@@ -1,7 +1,8 @@
 """Bounded, progress-scheduled advantage-aware PPO clipping.
 
 The upper-bound erf modulation follows ACPO (arXiv:2510.00690, eqs. 5-6).
-The progress schedule is a project-specific extension, not its reuse curriculum.
+The progress schedule, absolute-advantage bounds and optional unclipped tail are
+project-specific extensions, not its reuse curriculum.
 Advantages are the detached, globally normalized PPO rollout advantages; never
 renormalize inside a microbatch or include frozen seats/padding in their moments.
 """
@@ -30,6 +31,8 @@ class PolicyClip:
     minimum: float = 0.1
     maximum: float = 0.45
     progress: float = 0.0
+    absolute_advantage: bool = False
+    unclipped_advantage_threshold: float = 0.0
 
     @classmethod
     def fixed(cls, epsilon):
@@ -41,7 +44,9 @@ class PolicyClip:
                 "policy/clip_upper_base": self.upper,
                 "policy/clip_upper_max": min(self.maximum, self.upper + self.bonus),
                 "policy/clip_minimum": self.minimum,
-                "policy/clip_maximum": self.maximum}
+                "policy/clip_maximum": self.maximum,
+                "policy/clip_absolute_advantage": float(self.absolute_advantage),
+                "policy/unclipped_advantage_threshold": self.unclipped_advantage_threshold}
 
 
 def scheduled_policy_clip(settings, environment_plies: int) -> PolicyClip:
@@ -59,7 +64,8 @@ def scheduled_policy_clip(settings, environment_plies: int) -> PolicyClip:
     minimum, maximum = settings.ppo_clip_minimum, settings.ppo_clip_maximum
     return PolicyClip(min(maximum, max(minimum, lower)),
                       min(maximum, max(minimum, upper)),
-                      upper * settings.ppo_clip_advantage_scale, minimum, maximum, progress)
+                      upper * settings.ppo_clip_advantage_scale, minimum, maximum, progress,
+                      settings.ppo_clip_absolute_advantage, settings.ppo_unclipped_advantage_threshold)
 
 
 def advantage_clip_upper(advantage, upper, bonus, minimum, maximum):
@@ -68,8 +74,24 @@ def advantage_clip_upper(advantage, upper, bonus, minimum, maximum):
     return (upper + bonus * percentile).clamp(min=minimum, max=maximum)
 
 
-def clipped_surrogate(ratio, advantage, lower, upper):
+def advantage_clip_bounds(advantage, lower, upper, bonus, minimum, maximum, absolute=False):
+    """Apply the same widening to positive and negative advantage magnitudes."""
+    magnitude = advantage.detach().abs()
+    enabled = torch.as_tensor(absolute, device=advantage.device) > 0
+    signal = torch.where(enabled, magnitude, advantage.detach())
+    high = advantage_clip_upper(signal, upper, bonus, minimum, maximum)
+    low = torch.where(enabled, high.clamp_min(lower), torch.zeros_like(high) + lower)
+    return low, high
+
+
+def unclipped_advantage_mask(advantage, threshold):
+    return (threshold > 0) & (advantage.detach().abs() >= threshold)
+
+
+def clipped_surrogate(ratio, advantage, lower, upper, unclipped_threshold=0.0):
     clipped = ratio.clamp_min(1 - lower).minimum(1 + upper)
     objective = torch.minimum(ratio * advantage, clipped * advantage)
-    outside = (ratio < 1 - lower) | (ratio > 1 + upper)
+    protected = unclipped_advantage_mask(advantage, unclipped_threshold)
+    objective = torch.where(protected, ratio * advantage, objective)
+    outside = ((ratio < 1 - lower) | (ratio > 1 + upper)) & ~protected
     return objective, outside.float()

@@ -24,6 +24,16 @@ BLOCK_ROWS = 256
 OBSERVATION_METADATA_DIM = 14
 
 
+def observation_width(mode, dead_rules):
+    """Metadata offset; slots use two positive int16 words per board point."""
+    return mode_spec(mode).point_count * 3 + (75 if dead_rules else 0)
+
+
+def inventory_words(rows, points, dead_rules):
+    start = points + (75 if dead_rules else 0)
+    return rows[..., start:start + points].long() | (rows[..., start + points:start + 2 * points].long() << 13)
+
+
 def new_history_identity() -> int:
     return next(_IDENTITIES)
 
@@ -40,10 +50,22 @@ def record_array(record: StateTokenRecord, mode: TrainingMode, dead_rules: bool,
     points = mode_spec(mode).point_count
     if len(record.board_codes) != points:
         raise ValueError("history board length does not match its mode")
-    width = points + (75 if dead_rules else 0)
+    width = observation_width(mode, dead_rules)
     row = np.empty(width + OBSERVATION_METADATA_DIM, dtype=np.int16) if out is None else out
+    if row.shape != (width + OBSERVATION_METADATA_DIM,):
+        raise ValueError("history inventory encoding does not match destination")
     row.fill(0)
     row[:points] = record.board_codes
+    if record.inventory_masks is None:
+        raise ValueError("history requires inventory candidate masks; legacy encoding is unsupported")
+    masks = np.asarray(record.inventory_masks, dtype=np.int64)
+    if masks.shape != (points,) or np.any((masks < 0) | (masks >= (1 << 25))):
+        raise ValueError("inventory masks must contain one 25-bit value per point")
+    if np.any((masks == 0) != (np.asarray(record.board_codes) == 0)):
+        raise ValueError("inventory masks must be zero exactly on empty points")
+    begin = points + (75 if dead_rules else 0)
+    row[begin:begin + points] = masks & 8191
+    row[begin + points:begin + 2 * points] = masks >> 13
     if dead_rules:
         bits = record.known_casualty_bits
         expected = 25 if mode is TrainingMode.TWO_PLAYER else 50 if mode is TrainingMode.DOUBLE_OPEN else 75
@@ -64,7 +86,7 @@ def record_array(record: StateTokenRecord, mode: TrainingMode, dead_rules: bool,
         raise ValueError("non-dead-rule model must not receive casualty history")
     if record.action is not None:
         # The sixth model input is derived from the counter already in this
-        # row; retain the compact replay layout and all legacy histories.
+        # row; keep the compact action fields alongside the candidate masks.
         row[width:width + 5] = record.action.as_vector(mode)[:5]
     # Scalars precede no tensor construction; int16 represents all fields exactly.
     row[width + 5:width + 10] = (record.action is not None, record.no_interaction_plies,
@@ -87,6 +109,9 @@ class HistoryArrayView(Sequence[StateTokenRecord]):
                  window_start: int, chunks: tuple[np.ndarray, ...]) -> None:
         self.mode, self.dead_rules, self.identity = mode, dead_rules, identity
         self.window_start, self.chunks = window_start, chunks
+        expected = observation_width(mode, dead_rules) + OBSERVATION_METADATA_DIM
+        if any(chunk.ndim != 2 or chunk.shape[1] != expected for chunk in chunks):
+            raise ValueError("history array has an invalid observation width")
         for chunk in chunks:
             chunk.setflags(write=False)
         self._length = sum(len(chunk) for chunk in chunks)
@@ -139,10 +164,13 @@ class HistoryArrayView(Sequence[StateTokenRecord]):
                 break
             index -= len(chunk)
         points = mode_spec(self.mode).point_count
-        width = points + (75 if self.dead_rules else 0)
+        width = observation_width(self.mode, self.dead_rules)
+        begin = points + (75 if self.dead_rules else 0)
+        masks = tuple(int(a) | (int(b) << 13) for a, b in zip(
+            row[begin:begin + points], row[begin + points:begin + 2 * points]))
         bits = None
         if self.dead_rules:
-            raw = row[points:width]
+            raw = row[points:points + 75]
             if self.mode is TrainingMode.DOUBLE_OPEN:
                 raw = np.concatenate((raw[:25], raw[50:]))
             elif self.mode is TrainingMode.TWO_PLAYER:
@@ -159,7 +187,7 @@ class HistoryArrayView(Sequence[StateTokenRecord]):
                                         coordinates[tuple(row[width + 2:width + 4])], int(row[width + 4]))
         return StateTokenRecord(tuple(map(int, row[:points])), bits, action,
                                 *map(int, row[width + 6:width + 10]),
-                                tuple(map(int, row[width + 10:width + 14])))
+                                masks, tuple(map(int, row[width + 10:width + 14])))
 
     def __iter__(self) -> Iterator[StateTokenRecord]:
         return (self[index] for index in range(len(self)))

@@ -88,6 +88,15 @@ class FixedKVCache:
         self.contexts = torch.empty((self.capacity, config.temporal_dim), device=device,
                                      dtype=self.model.position_embedding.weight.dtype)
 
+    def _indices(self, values) -> Tensor:
+        # Constructing a CUDA tensor directly from a Python list blocks the
+        # host behind queued inference. Stage these small indices just like the
+        # observation/metadata buffers so sampling can stay on the same stream.
+        device = self.model.device
+        pin = supports_pinned_memory(device)
+        host = torch.tensor(values, dtype=torch.long, pin_memory=pin)
+        return host.to(device, non_blocking=pin)
+
     def release_game(self, game_identity: int) -> None:
         for key in list(self.entries):
             if key[0] == game_identity:
@@ -244,7 +253,7 @@ class FixedKVCache:
             for indices in self._prefill_batches(states, cold):
                 features = self.model._encode_full([states[i] for i in indices], count_history_stats=False,
                                                    fixed_slots=[entries[i].slot for i in indices])
-                output.index_copy_(0, torch.tensor(indices, device=output.device), features.context)
+                output.index_copy_(0, self._indices(indices), features.context)
                 padded = len(indices) * max(len(states[i].records) for i in indices)
                 self.prefill_padded_tokens += padded
                 self.prefill_max_padded_tokens = max(self.prefill_max_padded_tokens, padded)
@@ -257,7 +266,7 @@ class FixedKVCache:
             # Stable sizes avoid a separate capture for each rare partial batch.
             batch = ((len(warm) + 7) // 8) * 8 if self.kernels is not None else len(warm)
             view = states[warm[0]].records
-            width = mode_spec(view.mode).point_count + (75 if view.dead_rules else 0) + OBSERVATION_METADATA_DIM
+            width = view.chunks[0].shape[1]
             pin = supports_pinned_memory(output.device)
             raw_cpu = torch.zeros((batch, queries, width), dtype=torch.int16, pin_memory=pin)
             meta_cpu = torch.zeros((batch, 3), dtype=torch.long, pin_memory=pin)
@@ -269,7 +278,7 @@ class FixedKVCache:
             raw = raw_cpu.to(output.device, non_blocking=pin)
             meta = meta_cpu.to(output.device, non_blocking=pin)
             contexts = self._run_decode(raw, meta, extent, states[0].mode)[:len(warm)]
-            output.index_copy_(0, torch.tensor(warm, device=output.device), contexts)
+            output.index_copy_(0, self._indices(warm), contexts)
             self.decode_states += len(warm)
             self.decode_tokens += sum(missing)
             self.submitted_decode_tokens += batch * queries
@@ -284,11 +293,11 @@ class FixedKVCache:
                 count * entries[i].length + count * (count + 1) // 2
                 for i, count in zip(warm, missing, strict=True))
         if cached:
-            slots = torch.tensor([entries[i].slot for i in cached], device=output.device)
-            output.index_copy_(0, torch.tensor(cached, device=output.device), self.contexts.index_select(0, slots))
+            slots = self._indices([entries[i].slot for i in cached])
+            output.index_copy_(0, self._indices(cached), self.contexts.index_select(0, slots))
         # Only commit metadata after every layer succeeded. A failed append
         # leaves old prefixes intact; failed cold fills remain explicitly invalid.
-        slots = torch.tensor([entry.slot for entry in entries], device=output.device)
+        slots = self._indices([entry.slot for entry in entries])
         self.contexts.index_copy_(0, slots, output)
         for state, entry in zip(states, entries, strict=True):
             entry.window_start, entry.length = state.records.window_start, len(state.records)

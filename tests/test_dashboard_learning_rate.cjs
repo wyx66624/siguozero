@@ -32,3 +32,38 @@ test('KL limits and completed epochs use the active run metrics', () => {
  for(const value of ['KL 目标','小批次 KL 早停阈值','0.02','0.04','2.75 / 3'])assert.ok(html.includes(value),value);
  assert.ok(!html.includes('0.015'));
 });
+
+test('full epoch feedback explains actual growth and avoids the obsolete stability gate', () => {
+ const html=context.renderLearningRate({'optimizer/adaptive_lr_enabled':1,
+  'optimizer/lr_increase_on_full_epochs':1,'optimizer/lr_reason':'completed_epochs',
+  'optimizer/lr_feedback_kl_only':1,
+  'optimizer/policy_epochs':3,'optimizer/policy_epochs_max':3,
+  'optimizer/policy_lr_min':5e-6,'optimizer/policy_lr_max':1e-4,
+  'optimizer/lr_clip_recovery_threshold':.1,'optimizer/lr_clip_target':.12,
+  'policy/final_clip_fraction':.0637,'policy/minibatch_clip_max':.25,'policy/lr_kl_feedback':.07});
+ for(const value of ['完整完成全部 epoch','首个 epoch 必须完整训练','3 / 3',
+   '5.000e-6 / 1.000e-4','6.37% / 25%','Clip 探针 / 小批次峰值','本轮 KL 反馈',
+   'KL 反馈未超限','学习率反馈仅使用 KL','Clip 仅作监控'])assert.ok(html.includes(value),value);
+ assert.ok(!html.includes('Clip ≥'));
+ assert.ok(!html.includes('Clip 反馈 / 下降阈值'));
+ assert.ok(!html.includes('稳定轮次 / 要求'));
+ assert.ok(!html.includes('低 KL 也须满足稳定'));
+});
+
+test('KL band explains both streaks, observation period, and the mean KL guard', () => {
+ const m={'optimizer/adaptive_lr_enabled':1,'optimizer/lr_kl_band_enabled':1,
+  'optimizer/lr_kl_band_lower':.08,'optimizer/lr_kl_band_upper':.14,
+  'optimizer/lr_stable_count':2,'optimizer/lr_stable_required':3,
+  'optimizer/lr_cooldown':0,'optimizer/lr_cooldown_updates':3,
+  'optimizer/lr_increase_factor':1.05,'optimizer/lr_decrease_factor':.95,
+  'optimizer/lr_reason':'collecting_high_kl','policy/early_stop_kl_threshold':.14,
+  'policy/final_kl':.15,'policy/approx_kl_old':.01,'policy/target_kl':.02};
+ const html=context.renderLearningRate(m);
+ for(const value of ['累计 KL 偏高轮次','0.08–0.14','2 / 3','epoch 末平均 KL 早停阈值',
+  '上调 5% 或下调 5%','完整观察 3 轮','EMA 仅作参考'])assert.ok(html.includes(value),value);
+ assert.ok(!html.includes('完整完成全部 epoch，提高'));
+ const summary=context.renderKlStat(m);
+ assert.ok(summary.includes('最终平均 KL · 保持 0.08–0.14'));
+ assert.ok(summary.includes('0.15'));
+ assert.ok(!summary.includes('目标 0.02'));
+});

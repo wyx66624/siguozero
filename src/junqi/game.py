@@ -6,6 +6,7 @@ from collections import Counter, deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 import random
 from types import MappingProxyType
 from typing import TypeAlias
@@ -42,6 +43,12 @@ from .pieces import (
 
 Board: TypeAlias = FourPlayerBoard | TwoPlayerBoard
 SetupInput: TypeAlias = PlayerSetup | Mapping[tuple[int, int], PieceType | str]
+
+# The ordinal of each interchangeable copy in the fixed casualty layout.
+_CASUALTY_SLOT_REQUIREMENTS = tuple(
+    (kind, DEPLOYMENT_PIECE_SEQUENCE[:index + 1].count(kind))
+    for index, kind in enumerate(DEPLOYMENT_PIECE_SEQUENCE)
+)
 
 
 class GameRuleError(ValueError):
@@ -191,6 +198,7 @@ class ObservedPiece:
     identity_visible: bool
     has_moved: bool
     candidate_mask: tuple[bool, ...]
+    inventory_mask: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +264,14 @@ class StepResult:
     next_player: int | None
     game_result: GameResult | None
     rewards: tuple[float, ...]
+
+
+@lru_cache(maxsize=2)
+def _shared_game_boards(variant):
+    """Game instances and clones share only immutable board geometry."""
+    if variant is GameVariant.FOUR_PLAYER:
+        return tuple(FourPlayerBoard(FourPlayerSeat(player)) for player in range(4))
+    return tuple(TwoPlayerBoard(TwoPlayerSeat(player)) for player in range(2))
 
 
 class JunqiGame:
@@ -355,6 +371,8 @@ class JunqiGame:
         | None = None,
         public_history: Sequence[PublicEvent] = (),
         passes_remaining: Sequence[int] | None = None,
+        inventory_knowledge: Mapping | None = None,
+        critic_inventory_slots: Mapping[PhysicalPoint, int] | None = None,
     ) -> JunqiGame:
         """Restore a validated mid-game referee position.
 
@@ -411,6 +429,19 @@ class JunqiGame:
         game._validate_player(game._current_player, "current player")
         game._validate_public_history()
         game._validate_position()
+        if critic_inventory_slots is not None:
+            from .inventory import INVENTORY_SLOTS
+            if set(critic_inventory_slots) != set(game._pieces):
+                raise GameRuleError("critic inventory slots must cover exactly the live pieces")
+            used_slots = set()
+            for point, slot in critic_inventory_slots.items():
+                piece = game._pieces[point]
+                if (type(slot) is not int or not 0 <= slot < len(INVENTORY_SLOTS)
+                        or INVENTORY_SLOTS[slot] is not piece.kind
+                        or (piece.owner, slot) in used_slots):
+                    raise GameRuleError("critic inventory slots must be unique per owner and match piece types")
+                used_slots.add((piece.owner, slot))
+            game._critic_inventory_slots = dict(critic_inventory_slots)
 
         for owner in range(config.player_count):
             commander_present = any(
@@ -443,6 +474,10 @@ class JunqiGame:
 
         game._synchronize_revealed_flag_candidates()
         game._share_double_open_knowledge()
+        if inventory_knowledge is not None:
+            from .inventory import InventoryKnowledge
+            game._inventory = InventoryKnowledge.from_state_dict(game, inventory_knowledge)
+            game._inventory.propagate(game)
 
         if not game._finish_if_team_eliminated():
             game._apply_restored_draw_limits()
@@ -454,18 +489,10 @@ class JunqiGame:
         if not isinstance(config, GameConfig):
             raise GameRuleError(f"config must be GameConfig, got {type(config)!r}")
         self.config = config
-        self._boards: tuple[Board, ...] = (
-            tuple(
-                FourPlayerBoard(FourPlayerSeat(player))
-                for player in range(config.player_count)
-            )
-            if config.variant is GameVariant.FOUR_PLAYER
-            else tuple(
-                TwoPlayerBoard(TwoPlayerSeat(player))
-                for player in range(config.player_count)
-            )
-        )
+        self._boards: tuple[Board, ...] = _shared_game_boards(config.variant)
         self._pieces: dict[PhysicalPoint, Piece] = {}
+        self._inventory = None
+        self._critic_inventory_slots: dict[PhysicalPoint, int] | None = None
         self._piece_candidates: dict[PhysicalPoint, frozenset[PieceType]] = {}
         # Exact identities inferred from private-but-legitimate information are
         # viewer-specific.  Keeping them on the game state makes the knowledge
@@ -857,6 +884,9 @@ class JunqiGame:
         clone._boards = self._boards
         clone._pieces = dict(self._pieces)
         clone._piece_candidates = dict(self._piece_candidates)
+        clone._inventory = None if self._inventory is None else self._inventory.clone()
+        clone._critic_inventory_slots = (None if self._critic_inventory_slots is None
+                                        else dict(self._critic_inventory_slots))
         clone._known_identities = [
             dict(known) for known in self._known_identities
         ]
@@ -898,12 +928,8 @@ class JunqiGame:
 
     @staticmethod
     def _casualty_bits(counts: Mapping[PieceType, int]) -> tuple[bool, ...]:
-        used: Counter[PieceType] = Counter()
-        bits: list[bool] = []
-        for kind in DEPLOYMENT_PIECE_SEQUENCE:
-            used[kind] += 1
-            bits.append(used[kind] <= counts.get(kind, 0))
-        return tuple(bits)
+        return tuple(ordinal <= counts.get(kind, 0)
+                     for kind, ordinal in _CASUALTY_SLOT_REQUIREMENTS)
 
     def _share_double_open_knowledge(self) -> None:
         """Synchronize exact knowledge inside each double-open partnership."""
@@ -959,6 +985,10 @@ class JunqiGame:
             return piece.kind
         if not self.config.dead_rules_enabled:
             return None
+        if self._inventory is not None:
+            candidates = self._inventory.live[viewer].get(point, ())
+            if len(candidates) == 1:
+                return next(iter(candidates))
         candidates = self._piece_candidates[point]
         if len(candidates) == 1:
             return next(iter(candidates))
@@ -1015,6 +1045,8 @@ class JunqiGame:
             candidates = {known_kind}
         else:
             candidates = set(public_candidates)
+            if self._inventory is not None:
+                candidates.intersection_update(self._inventory.live[viewer][point])
             if is_attacker:
                 candidates.difference_update((PieceType.MINE, PieceType.FLAG))
             for kind in tuple(candidates):
@@ -1130,12 +1162,25 @@ class JunqiGame:
     ) -> None:
         """Persist only identities forced by every legal hidden combat pair."""
 
+        # A quiet move with identical candidates for every viewer only moves
+        # one variable in an already solved inventory. transition() transports
+        # its confirmed slot too; re-solving all 16 owner/viewer inventories
+        # cannot infer anything new. First moves, engineer turns and battles
+        # still propagate whenever they add public information.
+        unchanged_inventory_move = (
+            self._inventory is not None and defender is None
+            and all(self._inventory.live[viewer][start] == possible
+                    for viewer, possible in enumerate(attacker_candidates))
+        )
         for viewer in range(self.config.player_count):
             remembered = self._known_identities[viewer]
             remembered.pop(start, None)
 
             if defender is None:
                 possible = attacker_candidates[viewer]
+                if self._inventory is not None:
+                    self._inventory.transition(viewer, start, end, attacker.owner, None,
+                                               possible, frozenset(), combat)
                 self._remember_survivor(
                     viewer,
                     end,
@@ -1159,6 +1204,10 @@ class JunqiGame:
 
             possible_attackers = frozenset(pair[0] for pair in pairs)
             possible_defenders = frozenset(pair[1] for pair in pairs)
+            if self._inventory is not None:
+                self._inventory.transition(viewer, start, end, attacker.owner, defender.owner,
+                                           possible_attackers, possible_defenders, combat,
+                                           combat_pairs=pairs, ply=self.ply_count + 1)
             attacker_exact = (
                 next(iter(possible_attackers))
                 if len(possible_attackers) == 1
@@ -1199,6 +1248,56 @@ class JunqiGame:
             remembered.pop(end, None)
 
         self._share_double_open_knowledge()
+        if self._inventory is not None and not unchanged_inventory_move:
+            self._inventory.propagate(self)
+
+    def enable_inventory_tracking(self) -> None:
+        if not self.config.dead_rules_enabled:
+            raise GameRuleError("inventory encoding requires deterministic dead rules")
+        if self._inventory is None:
+            from .inventory import InventoryKnowledge
+            self._inventory = InventoryKnowledge(self)
+            self._inventory.propagate(self)
+
+    def inventory_mask(self, viewer, point) -> int:
+        if self._inventory is None:
+            raise GameRuleError("inventory tracking is not enabled")
+        return self._inventory.mask(self, viewer, point)
+
+    def mutual_removal_history(self, viewer: int) -> tuple:
+        """Return this viewer's current conclusions about recorded exchanges.
+
+        Old observations/tokens remain immutable; later deductions are exposed
+        only in current knowledge and subsequent observations.
+        """
+        self._validate_player(viewer)
+        return () if self._inventory is None else tuple(self._inventory.mutual_removals[viewer])
+
+    def enable_critic_inventory_tracking(self) -> None:
+        """Assign fixed true slots; only already-visible own IDs reach Actors."""
+        if self._critic_inventory_slots is not None:
+            return
+        if self._inventory is not None:
+            # Actor owners have tracked their visible pieces from the start,
+            # even if centralized observations are first requested mid-game.
+            self._critic_inventory_slots = {
+                point: self._inventory.known_slots[piece.owner][point]
+                for point, piece in self._pieces.items()
+            }
+            return
+        from .inventory import INVENTORY_SLOTS
+        by_kind = {kind: tuple(i for i, item in enumerate(INVENTORY_SLOTS) if item is kind)
+                   for kind in PIECE_TYPE_ORDER}
+        used = Counter()
+        slots = {}
+        # Seat-local initial position makes assignment independent of dict order
+        # and viewing seat. Surviving copies are never renumbered after a death.
+        for point, piece in sorted(self._pieces.items(),
+                                   key=lambda item: self._boards[item[1].owner].encode(item[0])):
+            key = (piece.owner, piece.kind)
+            slots[point] = by_kind[piece.kind][used[key]]
+            used[key] += 1
+        self._critic_inventory_slots = slots
 
     def observe(
         self,
@@ -1207,6 +1306,7 @@ class JunqiGame:
         history_limit: int | None = 1000,
         include_legal_masks: bool = True,
         include_candidate_masks: bool = True,
+        include_inventory_masks: bool = False,
     ) -> Observation:
         if viewer is None:
             if self._current_player is None:
@@ -1232,6 +1332,8 @@ class JunqiGame:
             candidates = (
                 frozenset({known_kind})
                 if visible
+                else self._inventory.live[viewer][point]
+                if self._inventory is not None
                 else self._piece_candidates[point]
             )
             visible_points[board.encode(point)] = ObservedPiece(
@@ -1244,6 +1346,7 @@ class JunqiGame:
                     if include_candidate_masks
                     else ()
                 ),
+                inventory_mask=self.inventory_mask(viewer, point) if include_inventory_masks else None,
             )
 
         current_relative = (
@@ -1628,6 +1731,8 @@ class JunqiGame:
     def _eliminate_player(self, player: int) -> None:
         if not self._active[player]:
             return
+        if self._inventory is not None:
+            self._inventory.eliminate(self, player)
         # Elimination removes the owner's complete original inventory.  This is
         # exact public information (most commonly caused by carrying the flag),
         # so every viewer receives a full 25-bit casualty row.
@@ -1640,6 +1745,9 @@ class JunqiGame:
             for point, piece in self._pieces.items()
             if piece.owner != player
         }
+        if self._critic_inventory_slots is not None:
+            self._critic_inventory_slots = {point: slot for point, slot in self._critic_inventory_slots.items()
+                                            if point in self._pieces}
         self._piece_candidates = {
             point: candidates
             for point, candidates in self._piece_candidates.items()
@@ -1800,12 +1908,16 @@ class JunqiGame:
             )
 
         del self._pieces[start_point]
+        attacker_slot = (None if self._critic_inventory_slots is None
+                         else self._critic_inventory_slots.pop(start_point))
         destroyed: list[Piece] = []
         if combat in (CombatOutcome.MOVE, CombatOutcome.ATTACKER_WINS):
             if defender is not None:
                 destroyed.append(defender)
                 del self._piece_candidates[end_point]
             self._pieces[end_point] = attacker.moved()
+            if self._critic_inventory_slots is not None:
+                self._critic_inventory_slots[end_point] = attacker_slot
             self._piece_candidates[end_point] = moved_candidates
         elif combat is CombatOutcome.DEFENDER_WINS:
             destroyed.append(attacker)
@@ -1814,6 +1926,8 @@ class JunqiGame:
             if defender is not None:
                 destroyed.append(defender)
                 del self._pieces[end_point]
+                if self._critic_inventory_slots is not None:
+                    del self._critic_inventory_slots[end_point]
                 del self._piece_candidates[end_point]
 
         newly_revealed_flags = self._reveal_destroyed_commanders(destroyed)
@@ -1977,6 +2091,19 @@ class JunqiGame:
             public_candidates,
             known_identities,
             known_casualties,
+            (None if self._critic_inventory_slots is None else
+             tuple(sorted((reference_board.encode(point), slot)
+                          for point, slot in self._critic_inventory_slots.items()))),
+            (None if self._inventory is None else (
+                tuple(tuple(sorted((reference_board.encode(p), tuple(k.value for k in PIECE_TYPE_ORDER if k in d))
+                                   for p, d in live.items())) for live in self._inventory.live),
+                tuple(tuple(tuple(tuple(k.value for k in PIECE_TYPE_ORDER if k in d) for d in row)
+                            for row in owners) for owners in self._inventory.dead),
+                tuple(tuple(events) for events in self._inventory.mutual_removals),
+                tuple(tuple(sorted((reference_board.encode(p), slot) for p, slot in row.items()))
+                      for row in self._inventory.known_slots),
+                tuple(tuple(row) for row in self._inventory.used_slots),
+            )),
             tuple(self._public_history),
             self.result,
         )

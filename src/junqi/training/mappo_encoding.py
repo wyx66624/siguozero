@@ -6,18 +6,17 @@ Each team has a fixed seat-relative global view, even after that seat is out.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import replace
 
 import numpy as np
 
 from ..pieces import DEPLOYMENT_PIECE_SEQUENCE
-from .encoding import EXACT_PIECE_CODE_STRIDE, OWN_PIECE_CODES, GameHistory, PlayerHistory
-from .history_arrays import HistoryArrayView
+from .encoding import EXACT_PIECE_CODE_STRIDE, OWN_PIECE_CODES, GameHistory, PlayerHistory, PolicyState
+from .history_arrays import HistoryArrayView, observation_width
 from .modes import TrainingMode, mode_spec, normalize_mode
 from .packed_observation import observation_rows
 
 
-def centralized_observation_rows(game, mode):
+def centralized_observation_rows(game, mode, *, public_rows=None):
     """Encode true current pieces, casualties and public rule state, per seat.
 
     Start with a separate allocation of public auxiliary fields; reading hidden
@@ -25,12 +24,20 @@ def centralized_observation_rows(game, mode):
     No future randomness or future actions are included.
     """
     mode = normalize_mode(mode)
-    rows = observation_rows(game, mode)
+    game.enable_inventory_tracking()
+    game.enable_critic_inventory_tracking()
+    # A worker has already encoded the actors' current observations. Copy that
+    # allocation before replacing private fields; never mutate/share actor rows.
+    rows = observation_rows(game, mode) if public_rows is None else public_rows.copy()
     points = mode_spec(mode).point_count
+    if rows.shape != (game.config.player_count, observation_width(mode, game.config.dead_rules_enabled) + 14):
+        raise ValueError('centralized observations require all current public rows')
     inventory = Counter(DEPLOYMENT_PIECE_SEQUENCE)
     remaining = [Counter() for _ in range(game.config.player_count)]
     for piece in game._pieces.values():
         remaining[piece.owner][piece.kind] += 1
+    casualties = [game._casualty_bits(inventory - counts) for counts in remaining]
+    mask_begin = points + (75 if game.config.dead_rules_enabled else 0)
     for viewer, row in enumerate(rows):
         order = game._relative_player_order(viewer)
         relative = {owner: index for index, owner in enumerate(order)}
@@ -38,14 +45,17 @@ def centralized_observation_rows(game, mode):
         for point, piece in game._pieces.items():
             owner = relative[piece.owner]
             block = (2 if owner else 0) if mode is TrainingMode.TWO_PLAYER else owner
-            row[board.encode(point)] = OWN_PIECE_CODES[piece.kind] + EXACT_PIECE_CODE_STRIDE * block
+            index = board.encode(point)
+            row[index] = OWN_PIECE_CODES[piece.kind] + EXACT_PIECE_CODE_STRIDE * block
+            mask = 1 << game._critic_inventory_slots[point]
+            row[mask_begin + index], row[mask_begin + points + index] = mask & 8191, mask >> 13
         if game.config.dead_rules_enabled:
             # Preserve the mode's canonical casualty slots through replay and
             # serialization. The full board already identifies every survivor.
             for owner in game._casualty_owner_order(viewer):
                 slot = 1 if mode is TrainingMode.TWO_PLAYER else relative[owner] - 1
                 begin = points + slot * 25
-                row[begin:begin + 25] = game._casualty_bits(inventory - remaining[owner])
+                row[begin:begin + 25] = casualties[owner]
     return rows
 
 
@@ -59,7 +69,7 @@ class CentralizedHistory:
     def initialize(cls, game, mode, *, max_transitions=1000):
         mode = normalize_mode(mode)
         rows = centralized_observation_rows(game, mode)
-        width = mode_spec(mode).point_count + (75 if game.config.dead_rules_enabled else 0)
+        width = observation_width(mode, game.config.dead_rules_enabled)
         rows[:, width:width + 6] = 0  # The pinned initial token has no preceding action.
         players = tuple(PlayerHistory(
             mode, HistoryArrayView(mode, game.config.dead_rules_enabled, (0, seat), 0,
@@ -79,13 +89,14 @@ class CentralizedHistory:
     def value_state_for(self, team: int):
         if team not in (0, 1):
             raise ValueError("centralized value perspective must be team 0 or 1")
-        return replace(self.history.players[team].as_value_state(), centralized=True)
+        return PolicyState(self.history.mode, self.history.players[team].records, (), centralized=True)
 
     def state_dict(self):
-        return {"observation_contract": "referee_global_v1", "history": self.history.state_dict()}
+        return {"observation_contract": "referee_global_inventory_instances_v2", "history": self.history.state_dict()}
 
     @classmethod
     def from_state_dict(cls, state):
-        if state.get("observation_contract") != "referee_global_v1":
-            raise ValueError("MAPPO requires an explicitly saved global history")
-        return cls(GameHistory.from_state_dict(state["history"]))
+        if state.get("observation_contract") != "referee_global_inventory_instances_v2":
+            raise ValueError("MAPPO critic requires an explicitly saved global history with inventory instance encoding")
+        history = GameHistory.from_state_dict(state["history"])
+        return cls(history)

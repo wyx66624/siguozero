@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 import fcntl
+import os
 from pathlib import Path
 import subprocess
 import time
 
-UNIT = "siguozero-monitor.service"
+UNIT = os.environ.get("SIGUOZERO_MONITOR_SERVICE", "siguozero-monitor.service")
 
 
 def main():
-    with Path("/run/siguozero-monitor-keepalive.lock").open("w") as lock:
+    with Path(f"/run/{UNIT.removesuffix('.service')}-keepalive.lock").open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

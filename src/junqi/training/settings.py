@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from ..inventory import INVENTORY_ENCODER_TYPE
 from .encoding import ACTION_FEATURE_DIM
 from .models import ModelConfig
 from .modes import TrainingMode, normalize_mode
@@ -93,6 +94,9 @@ class TrainingSettings:
     ppo_clip_maximum: float = 0.45
     ppo_clip_advantage_scale: float = 0.5
     ppo_clip_schedule: tuple[tuple[float, float, float], ...] = DEFAULT_CLIP_SCHEDULE
+    ppo_clip_absolute_advantage: bool = False
+    ppo_unclipped_advantage_threshold: float = 0.0
+    ppo_min_policy_epochs: int = 0
     grpo_equivalent_plies: int | None = None
     grpo_mean_remaining_plies: float = 334.5
     arena_enabled: bool = True
@@ -118,6 +122,9 @@ class TrainingSettings:
     checkpoint_interval_environment_plies: int | None = None
     draw_reward: float = DEFAULT_DRAW_REWARD
     flag_capture_reward: float = 0.0
+    bomb_commander_reward: float = 0.0
+    bomb_army_commander_reward: float = 0.0
+    bomb_division_commander_reward: float = 0.0
     futile_attack_penalty: float = 0.0
     futile_attack_ema_decay: float = 0.95
     historical_enabled: bool = False
@@ -131,6 +138,7 @@ class TrainingSettings:
     historical_uniform_fraction: float = 0.05
     historical_learning_rate: float = 0.01
     historical_sampling: str = "quality"
+    historical_initial_loss_rate: float = 0.5
     historical_win_rate_temperature: float = 0.1
     historical_win_rate_ema_alpha: float = 0.01
     historical_checkpoint_start_fraction: float | None = None
@@ -159,7 +167,9 @@ class TrainingSettings:
     lr_cooldown_updates: int = 5
     lr_ema_decay: float = 0.8
     lr_probe_samples: int = 2048
-    lr_recovery_clip_fraction: float = 0.1
+    lr_increase_on_full_epochs: bool = False
+    lr_kl_band_lower: float | None = None
+    lr_kl_band_upper: float | None = None
 
     @classmethod
     def from_yaml(
@@ -233,6 +243,8 @@ class TrainingSettings:
         ):
             raise ValueError("runtime requires exactly two replicas per candidate")
 
+        if data["models"]["policy"]["board_encoder"].get("architecture") != INVENTORY_ENCODER_TYPE:
+            raise ValueError("unsupported board encoder: only inventory multihot encoding is supported")
         if tiny:
             model = ModelConfig.tiny(dead_rules_enabled=selected_dead_rules)
         elif model_scale == "bootstrap":
@@ -247,17 +259,20 @@ class TrainingSettings:
             raise ValueError(
                 "model_scale must be bootstrap, main, or extended"
             )
-        if normalized is not TrainingMode.TWO_PLAYER and not tiny:
+        if normalized is not TrainingMode.TWO_PLAYER:
             profile = data["models"].get("four_player", {})
             if not isinstance(profile, dict):
                 raise ValueError("models.four_player must be a mapping")
+            model = replace(model,
+                            board_encoder_type=str(profile.get("board_encoder_type", model.board_encoder_type)),
+                            action_encoder_type=str(profile.get("action_encoder_type", model.action_encoder_type)))
+        if normalized is not TrainingMode.TWO_PLAYER and not tiny:
             board_dim = int(profile.get("board_embedding_dim", model.board_dim))
             action_dim = int(profile.get("action_embedding_dim", model.board_dim))
-            if action_dim != board_dim:
-                raise ValueError("four-player action and board encoders must have equal output dimensions")
             model = replace(
                 model,
                 board_dim=board_dim,
+                action_dim=action_dim,
                 temporal_dim=int(profile.get("transition_token_dim", model.temporal_dim)),
                 temporal_ffn_dim=int(profile.get("temporal_ffn_dim", model.temporal_ffn_dim)),
                 temporal_layers=int(profile.get("temporal_layers", model.temporal_layers)),
@@ -266,6 +281,8 @@ class TrainingSettings:
             )
         if tiny and algorithm == "mappo":
             model = replace(model, token_fusion_hidden_dim=model.temporal_dim)
+            if data["models"].get("four_player", {}).get("board_encoder_type") == INVENTORY_ENCODER_TYPE:
+                model = replace(model, board_dim=48, action_dim=16, board_encoder_type=INVENTORY_ENCODER_TYPE)
         model = replace(
             model,
             inference_board_cache_entries=int(
@@ -331,6 +348,7 @@ class TrainingSettings:
             "historical_uniform_fraction": historical.get("uniform_fraction", 0.05),
             "historical_learning_rate": historical.get("learning_rate", 0.01),
             "historical_sampling": historical.get("sampling", "quality"),
+            "historical_initial_loss_rate": historical.get("initial_loss_rate", 0.5),
             "historical_win_rate_temperature": historical.get("win_rate_temperature", 0.1),
             "historical_win_rate_ema_alpha": historical.get("win_rate_ema_alpha", 0.01),
             "historical_checkpoint_start_fraction": historical.get("checkpoint_start_fraction"),
@@ -346,6 +364,8 @@ class TrainingSettings:
             "ppo_clip_maximum": adaptive_clip.get("maximum", 0.45),
             "ppo_clip_advantage_scale": adaptive_clip.get("advantage_scale", 0.5),
             "ppo_clip_schedule": adaptive_clip.get("schedule", DEFAULT_CLIP_SCHEDULE),
+            "ppo_clip_absolute_advantage": adaptive_clip.get("absolute_advantage", False) if algorithm in ("ppo", "mappo") else False,
+            "ppo_unclipped_advantage_threshold": adaptive_clip.get("unclipped_advantage_threshold", 0.0) if algorithm in ("ppo", "mappo") else 0.0,
             "grpo_equivalent_plies": None,
             "grpo_mean_remaining_plies": float(ppo.get("grpo_mean_remaining_plies", 334.5)),
             # Preserve the YAML types so malformed booleans and fractional
@@ -365,6 +385,9 @@ class TrainingSettings:
             "max_passes_per_player": data.get("rules", {}).get("max_passes_per_player", 4),
             "draw_reward": data.get("rules", {}).get("terminal_reward", {}).get("draw", DEFAULT_DRAW_REWARD),
             "flag_capture_reward": ppo.get("flag_capture_reward", 0.0) if algorithm in ("ppo", "mappo") else 0.0,
+            "bomb_commander_reward": ppo.get("bomb_commander_reward", 0.0) if algorithm == "mappo" else 0.0,
+            "bomb_army_commander_reward": ppo.get("bomb_army_commander_reward", 0.0) if algorithm == "mappo" else 0.0,
+            "bomb_division_commander_reward": ppo.get("bomb_division_commander_reward", 0.0) if algorithm == "mappo" else 0.0,
             "futile_attack_penalty": ppo.get("futile_attack_penalty", 0.0) if algorithm in ("ppo", "mappo") else 0.0,
             "futile_attack_ema_decay": ppo.get("futile_attack_ema_decay", 0.95),
             "arena_seed": model_selection.get("seed", 20260910),
@@ -418,7 +441,15 @@ class TrainingSettings:
             "lr_cooldown_updates": learner["learning_rate"].get("cooldown_updates", 5),
             "lr_ema_decay": learner["learning_rate"].get("ema_decay", .8),
             "lr_probe_samples": learner["learning_rate"].get("probe_samples", 2048),
-            "lr_recovery_clip_fraction": learner["learning_rate"].get("recovery_clip_fraction", .1),
+            "lr_increase_on_full_epochs": (learner["learning_rate"].get("increase_on_full_epochs", False)
+                                            if algorithm in ("ppo", "mappo")
+                                            and learner["learning_rate"].get("adaptive", False) else False),
+            "lr_kl_band_lower": (learner["learning_rate"].get("kl_band_lower")
+                                 if algorithm in ("ppo", "mappo")
+                                 and learner["learning_rate"].get("adaptive", False) else None),
+            "lr_kl_band_upper": (learner["learning_rate"].get("kl_band_upper")
+                                 if algorithm in ("ppo", "mappo")
+                                 and learner["learning_rate"].get("adaptive", False) else None),
             "layout_learning_rate": float(
                 runtime.get("layout_learning_rate", 5.0e-5)
             ),
@@ -444,6 +475,7 @@ class TrainingSettings:
             "early_stop_clip_fraction": float(
                 learner["early_stop"]["clipped_sample_fraction"]
             ),
+            "ppo_min_policy_epochs": learner["early_stop"].get("minimum_policy_epochs", 0),
             "advantage_epsilon": float(grpo["advantage_epsilon"]),
             "layout_update_interval": int(
                 runtime.get("layout_update_interval", 8)
@@ -520,10 +552,16 @@ class TrainingSettings:
                     "checkpoint_policy": "periodic",
                     "checkpoint_interval_environment_plies": None,
                     "ppo_adaptive_clip": False,
+                    "ppo_clip_absolute_advantage": False,
+                    "ppo_unclipped_advantage_threshold": 0.0,
+                    "ppo_min_policy_epochs": 0,
                     "archive_every_updates": 1,
                     "arena_enabled": False,
                     "historical_enabled": False,
                     "futile_attack_penalty": 0.0,
+                    "bomb_commander_reward": 0.0,
+                    "bomb_army_commander_reward": 0.0,
+                    "bomb_division_commander_reward": 0.0,
                     "arena_interval_environment_plies": None,
                     "arena_after_half_interval_environment_plies": None,
                     "arena_after_half_historical_only": False,
@@ -534,6 +572,13 @@ class TrainingSettings:
             )
         if overrides:
             selected_overrides = dict(overrides)
+            if (selected_overrides.get("adaptive_learning_rate") is False
+                    and "lr_increase_on_full_epochs" not in selected_overrides):
+                values["lr_increase_on_full_epochs"] = False
+            if selected_overrides.get("adaptive_learning_rate") is False:
+                for key in ("lr_kl_band_lower", "lr_kl_band_upper"):
+                    if key not in selected_overrides:
+                        values[key] = None
             # A caller explicitly selecting serial rules or online values also
             # selects the compatible collector, unless it explicitly requested
             # a contradictory pipeline configuration (validated below).
@@ -594,6 +639,15 @@ class TrainingSettings:
         return result
 
     def validate(self) -> None:
+        if (type(self.ppo_clip_absolute_advantage) is not bool
+                or type(self.ppo_unclipped_advantage_threshold) not in (int, float)
+                or not math.isfinite(self.ppo_unclipped_advantage_threshold)
+                or self.ppo_unclipped_advantage_threshold < 0):
+            raise ValueError("invalid absolute-advantage PPO clipping settings")
+        if (self.ppo_clip_absolute_advantage or self.ppo_unclipped_advantage_threshold) and not self.ppo_adaptive_clip:
+            raise ValueError("absolute-advantage clipping requires adaptive PPO clipping")
+        if type(self.ppo_min_policy_epochs) is not int or not 0 <= self.ppo_min_policy_epochs <= self.policy_epochs:
+            raise ValueError("minimum policy epochs must be between zero and policy epochs")
         clip_values = (self.clip_epsilon, self.ppo_clip_minimum, self.ppo_clip_maximum,
                        self.ppo_clip_advantage_scale)
         if (type(self.ppo_adaptive_clip) is not bool or any(
@@ -618,10 +672,12 @@ class TrainingSettings:
             raise ValueError("adaptive PPO clipping requires an environment-step target and PPO")
         rates = (self.policy_learning_rate, self.minimum_learning_rate,
                  self.maximum_learning_rate, self.lr_increase_factor,
-                 self.lr_decrease_factor, self.lr_ema_decay, self.lr_recovery_clip_fraction,
+                 self.lr_decrease_factor, self.lr_ema_decay,
                  self.critic_learning_rate, self.target_kl, self.early_stop_kl_multiple,
                  self.early_stop_clip_fraction)
         if (type(self.adaptive_learning_rate) is not bool
+                or type(self.lr_increase_on_full_epochs) is not bool
+                or (self.lr_increase_on_full_epochs and not self.adaptive_learning_rate)
                 or any(not isinstance(v, (int, float)) or isinstance(v, bool)
                        or not math.isfinite(v) for v in rates)
                 or not 0 < self.minimum_learning_rate <= self.maximum_learning_rate
@@ -629,7 +685,6 @@ class TrainingSettings:
                 or not 1 < self.lr_increase_factor <= 1.5
                 or not 0 < self.lr_decrease_factor < 1
                 or not 0 <= self.lr_ema_decay < 1
-                or not 0 < self.lr_recovery_clip_fraction <= self.early_stop_clip_fraction
                 or type(self.lr_stable_updates) is not int or self.lr_stable_updates < 1
                 or type(self.lr_cooldown_updates) is not int or self.lr_cooldown_updates < 0
                 or type(self.lr_probe_samples) is not int or self.lr_probe_samples < 1
@@ -637,6 +692,13 @@ class TrainingSettings:
                 or not math.isfinite(self.early_stop_kl_multiple) or self.early_stop_kl_multiple <= .5
                 or (self.adaptive_learning_rate and self.algorithm not in ("ppo", "mappo"))):
             raise ValueError("invalid bounded adaptive learning rate settings")
+        band = (self.lr_kl_band_lower, self.lr_kl_band_upper)
+        if any(value is not None for value in band) and (
+                not self.adaptive_learning_rate or self.lr_increase_on_full_epochs
+                or any(not isinstance(v, (int, float)) or isinstance(v, bool)
+                       or not math.isfinite(v) for v in band)
+                or not 0 < band[0] < band[1]):
+            raise ValueError("invalid adaptive learning rate KL band")
         entropy_values = (self.entropy_coefficient, self.entropy_minimum, self.entropy_maximum,
                           self.entropy_target_ratio, self.entropy_adaptation_rate, self.entropy_ema_decay)
         if (type(self.adaptive_entropy) is not bool or any(
@@ -683,6 +745,13 @@ class TrainingSettings:
             raise ValueError("flag_capture_reward must be finite and nonnegative")
         if self.algorithm not in ("ppo", "mappo") and self.flag_capture_reward != 0:
             raise ValueError("flag_capture_reward requires PPO")
+        from .tactical_rewards import BOMB_REWARD_FIELDS
+        for field in BOMB_REWARD_FIELDS.values():
+            value = getattr(self, field)
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{field} must be finite and nonnegative")
+            if value and (self.algorithm != "mappo" or self.target_environment_plies is None):
+                raise ValueError(f"{field} requires MAPPO with a target_environment_plies budget")
         if (type(self.futile_attack_penalty) not in (int, float)
                 or not math.isfinite(self.futile_attack_penalty) or self.futile_attack_penalty < 0):
             raise ValueError("futile_attack_penalty must be finite and nonnegative")
@@ -805,8 +874,14 @@ class TrainingSettings:
                 or self.target_environment_plies is None or self.arena_interval_environment_plies is None):
             raise ValueError("historical-only evaluation after half requires an environment schedule and historical opponents active by half")
         if self.historical_enabled:
-            if self.historical_sampling not in ("quality", "win_rate_distance"):
-                raise ValueError("historical_sampling must be quality or win_rate_distance")
+            if self.historical_sampling not in ("quality", "win_rate_distance", "strength"):
+                raise ValueError("historical_sampling must be quality, win_rate_distance or strength")
+            if (type(self.historical_initial_loss_rate) not in (int, float)
+                    or not math.isfinite(self.historical_initial_loss_rate)
+                    or not 0 <= self.historical_initial_loss_rate <= 1):
+                raise ValueError("historical initial loss rate must be in [0, 1]")
+            if self.historical_sampling == "strength" and self.historical_stage_mix_fraction != 0:
+                raise ValueError("strength sampling cannot mix progress stages")
             for name in ("historical_win_rate_temperature", "historical_win_rate_ema_alpha"):
                 value = getattr(self, name)
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
@@ -1016,13 +1091,12 @@ def _model_config(
     action = policy["action_encoder"]
     if int(action["input_dim"]) != ACTION_FEATURE_DIM:
         raise ValueError("action encoder requires exactly six coordinate/player/countdown inputs")
-    if int(action["output_dim"]) != int(board["output_dim"]):
-        raise ValueError("action and board encoders must have equal output dimensions")
     temporal = policy["temporal_transformer"]
     layout = models["layout"]
     history = data["history"]
     return ModelConfig(
         board_dim=int(board["output_dim"]),
+        action_dim=int(action["output_dim"]),
         board_encoder_type=str(board["architecture"]),
         action_encoder_type=str(action["architecture"]),
         temporal_dim=int(temporal["d_model"]),

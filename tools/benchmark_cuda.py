@@ -110,6 +110,7 @@ def synthetic_state(
     source, destination = original.legal_actions[0]
     transition = StateTokenRecord(
         board_codes=initial.board_codes,
+        inventory_masks=initial.inventory_masks,
         known_casualty_bits=initial.known_casualty_bits,
         action=ActionFeatures(
             source=source,

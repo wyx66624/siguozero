@@ -1,0 +1,13 @@
+{
+  "cpu_threads": 2,
+  "max_games": 2,
+  "target_days": 30,
+  "runs": [
+    {
+      "id": "four-dark-expand",
+      "name": "四暗棋 · 扩展 MAPPO · 30亿步",
+      "mode": "four_dark",
+      "path": "runs_expand_mappo/four_dark/with_dead_rules"
+    }
+  ]
+}

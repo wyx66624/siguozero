@@ -14,6 +14,7 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from ..board import HEADQUARTERS_COORDINATES
+from ..inventory import INVENTORY_ENCODER_TYPE
 from ..pieces import (
     DEPLOYMENT_PIECE_SEQUENCE,
     PIECE_TYPE_INDICES,
@@ -24,8 +25,9 @@ from ..pieces import (
 from .encoding import (
     ACTION_ENCODER_TYPE,
     ACTION_FEATURE_DIM,
+    CONTEXT_ACTION_ENCODER_TYPE,
+    CONTEXT_ACTION_FEATURE_DIM,
     ACTION_PLAYER_PAD,
-    BOARD_CODE_VOCAB_SIZE,
     BOARD_PAD_CODE,
     CASUALTY_SLOTS_PER_PLAYER,
     MAX_BOARD_POINTS,
@@ -36,7 +38,7 @@ from .encoding import (
     history_prefix_groups,
     policy_history_key,
 )
-from .history_arrays import HistoryArrayView, record_array
+from .history_arrays import HistoryArrayView, record_array, observation_width, inventory_words
 from .accelerator import is_accelerator, supports_pinned_memory
 from .modes import MODE_SPECS, TrainingMode, mode_spec, normalize_mode
 from .paged_kv import PagedKVCache, PagedKVState
@@ -93,7 +95,8 @@ def _categorical_from_uniforms(probabilities: Tensor, uniforms: Tensor) -> Tenso
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
     board_dim: int = 256
-    board_encoder_type: str = "whole_board_one_hot_linear"
+    action_dim: int | None = None
+    board_encoder_type: str = INVENTORY_ENCODER_TYPE
     action_encoder_type: str = ACTION_ENCODER_TYPE
     temporal_dim: int = 512
     temporal_layers: int = 8
@@ -125,13 +128,17 @@ class ModelConfig:
     dead_rules_enabled: bool = True
 
     def __post_init__(self) -> None:
-        if self.action_encoder_type != ACTION_ENCODER_TYPE:
-            raise ValueError("unsupported action encoder; expected coordinates_player_linear")
-        if self.board_encoder_type != "whole_board_one_hot_linear":
-            raise ValueError("unsupported board encoder; expected whole_board_one_hot_linear")
+        if self.action_encoder_type not in (ACTION_ENCODER_TYPE, CONTEXT_ACTION_ENCODER_TYPE):
+            raise ValueError("unsupported action encoder")
+        if self.board_encoder_type != INVENTORY_ENCODER_TYPE:
+            raise ValueError("unsupported board encoder: only inventory multihot encoding is supported")
+        if not self.dead_rules_enabled:
+            raise ValueError("inventory encoding requires deterministic dead rules")
         if self.board_dim <= 0 or self.board_chunk_size <= 0:
             raise ValueError("board dimension and chunk size must be positive")
-        if self.temporal_dim != 2 * self.board_dim:
+        if self.action_dim is not None and (type(self.action_dim) is not int or self.action_dim <= 0):
+            raise ValueError("action_dim must be a positive integer or None")
+        if self.action_embedding_dim <= 0 or self.temporal_dim != self.action_embedding_dim + self.board_dim:
             raise ValueError("temporal_dim must equal action_dim + board_dim")
         if type(self.token_fusion_hidden_dim) is not int or self.token_fusion_hidden_dim < 0:
             raise ValueError("token_fusion_hidden_dim must be a nonnegative integer")
@@ -164,6 +171,14 @@ class ModelConfig:
                 raise ValueError(f'{name} must be a boolean')
         if self.ppo_compile_mode not in ("off", "default", "reduce-overhead", "max-autotune-no-cudagraphs"):
             raise ValueError("invalid PPO compile mode")
+
+    @property
+    def joint_action_context(self) -> bool:
+        return self.action_encoder_type == CONTEXT_ACTION_ENCODER_TYPE
+
+    @property
+    def action_embedding_dim(self) -> int:
+        return self.board_dim if self.action_dim is None else self.action_dim
 
     @property
     def max_sequence_tokens(self) -> int:
@@ -393,18 +408,16 @@ class PreNormEncoderBlock(nn.Module):
 
 
 class WholeBoardEncoder(nn.Module):
-    """Project one fixed, categorical whole-board vector into one history token.
+    """Project 25 candidate slots and relative ownership per board point.
 
-    No learned point embeddings, spatial attention or point feature outputs.
-    Position-major one-hot features preserve categorical IDs without treating
-    their numbers as piece strength. Mode and optional casualty bits enter the
-    same single linear layer.
+    Mode, casualty and pass features enter the same whole-board projection.
+    Candidate slots are required for every observation, including history.
     """
 
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
-        self.board_feature_dim = MAX_BOARD_POINTS * BOARD_CODE_VOCAB_SIZE
+        self.board_feature_dim = MAX_BOARD_POINTS * 26
         self.mode_feature_dim = len(MODE_SPECS)
         self.casualty_feature_dim = MAX_CASUALTY_BITS if config.dead_rules_enabled else 0
         self.pass_feature_dim = 4
@@ -412,18 +425,8 @@ class WholeBoardEncoder(nn.Module):
             self.board_feature_dim + self.mode_feature_dim + self.casualty_feature_dim + self.pass_feature_dim
         )
         self.projection = nn.Linear(self.input_dim, config.board_dim)
-        # Sparse input: approximately one active feature per real board point.
-        nn.init.normal_(self.projection.weight, std=MAX_BOARD_POINTS ** -0.5)
+        nn.init.normal_(self.projection.weight, std=(MAX_BOARD_POINTS * 12) ** -0.5)
         nn.init.zeros_(self.projection.bias)
-
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
-        key = prefix + "projection.weight"
-        weight = state_dict.get(key)
-        if weight is not None and weight.shape == (self.projection.out_features, self.input_dim - 4):
-            state_dict[key] = torch.cat((weight, weight.new_zeros((weight.shape[0], 4))), dim=1)
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
-                                     missing_keys, unexpected_keys, error_msgs)
 
     def encode_vector(
         self,
@@ -432,6 +435,7 @@ class WholeBoardEncoder(nn.Module):
         mode_ids: Tensor,
         casualty_bits: Tensor | None,
         passes_remaining: Tensor | None = None,
+        inventory_masks: Tensor | None = None,
     ) -> Tensor:
         """Build [boards, features] directly; never allocate [boards, points, d]."""
         if board_codes.ndim != 2:
@@ -452,15 +456,15 @@ class WholeBoardEncoder(nn.Module):
         dtype = (torch.get_autocast_dtype(board_codes.device.type)
                  if torch.is_autocast_enabled(board_codes.device.type) else self.projection.weight.dtype)
         vector = torch.zeros((batch, self.input_dim), dtype=dtype, device=board_codes.device)
-        # Padded points have no active category; real empty points activate 0.
-        codes = board_codes.masked_fill(~point_mask, BOARD_PAD_CODE)
-        offsets = torch.arange(points, device=board_codes.device) * BOARD_CODE_VOCAB_SIZE
-        # Invalid category IDs must fail, not alias a neighboring point/mode
-        # after adding the flattened offsets. scatter checks the sentinel.
-        indices = (codes + offsets).masked_fill(
-            (codes < 0) | (codes >= BOARD_CODE_VOCAB_SIZE), self.input_dim
-        )
-        vector.scatter_(1, indices, point_mask.to(dtype))
+        if inventory_masks is None or inventory_masks.shape != board_codes.shape:
+            raise ValueError("inventory encoder requires saved 25-slot candidate masks")
+        bits = ((inventory_masks.unsqueeze(-1) >> torch.arange(25, device=board_codes.device)) & 1).to(dtype)
+        owner = torch.where(board_codes >= 30, (board_codes - 30).div(32, rounding_mode='floor'), board_codes)
+        owner = torch.where((mode_ids[:, None] == MODE_SPECS[TrainingMode.TWO_PLAYER].mode_index) & (owner == 2), 1, owner)
+        occupied = point_mask & (board_codes != 0)
+        features = torch.cat((bits, (owner + 1).unsqueeze(-1).to(dtype)), dim=-1)
+        features = features.masked_fill(~occupied.unsqueeze(-1), 0)
+        vector[:, :points * 26] = features.reshape(batch, points * 26)
         mode_indices = (mode_ids.unsqueeze(1) + self.board_feature_dim).masked_fill(
             (mode_ids.unsqueeze(1) < 0) | (mode_ids.unsqueeze(1) >= self.mode_feature_dim),
             self.input_dim,
@@ -483,32 +487,38 @@ class WholeBoardEncoder(nn.Module):
         mode_ids: Tensor,
         casualty_bits: Tensor | None,
         passes_remaining: Tensor | None = None,
+        inventory_masks: Tensor | None = None,
     ) -> Tensor:
-        return self.projection(self.encode_vector(board_codes, point_mask, mode_ids, casualty_bits, passes_remaining))
+        return self.projection(self.encode_vector(board_codes, point_mask, mode_ids, casualty_bits, passes_remaining, inventory_masks))
 
 
 class PublicActionEncoder(nn.Module):
-    """Project endpoints, actor and remaining draw moves into a history vector."""
+    """Project public action fields, optionally with countdown and alive state.
 
-    def __init__(self, output_dim: int) -> None:
+    Joint inputs are endpoints, actor, draw countdown and four relative alive
+    bits. Initial records have no preceding action but still carry rule state.
+    """
+
+    def __init__(self, output_dim: int, *, joint_context: bool = False) -> None:
         super().__init__()
-        self.projection = nn.Linear(ACTION_FEATURE_DIM, output_dim)
+        self.joint_context = joint_context
+        self.projection = nn.Linear(CONTEXT_ACTION_FEATURE_DIM if joint_context else ACTION_FEATURE_DIM, output_dim)
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
-        key = prefix + "projection.weight"
-        weight = state_dict.get(key)
-        if weight is not None and weight.shape == (self.projection.out_features, 5):
-            # Preserve every old prediction until the countdown column learns.
-            state_dict[key] = torch.cat((weight, weight.new_zeros((weight.shape[0], 1))), dim=1)
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
-                                     missing_keys, unexpected_keys, error_msgs)
-
-    def forward(self, fields: Tensor, present: Tensor) -> Tensor:
+    def forward(self, fields: Tensor, present: Tensor, *,
+                no_interaction: Tensor | None = None, active_mask: Tensor | None = None) -> Tensor:
         if fields.ndim < 1 or fields.shape[-1] != ACTION_FEATURE_DIM:
             raise ValueError("action field tensor must end with 6 coordinate/player/countdown values")
         if present.shape != fields.shape[:-1] or present.dtype != torch.bool:
             raise ValueError("action presence mask must match the leading dimensions")
+        if self.joint_context:
+            if (no_interaction is None or active_mask is None
+                    or no_interaction.shape != present.shape or active_mask.shape != present.shape):
+                raise ValueError("joint action encoding requires matching no-capture and active-player state")
+            moves = fields[..., :5].masked_fill(~present.unsqueeze(-1), 0)
+            remaining = (NO_CAPTURE_COUNTER_MAX - no_interaction.unsqueeze(-1)).clamp(min=0)
+            active = (active_mask.long().unsqueeze(-1) >> torch.arange(4, device=fields.device)) & 1
+            values = torch.cat((moves, remaining, active), dim=-1).to(self.projection.weight.dtype)
+            return self.projection(values)
         values = fields.to(self.projection.weight.dtype).masked_fill(~present.unsqueeze(-1), 0)
         encoded = self.projection(values)
         # Bias and padding cannot introduce a learned initial/no-action token.
@@ -534,6 +544,7 @@ class PolicyTensorBatch:
     mode_ids: Tensor
     valid_indices: Tensor
     passes_remaining: Tensor
+    inventory_masks: Tensor
 
 
 def collate_policy_states(
@@ -551,7 +562,7 @@ def collate_policy_states(
     if np.any(lengths <= 0):
         raise ValueError("a policy history cannot be empty")
     batch, time_steps, packed = len(states), int(lengths.max()), int(lengths.sum())
-    width = spec.point_count + (MAX_CASUALTY_BITS if dead_rules_enabled else 0)
+    width = observation_width(states[0].mode, dead_rules_enabled)
     requested_device = torch.device(device)
     pin_memory = supports_pinned_memory(requested_device)
     # One compact upload for observations, one for all integer indices. The
@@ -585,7 +596,8 @@ def collate_policy_states(
     return PolicyTensorBatch(
         states=states,
         board_codes=raw[:, :spec.point_count].long(),
-        casualty_bits=raw[:, spec.point_count:width].float() if dead_rules_enabled else None,
+        casualty_bits=raw[:, spec.point_count:spec.point_count + 75].float() if dead_rules_enabled else None,
+        inventory_masks=inventory_words(raw, spec.point_count, dead_rules_enabled),
         token_owner=owner_tensor,
         point_mask=torch.ones((batch, spec.point_count), dtype=torch.bool, device=requested_device),
         token_mask=torch.arange(time_steps, device=requested_device)[None, :] < length_tensor[:, None],
@@ -626,20 +638,6 @@ class _TemporalStateCache:
     context: Tensor
 
 
-class NoCaptureEmbedding(nn.Embedding):
-    """Extend legacy 0..60 counter weights without changing their predictions."""
-
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
-        key = prefix + "weight"
-        weight = state_dict.get(key)
-        if (weight is not None and weight.shape == (61, self.embedding_dim)
-                and self.num_embeddings == 71):
-            state_dict[key] = torch.cat((weight, weight[-1:].expand(10, -1)), dim=0)
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
-                                     missing_keys, unexpected_keys, error_msgs)
-
-
 class GamePolicyTransformer(nn.Module):
     """Board encoder plus causal transition Transformer and two-stage action head."""
 
@@ -647,7 +645,8 @@ class GamePolicyTransformer(nn.Module):
         super().__init__()
         self.config = config or ModelConfig()
         self.board_encoder = WholeBoardEncoder(self.config)
-        self.action_encoder = PublicActionEncoder(self.config.board_dim)
+        self.action_encoder = PublicActionEncoder(
+            self.config.action_embedding_dim, joint_context=self.config.joint_action_context)
         temporal_dim = self.config.temporal_dim
         self.token_fusion = (SwiGLU(temporal_dim, self.config.token_fusion_hidden_dim, self.config.dropout)
                              if self.config.token_fusion_hidden_dim else nn.Identity())
@@ -655,10 +654,13 @@ class GamePolicyTransformer(nn.Module):
             self.config.max_sequence_tokens, temporal_dim
         )
         self.mode_embedding = nn.Embedding(3, temporal_dim)
-        self.no_interaction_embedding = NoCaptureEmbedding(NO_CAPTURE_COUNTER_MAX + 1, temporal_dim)
-        self.active_embedding = nn.Embedding(16, temporal_dim)
-        self.revealed_embedding = nn.Embedding(16, temporal_dim)
+        if not self.config.joint_action_context:
+            self.no_interaction_embedding = nn.Embedding(NO_CAPTURE_COUNTER_MAX + 1, temporal_dim)
+            self.active_embedding = nn.Embedding(16, temporal_dim)
+            self.revealed_embedding = nn.Embedding(16, temporal_dim)
         self.current_player_embedding = nn.Embedding(5, temporal_dim)
+        # Only the input split changes in expand; retain its 256-wide action heads.
+        head_dim = temporal_dim // 2
         self.temporal_layers = nn.ModuleList(
             PreNormEncoderBlock(
                 temporal_dim,
@@ -670,14 +672,14 @@ class GamePolicyTransformer(nn.Module):
         )
         self.temporal_norm = nn.LayerNorm(temporal_dim)
         self.source_query = nn.Sequential(
-            nn.Linear(temporal_dim, self.config.board_dim),
+            nn.Linear(temporal_dim, head_dim),
             nn.SiLU(),
-            nn.Linear(self.config.board_dim, MAX_BOARD_POINTS),
+            nn.Linear(head_dim, MAX_BOARD_POINTS),
         )
         self.destination_query = nn.Sequential(
-            nn.Linear(temporal_dim + MAX_BOARD_POINTS, self.config.board_dim),
+            nn.Linear(temporal_dim + MAX_BOARD_POINTS, head_dim),
             nn.SiLU(),
-            nn.Linear(self.config.board_dim, MAX_BOARD_POINTS),
+            nn.Linear(head_dim, MAX_BOARD_POINTS),
         )
         # The cache is explicitly enabled only for a frozen rollout actor and
         # cleared before learner mode.  It stores detached board-global tokens,
@@ -1040,6 +1042,7 @@ class GamePolicyTransformer(nn.Module):
             torch.tensor([record.passes_remaining[:2] + (0, 0) if mode is TrainingMode.TWO_PLAYER
                           else record.passes_remaining for record in records],
                          dtype=torch.float32, device=requested_device),
+            torch.tensor([record.inventory_masks for record in records], dtype=torch.long, device=requested_device),
         )
         return board_globals, point_mask
 
@@ -1075,13 +1078,15 @@ class GamePolicyTransformer(nn.Module):
                 present[index, 0] = True
         fields = fields.to(self.device, non_blocking=pin_memory)
         present = present.to(self.device, non_blocking=pin_memory)
-        actions = self.action_encoder(fields, present)
         mode_id = mode_spec(mode).mode_index
         scalar = lambda values: torch.tensor(
             values, dtype=torch.long, device=self.device
         ).unsqueeze(1)
+        no_interaction = scalar([record.no_interaction_plies for record in records])
+        active_mask = scalar([record.active_mask for record in records])
+        actions = self.action_encoder(fields, present, no_interaction=no_interaction, active_mask=active_mask)
         tokens = self.token_fusion(torch.cat((actions, board_globals.unsqueeze(1)), dim=-1))
-        return (
+        tokens = (
             tokens
             + self.position_embedding(
                 torch.tensor(
@@ -1096,19 +1101,18 @@ class GamePolicyTransformer(nn.Module):
                     device=self.device,
                 )
             )
-            + self.no_interaction_embedding(
-                scalar([record.no_interaction_plies for record in records])
-            )
-            + self.active_embedding(
-                scalar([record.active_mask for record in records])
-            )
-            + self.revealed_embedding(
-                scalar([record.revealed_mask for record in records])
-            )
-            + self.current_player_embedding(
-                scalar([record.current_player for record in records])
-            )
         )
+        return self._add_rule_embeddings(
+            tokens, no_interaction, active_mask,
+            scalar([record.revealed_mask for record in records]),
+            scalar([record.current_player for record in records]))
+
+    def _add_rule_embeddings(self, tokens: Tensor, no_interaction: Tensor, active_mask: Tensor,
+                             revealed_mask: Tensor, current_player: Tensor) -> Tensor:
+        if not self.config.joint_action_context:
+            tokens = (tokens + self.no_interaction_embedding(no_interaction)
+                      + self.active_embedding(active_mask) + self.revealed_embedding(revealed_mask))
+        return tokens + self.current_player_embedding(current_player)
 
     def _advance_temporal_group(
         self,
@@ -1516,7 +1520,8 @@ class GamePolicyTransformer(nn.Module):
                     for position in range(view.window_start, view.window_start + len(view) - 1)
                 )]
             else:
-                record_keys = [(state.mode, record.board_codes, record.known_casualty_bits, record.passes_remaining)
+                record_keys = [(state.mode, record.board_codes, record.known_casualty_bits, record.passes_remaining,
+                                record.inventory_masks)
                                for record in state.records]
             for record_key in record_keys:
                 key: object
@@ -1571,6 +1576,7 @@ class GamePolicyTransformer(nn.Module):
                     else flat_casualties.index_select(0, chunk_sources)
                 ),
                 batch.passes_remaining.index_select(0, chunk_sources),
+                None if batch.inventory_masks is None else batch.inventory_masks.index_select(0, chunk_sources),
             )
             if not cache_active:
                 # Keep [boards, width] throughout the learner. Unbinding each
@@ -1609,7 +1615,8 @@ class GamePolicyTransformer(nn.Module):
 
         board_globals = globals_by_token.view(batch_size, time_steps, -1)
         action_embeddings = self.action_encoder(
-            batch.action_fields, batch.action_present
+            batch.action_fields, batch.action_present,
+            no_interaction=batch.no_interaction, active_mask=batch.active_mask,
         )
         tokens = self.token_fusion(torch.cat((action_embeddings, board_globals), dim=-1))
         positions = torch.arange(time_steps, device=self.device).unsqueeze(0)
@@ -1617,11 +1624,9 @@ class GamePolicyTransformer(nn.Module):
             tokens
             + self.position_embedding(positions)
             + self.mode_embedding(batch.mode_ids).unsqueeze(1)
-            + self.no_interaction_embedding(batch.no_interaction)
-            + self.active_embedding(batch.active_mask)
-            + self.revealed_embedding(batch.revealed_mask)
-            + self.current_player_embedding(batch.current_player)
         )
+        tokens = self._add_rule_embeddings(
+            tokens, batch.no_interaction, batch.active_mask, batch.revealed_mask, batch.current_player)
         if self.config.ppo_low_precision_residual and torch.is_autocast_enabled(self.device.type):
             tokens = tokens.to(torch.get_autocast_dtype(self.device.type))
         causal_mask = None if self.config.temporal_causal_sdpa else torch.zeros(
@@ -1769,7 +1774,7 @@ class GamePolicyTransformer(nn.Module):
         # Small alignment padding stabilizes kernels without truncating history.
         times = min(self.config.max_sequence_tokens, ((times + 31) // 32) * 32)
         spec = mode_spec(states[0].mode)
-        width = spec.point_count + (MAX_CASUALTY_BITS if self.config.dead_rules_enabled else 0) + 14
+        width = observation_width(states[0].mode, self.config.dead_rules_enabled) + 14
         pin = supports_pinned_memory(self.device)
         raw_cpu = torch.zeros((len(groups), times, width), dtype=torch.int16, pin_memory=pin)
         raw_numpy = raw_cpu.numpy()
@@ -1834,22 +1839,22 @@ class GamePolicyTransformer(nn.Module):
         batch, times, _ = rows.shape
         spec = mode_spec(mode)
         flat = rows.reshape(batch * times, -1)
-        width = spec.point_count + (MAX_CASUALTY_BITS if self.config.dead_rules_enabled else 0)
+        width = observation_width(mode, self.config.dead_rules_enabled)
         board = self.board_encoder(
             flat[:, :spec.point_count].long(),
             torch.ones((batch * times, spec.point_count), dtype=torch.bool, device=rows.device),
             torch.full((batch * times,), spec.mode_index, dtype=torch.long, device=rows.device),
-            flat[:, spec.point_count:width].float() if self.config.dead_rules_enabled else None,
+            flat[:, spec.point_count:spec.point_count + 75].float() if self.config.dead_rules_enabled else None,
             flat[:, width + 10:width + 14].float(),
+            inventory_words(flat, spec.point_count, self.config.dead_rules_enabled),
         ).view(batch, times, -1)
         fields = rows[:, :, width:]
-        actions = self.action_encoder(_action_fields_with_countdown(fields), fields[..., 5].bool())
+        actions = self.action_encoder(_action_fields_with_countdown(fields), fields[..., 5].bool(),
+                                     no_interaction=fields[..., 6], active_mask=fields[..., 7])
         hidden = (self.token_fusion(torch.cat((actions, board), dim=-1)) + self.position_embedding(positions)
-                + self.mode_embedding(torch.full((batch, 1), spec.mode_index, dtype=torch.long, device=rows.device))
-                + self.no_interaction_embedding(fields[..., 6].long())
-                + self.active_embedding(fields[..., 7].long())
-                + self.revealed_embedding(fields[..., 8].long())
-                + self.current_player_embedding(fields[..., 9].long()))
+                + self.mode_embedding(torch.full((batch, 1), spec.mode_index, dtype=torch.long, device=rows.device)))
+        hidden = self._add_rule_embeddings(hidden, fields[..., 6].long(), fields[..., 7].long(),
+                                           fields[..., 8].long(), fields[..., 9].long())
         if self.config.ppo_low_precision_residual and torch.is_autocast_enabled(rows.device.type):
             hidden = hidden.to(torch.get_autocast_dtype(rows.device.type))
         return hidden

@@ -235,10 +235,11 @@ class _ArenaGame:
         self.histories = []
         for engine in (candidate, opponent):
             window = engine.policy.config.max_transitions
-            if window not in by_window:
-                by_window[window] = GameHistory.initialize(self.game, engine.mode,
-                                                           max_transitions=window)
-            self.histories.append(by_window[window])
+            key = window
+            if key not in by_window:
+                by_window[key] = GameHistory.initialize(self.game, engine.mode,
+                    max_transitions=window)
+            self.histories.append(by_window[key])
         self.unique_histories = list(by_window.values())
         self.actions: list[dict[str, Any]] = []
 

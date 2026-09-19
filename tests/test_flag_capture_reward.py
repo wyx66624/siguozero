@@ -41,6 +41,7 @@ def position(*, actor=0, final=False, draw=False, ordinary=False, bomb=False):
     game = JunqiGame.from_position(GameConfig(variant=GameVariant.FOUR_PLAYER,
         information_mode=InformationMode.FOUR_DARK, max_plies=1 if draw else None),
         pieces, current_player=actor, active_players=active, revealed_flags=[True] * 4)
+    game.enable_inventory_tracking()
     board = game.board_for(actor)
     action = (board.encode(ArmPoint(target, 5, 2)), board.encode(ArmPoint(target, 6, 2)))
     assert action in game.legal_actions()

@@ -10,12 +10,15 @@ import numpy as np
 
 from .encoding import ACTION_PLAYER_PAD, EXACT_PIECE_CODE_STRIDE, NO_CAPTURE_COUNTER_MAX, OWN_PIECE_CODES, ActionFeatures
 from .modes import TrainingMode, mode_spec
+from .history_arrays import observation_width
 
 
 def observation_rows(game, mode):
+    if game._inventory is None:
+        raise ValueError("actor observations require inventory tracking from game initialization")
     points = mode_spec(mode).point_count
     dead = game.config.dead_rules_enabled
-    width = points + (75 if dead else 0)
+    width = observation_width(mode, dead)
     rows = np.zeros((game.config.player_count, width + 14), dtype=np.int16)
     event = game._public_history[-1] if game._public_history else None
     for viewer, row in enumerate(rows):
@@ -34,7 +37,11 @@ def observation_rows(game, mode):
                 if owner == 0 or (mode is TrainingMode.DOUBLE_OPEN and owner == 2):
                     raise ValueError('visible own/teammate identity unexpectedly hidden')
                 code = 2 if mode is TrainingMode.TWO_PLAYER else owner
-            row[board.encode(point)] = code
+            index = board.encode(point)
+            row[index] = code
+            begin = points + (75 if dead else 0)
+            mask = game.inventory_mask(viewer, point)
+            row[begin + index], row[begin + points + index] = mask & 8191, mask >> 13
         if dead:
             for owner in game._casualty_owner_order(viewer):
                 slot = 1 if mode is TrainingMode.TWO_PLAYER else relative[owner] - 1

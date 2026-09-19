@@ -19,6 +19,7 @@ AVAILABLE = varlen_attn is not None
 from .accelerator import supports_pinned_memory
 from .encoding import MAX_CASUALTY_BITS, history_prefix_groups
 from .modes import mode_spec
+from .history_arrays import observation_width
 
 
 def prepare(model, states):
@@ -33,7 +34,7 @@ def prepare(model, states):
     total = int(offsets[-1])
     mode = states[0].mode
     spec = mode_spec(mode)
-    width = spec.point_count + (MAX_CASUALTY_BITS if model.config.dead_rules_enabled else 0) + 14
+    width = observation_width(mode, model.config.dead_rules_enabled) + 14
     pin = supports_pinned_memory(model.device)
     raw_cpu = torch.empty((1, total, width), dtype=torch.int16, pin_memory=pin)
     raw_numpy = raw_cpu.numpy()[0]

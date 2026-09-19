@@ -1,8 +1,8 @@
 # Expanded four-player MAPPO: private actor, full-information scalar critic.
-# Implementation profile; runtime memory and throughput have not been validated.
+# Single RTX 4090 training profile; measured launch evidence is kept under output/diagnostics.
 # Start a new run with --model-scale main; do not resume the 256-wide PPO run.
 schema_version: 1
-config_revision: 24
+config_revision: 25
 experiment_name: siguozero_expand_mappo
 rules:
   game_modes:
@@ -112,6 +112,7 @@ board_piece_codes:
     flag_capture_or_elimination_sets_all_25: true
     include_probabilistic_or_nonunique_inference: false
 models:
+  # Legacy/two-player base profile; four_player below overrides these input dimensions.
   common:
     player_parameter_sharing: single_policy_and_layout_instance_all_seats
     action_embedding_dim: 256
@@ -119,8 +120,14 @@ models:
     transition_token_dim: 512
     dropout: 0.0
   four_player:
-    action_embedding_dim: 256
-    board_embedding_dim: 256
+    action_embedding_dim: 128
+    # 4 coordinates + previous actor + draw countdown + 4 relative alive bits.
+    # No separate countdown/alive/revealed-flag embedding in this profile.
+    action_encoder_type: coordinates_player_countdown_active_linear
+    board_embedding_dim: 384
+    board_encoder_type: whole_board_inventory_multihot_linear
+    # 129 * (25 interchangeable inventory slots + 1 relative owner), plus
+    # the existing 3 mode + 75 exact casualty + 4 pass features: 3436 -> 384.
     transition_token_dim: 512
     token_fusion_hidden_dim: 512
     temporal_layers: 16
@@ -199,16 +206,16 @@ models:
       - actor
       - remaining_no_capture_plies
     board_encoder:
-      architecture: whole_board_one_hot_linear
-      input: player_visible_integer_chain_plus_optional_exact_casualty_prior
-      vector_encoding: position_major_categorical_one_hot_then_mode_and_optional_casualties
+      architecture: whole_board_inventory_multihot_linear
+      input: player_visible_inventory_candidates_and_relative_owner
+      vector_encoding: position_major_25_slot_multihot_plus_owner_then_mode_casualties_and_passes
       board_point_capacity: 129
-      board_code_categories: 139
+      candidate_slots_per_point: 25
+      relative_owner_features_per_point: 1
       mode_categories: 3
       canonical_casualty_input_dim_when_dead_rules_enabled: 75
-      disabled_behavior: omit_casualty_tensor_and_projection_input_columns
-      input_dim_with_dead_rules: 18009
-      input_dim_without_dead_rules: 17934
+      requires_dead_rules: true
+      input_dim_with_dead_rules: 3436
       output_dim: 256
       linear_layers: 1
       preserve_point_representations_for_action_heads: false
@@ -265,6 +272,11 @@ ppo:
   # Each captured flag: +0.2 for the capturing team, -0.2 for the losing team.
   # Added to any terminal reward on the same step; zero disables event shaping.
   flag_capture_reward: 0.2
+  # Actual bomb casualties, credited once to the bomb's team (attack or defense).
+  # Linear decay in global environment steps; zero from half the step budget.
+  bomb_commander_reward: 0.03
+  bomb_army_commander_reward: 0.01
+  bomb_division_commander_reward: 0.003
   # Temporary public-evidence shaping; reaches zero at half the global step budget.
   futile_attack_penalty: 0.01
   futile_attack_ema_decay: 0.95
@@ -275,7 +287,7 @@ ppo:
   sequence_training: true
   max_samples_per_sequence: 256
   optimizer_minibatch_samples: 512
-  environment_workers: 8
+  environment_workers: 16
   learner_microbatch_by_model_scale:
     main: 32
   causal_sdpa: true
@@ -304,6 +316,8 @@ ppo:
   cuda_memory_fraction: 0.90
   adaptive_clip:
     enabled: true
+    absolute_advantage: true
+    unclipped_advantage_threshold: 2.0
     minimum: 0.10
     maximum: 0.45
     advantage_scale: 0.5
@@ -359,15 +373,19 @@ learner:
   learning_rate:
     initial: 0.0001
     adaptive: true
-    minimum: 1.0e-06
-    maximum: 2.0e-05
-    increase_factor: 1.03
-    decrease_factor: 0.8
-    stable_updates: 5
-    cooldown_updates: 5
+    minimum: 5.0e-06
+    maximum: 1.0e-04
+    # Final probe mean controls LR; three consecutive out-of-band updates
+    # move it 5%, followed by three observation-only updates. No cosine/warmup.
+    increase_on_full_epochs: false
+    kl_band_lower: 0.08
+    kl_band_upper: 0.14
+    increase_factor: 1.05
+    decrease_factor: 0.95
+    stable_updates: 3
+    cooldown_updates: 3
     ema_decay: 0.8
-    probe_samples: 2048
-    recovery_clip_fraction: 0.1
+    probe_samples: 8192
   gradient_norm_clip: 1.0
   entropy_coefficient:
     initial: 0.01
@@ -397,9 +415,12 @@ learner:
     initial_coefficient: 0.02
     target_per_action: 0.02
   early_stop:
-    # Allow larger PPO updates: stop above 0.02 * 2 = 0.04 per-action KL.
-    observed_kl_multiple: 2.0
-    clipped_sample_fraction: 0.3
+    # KL-band mode checks the probe mean after each complete epoch against
+    # kl_band_upper (0.14). The legacy minibatch limit below is inactive there.
+    # Do not stop for ratio clipping alone.
+    minimum_policy_epochs: 1
+    observed_kl_multiple: 5.0
+    clipped_sample_fraction: 1.0
   precision:
     model: bfloat16
     loss_and_reductions: float32
@@ -470,8 +491,9 @@ runtime:
   warmup_updates: 250
   reference_refresh_updates: 6250
   checkpoint_every_updates: 5
-  archive_every_updates: 500
-  keep_checkpoint_archives: 10
+  archive_every_updates: 1
+  # Model versions are all retained; keep a bounded set of full optimizer/game-pool states.
+  keep_checkpoint_archives: 3
   metrics_every_updates: 1
   resource_monitor_interval_seconds: 15
   inference_snapshot_every_updates: 5
@@ -489,16 +511,15 @@ scale_gate:
   next_policy_temporal_ffn_dim: 2048
 historical_opponents:
   enabled: true
-  start_fraction: 0.5
-  training_fraction: 0.2
-  teammate_fraction: 0.2
-  snapshot_fractions: [0.05, 0.10, 0.20, 0.30, 0.40]
-  # Every complete checkpoint from 20% enters the training pool. Early
-  # snapshots remain archived; champion-only evaluation uses its own incumbent.
-  # Cache capacities are performance-only limits.
-  checkpoint_start_fraction: 0.20
-  sampling: win_rate_distance
-  win_rate_temperature: 0.10  # Opponents closest to a 50% learner win rate get the most weight.
+  start_fraction: 0.06666666666666667  # 200M of the 3B environment-step budget.
+  training_fraction: 0.5
+  teammate_fraction: 0.0
+  snapshot_fractions: [0.016666666666666666, 0.03333333333333333, 0.05]
+  # Every saved version from 50M remains eligible; cache limits never prune it.
+  checkpoint_start_fraction: 0.016666666666666666
+  sampling: strength
+  initial_loss_rate: 0.5
+  win_rate_temperature: 0.10  # Softmax of learner loss-rate EMA; draws excluded.
   win_rate_ema_alpha: 0.01
   stage_mix_fraction: 0.0
   cache_gib: 32

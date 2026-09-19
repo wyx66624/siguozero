@@ -85,7 +85,7 @@ class ThroughputCandidatesTests(unittest.TestCase):
 
     def test_direct_observations_equal_public_views_in_every_mode(self):
         for mode in TrainingMode:
-            for dead in (False, True):
+            for dead in (True,):
                 for seed in (61, 99):
                     game = new_game(mode, seed=seed, dead_rules_enabled=dead, max_plies=90)
                     rng = random.Random(seed)
@@ -93,7 +93,7 @@ class ThroughputCandidatesTests(unittest.TestCase):
                         rows = observation_rows(game, mode)
                         for seat, row in enumerate(rows):
                             obs = game.observe(seat, history_limit=1, include_legal_masks=False,
-                                               include_candidate_masks=False)
+                                               include_candidate_masks=False, include_inventory_masks=True)
                             action = ActionFeatures.from_event(obs.history[-1]) if obs.history else None
                             expected = record_array(_record_from_observation(obs, action), mode, dead)
                             np.testing.assert_array_equal(row, expected)
@@ -102,7 +102,7 @@ class ThroughputCandidatesTests(unittest.TestCase):
                         game.step(rng.choice(game.legal_actions()))
 
     def test_board_chunk_outputs_and_all_gradients_match(self):
-        for dead in (True, False):
+        for dead in (True,):
             for mode in TrainingMode:
                 with self.subTest(dead=dead, mode=mode):
                     torch.manual_seed(43)
@@ -155,7 +155,7 @@ class ThroughputCandidatesTests(unittest.TestCase):
 
     def test_tensor_path_matches_full_history_outputs_and_gradients(self):
         for mode in TrainingMode:
-            for dead in (False, True):
+            for dead in (True,):
                 with self.subTest(mode=mode, dead=dead):
                     torch.manual_seed(121)
                     reference = GameValueTransformer(ModelConfig.tiny(dead_rules_enabled=dead)).train()

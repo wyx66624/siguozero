@@ -527,10 +527,11 @@ def policy_ppo_loss(
     old, advantage = metadata[:, 0], metadata[:, 1]
     log_ratio = (current - old).clamp(-20.0, 20.0)
     ratio = log_ratio.exp()
-    from .clipping import PolicyClip, advantage_clip_upper, clipped_surrogate
+    from .clipping import PolicyClip, advantage_clip_bounds, clipped_surrogate, unclipped_advantage_mask
     bounds = policy_clip or PolicyClip.fixed(clip_epsilon)
-    upper = advantage_clip_upper(advantage, bounds.upper, bounds.bonus, bounds.minimum, bounds.maximum)
-    objective, outside = clipped_surrogate(ratio, advantage, bounds.lower, upper)
+    lower, upper = advantage_clip_bounds(advantage, bounds.lower, bounds.upper, bounds.bonus,
+                                         bounds.minimum, bounds.maximum, bounds.absolute_advantage)
+    objective, outside = clipped_surrogate(ratio, advantage, lower, upper, bounds.unclipped_advantage_threshold)
     policy_loss = -objective.mean()
     entropy_bonus, exploration_metrics = policy_entropy_bonus(
         states, entropies, coefficient=entropy_coefficient,
@@ -543,8 +544,10 @@ def policy_ppo_loss(
              "policy/clip_fraction", "policy/importance_ratio_mean", "policy/nonzero_advantage_fraction")
     values = torch.stack((policy_loss, loss, (ratio - 1 - log_ratio).mean(), entropy,
                           outside.mean(), ratio.mean(),
-                          (advantage != 0).float().mean(), *exploration_metrics.values(), upper.mean())).detach()
-    names = (*names, *exploration_metrics, "policy/clip_upper_mean")
+                          (advantage != 0).float().mean(), *exploration_metrics.values(), upper.mean(), lower.mean(),
+                          unclipped_advantage_mask(advantage, bounds.unclipped_advantage_threshold).float().mean())).detach()
+    names = (*names, *exploration_metrics, "policy/clip_upper_mean", "policy/clip_lower_mean",
+             "policy/unclipped_advantage_fraction")
     if empty:
         values = values * 0
     values = values.unbind() if defer_metrics else values.cpu().tolist()

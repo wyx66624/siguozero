@@ -196,16 +196,16 @@ models:
       - actor
       - remaining_no_capture_plies
     board_encoder:
-      architecture: whole_board_one_hot_linear
-      input: player_visible_integer_chain_plus_optional_exact_casualty_prior
-      vector_encoding: position_major_categorical_one_hot_then_mode_and_optional_casualties
+      architecture: whole_board_inventory_multihot_linear
+      input: player_visible_inventory_candidates_and_relative_owner
+      vector_encoding: position_major_25_slot_multihot_plus_owner_then_mode_casualties_and_passes
       board_point_capacity: 129
-      board_code_categories: 139
+      candidate_slots_per_point: 25
+      relative_owner_features_per_point: 1
       mode_categories: 3
       canonical_casualty_input_dim_when_dead_rules_enabled: 75
-      disabled_behavior: omit_casualty_tensor_and_projection_input_columns
-      input_dim_with_dead_rules: 18009
-      input_dim_without_dead_rules: 17934
+      requires_dead_rules: true
+      input_dim_with_dead_rules: 3436
       output_dim: 256
       linear_layers: 1
       preserve_point_representations_for_action_heads: false

@@ -8,6 +8,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 from ..game import DEFAULT_NO_CAPTURE_DRAW_PLIES, JunqiGame, Observation, ObservedEvent
+from ..inventory import INVENTORY_MASK_ENCODING
 from ..pieces import PieceType
 from .modes import TrainingMode, mode_spec, normalize_mode
 
@@ -19,6 +20,8 @@ BOARD_CODE_VOCAB_SIZE = 139
 ACTION_PLAYER_PAD = 4
 ACTION_FEATURE_DIM = 6
 ACTION_ENCODER_TYPE = "coordinates_player_linear"
+CONTEXT_ACTION_FEATURE_DIM = 10
+CONTEXT_ACTION_ENCODER_TYPE = "coordinates_player_countdown_active_linear"
 CASUALTY_SLOTS_PER_PLAYER = 25
 MAX_CASUALTY_BITS = 75
 NO_CAPTURE_COUNTER_MAX = DEFAULT_NO_CAPTURE_DRAW_PLIES
@@ -219,6 +222,8 @@ class StateTokenRecord:
     active_mask: int
     revealed_mask: int
     current_player: int
+    # Packed 25-bit candidate slots are mandatory in every saved observation.
+    inventory_masks: tuple[int, ...]
     # Public, viewer-relative seat order. Two-player records pad the final two slots with 0.
     passes_remaining: tuple[int, ...] = (4, 4, 4, 4)
 
@@ -244,8 +249,11 @@ def _record_from_observation(
     observation: Observation,
     action: ActionFeatures | None,
 ) -> StateTokenRecord:
+    if any(p is not None and p.inventory_mask is None for p in observation.points):
+        raise ValueError("actor observations require inventory candidate masks")
     return StateTokenRecord(
         board_codes=encode_visible_board(observation),
+        inventory_masks=tuple(0 if p is None else p.inventory_mask for p in observation.points),
         known_casualty_bits=(
             encode_known_casualties(observation)
             if observation.dead_rules_enabled
@@ -446,6 +454,7 @@ class PlayerHistory:
         return {
             "mode": self.mode.value,
             "action_encoding": ACTION_ENCODER_TYPE,
+            "inventory_mask_encoding": INVENTORY_MASK_ENCODING,
             "max_transitions": self.max_transitions,
             "dead_rules_enabled": self.dead_rules_enabled,
             "records": [_record_state_dict(record) for record in self.records],
@@ -455,6 +464,8 @@ class PlayerHistory:
     def from_state_dict(cls, state: Mapping[str, Any]) -> PlayerHistory:
         if state.get("action_encoding") != ACTION_ENCODER_TYPE:
             raise ValueError("unsupported player-history action encoding")
+        if state.get("inventory_mask_encoding") != INVENTORY_MASK_ENCODING:
+            raise ValueError("player history requires confirmed onehot inventory encoding")
         records = tuple(
             _record_from_state_dict(record) for record in state["records"]
         )
@@ -522,6 +533,7 @@ class GameHistory:
         max_transitions: int = 1000,
     ) -> GameHistory:
         normalized = normalize_mode(mode)
+        game.enable_inventory_tracking()
         players = tuple(
             PlayerHistory.from_initial_observation(
                 normalized,
@@ -530,6 +542,7 @@ class GameHistory:
                     history_limit=0,
                     include_legal_masks=False,
                     include_candidate_masks=False,
+                    include_inventory_masks=True,
                 ),
                 max_transitions=max_transitions,
             )
@@ -545,6 +558,7 @@ class GameHistory:
                     history_limit=1,
                     include_legal_masks=False,
                     include_candidate_masks=False,
+                    include_inventory_masks=True,
                 )
             )
 
@@ -606,6 +620,7 @@ class GameHistory:
 def _record_state_dict(record: StateTokenRecord) -> dict[str, Any]:
     return {
         "board_codes": record.board_codes,
+        "inventory_masks": record.inventory_masks,
         "known_casualty_bits": record.known_casualty_bits,
         "action": None if record.action is None else record.action.as_tuple(),
         "no_interaction_plies": record.no_interaction_plies,
@@ -617,6 +632,8 @@ def _record_state_dict(record: StateTokenRecord) -> dict[str, Any]:
 
 
 def _record_from_state_dict(state: Mapping[str, Any]) -> StateTokenRecord:
+    if state.get("inventory_masks") is None:
+        raise ValueError("serialized actor history requires inventory candidate masks; legacy encoding is unsupported")
     raw_action = state["action"]
     action = None
     if raw_action is not None:
@@ -626,6 +643,7 @@ def _record_from_state_dict(state: Mapping[str, Any]) -> StateTokenRecord:
     raw_casualties = state["known_casualty_bits"]
     return StateTokenRecord(
         board_codes=tuple(int(value) for value in state["board_codes"]),
+        inventory_masks=tuple(int(value) for value in state["inventory_masks"]),
         known_casualty_bits=(
             None
             if raw_casualties is None

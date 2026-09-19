@@ -16,10 +16,12 @@ class BoundedLearningRate:
     stable_updates: int = 5
     cooldown_updates: int = 5
     ema_decay: float = 0.8
-    recovery_clip_fraction: float = 0.1
+    kl_band_lower: float | None = None
+    kl_band_upper: float | None = None
     scale: float = 1.0
     kl_ema: float | None = None
     stable_count: int = 0
+    stable_direction: int = 0
     cooldown: int = 0
     observations: int = 0
     reason: str = "initial"
@@ -34,32 +36,58 @@ class BoundedLearningRate:
         self.scale = min(ceiling / base, max(self.minimum / base, self.scale))
         return min(ceiling, max(self.minimum, base * self.scale))
 
-    def observe(self, *, scheduled: float, kl: float | None,
-                clip_fraction: float | None, early_stopped: bool,
-                allow_increase: bool = True) -> tuple[float, int]:
+    def observe(self, *, scheduled: float, kl: float | None, early_stopped: bool,
+                allow_increase: bool = True,
+                full_epochs_completed: bool | None = None) -> tuple[float, int]:
         before = self.rate(scheduled)
         self.reason = "hold"
-        if kl is None or clip_fraction is None:
+        if kl is None:
             self.stable_count = 0
+            self.stable_direction = 0
             self.reason = "no_samples"
             return before, 0
-        if (not math.isfinite(kl) or kl < 0 or not math.isfinite(clip_fraction)
-                or not 0 <= clip_fraction <= 1):
-            raise ValueError("learning rate observations must be finite KL and clip fraction")
+        if not math.isfinite(kl) or kl < 0:
+            raise ValueError("learning rate observations must be finite nonnegative KL")
         self.observations += 1
         self.kl_ema = (kl if self.kl_ema is None else
                        self.ema_decay * self.kl_ema + (1 - self.ema_decay) * kl)
         cooling = self.cooldown > 0
         self.cooldown = max(0, self.cooldown - 1)
         high = self.target_kl * self.high_kl_multiple
-        if kl > high:
+        if self.kl_band_lower is not None:
+            # Consecutive end-of-update probe means provide symmetric evidence.
+            # Cooldown observations cannot count toward the next adjustment.
+            trend = (1 if kl < self.kl_band_lower else
+                     -1 if kl > self.kl_band_upper else 0)
+            if cooling or trend == 0 or (trend > 0 and not allow_increase):
+                self.stable_count = self.stable_direction = 0
+                self.reason = "cooldown" if cooling else "hold" if trend == 0 else "warmup"
+            else:
+                self.stable_count = self.stable_count + 1 if trend == self.stable_direction else 1
+                self.stable_direction = trend
+                self.reason = "collecting_low_kl" if trend > 0 else "collecting_high_kl"
+                if self.stable_count >= self.stable_updates:
+                    self.scale *= self.increase_factor if trend > 0 else self.decrease_factor
+                    self.stable_count = self.stable_direction = 0
+                    self.reason = "low_kl" if trend > 0 else "high_kl"
+        elif kl > high:
             # A measured violation can lower LR even during recovery cooldown.
             self.scale *= self.decrease_factor
             self.stable_count = 0
             self.reason = "high_kl"
-        elif early_stopped or clip_fraction > self.recovery_clip_fraction:
+        elif early_stopped:
             self.stable_count = 0
-            self.reason = "early_stop" if early_stopped else "clip_guard"
+            self.reason = "early_stop"
+        elif full_epochs_completed is not None:
+            # Completion feedback replaces the low-KL/stability recovery rule.
+            # A full pass budget is itself the evidence for another small rise;
+            # measured KL violations above retain priority.
+            self.stable_count = 0
+            if full_epochs_completed and allow_increase:
+                self.scale *= self.increase_factor
+                self.reason = "completed_epochs"
+            else:
+                self.reason = "incomplete_epochs" if not full_epochs_completed else "warmup"
         elif cooling or not allow_increase:
             self.stable_count = 0
             self.reason = "cooldown" if cooling else "warmup"
@@ -76,13 +104,16 @@ class BoundedLearningRate:
         direction = (after > before) - (after < before)
         if direction:
             self.cooldown = self.cooldown_updates
-        elif self.reason in ("low_kl", "high_kl"):
-            self.reason = "upper_bound" if self.reason == "low_kl" else "lower_bound"
+        elif self.reason in ("low_kl", "completed_epochs", "high_kl"):
+            self.reason = "upper_bound" if self.reason in ("low_kl", "completed_epochs") else "lower_bound"
         return after, direction
 
     def state_dict(self) -> dict:
-        return {"version": 1, "scale": self.scale, "kl_ema": self.kl_ema,
+        return {"version": 2, "scale": self.scale, "kl_ema": self.kl_ema,
                 "stable_count": self.stable_count, "cooldown": self.cooldown,
+                "stable_direction": self.stable_direction,
+                "kl_band": ([self.kl_band_lower, self.kl_band_upper]
+                            if self.kl_band_lower is not None else None),
                 "observations": self.observations}
 
     def load_state_dict(self, state: dict | None, *, legacy_scale: float,
@@ -91,16 +122,25 @@ class BoundedLearningRate:
         scale = state.get("scale", legacy_scale)
         ema = state.get("kl_ema")
         counts = [state.get(key, 0) for key in ("stable_count", "cooldown", "observations")]
-        if (state.get("version", 1) != 1 or not isinstance(scale, (int, float))
+        trend = state.get("stable_direction", 0)
+        if (state.get("version", 1) not in (1, 2) or not isinstance(scale, (int, float))
                 or isinstance(scale, bool) or not math.isfinite(scale) or scale <= 0
                 or (ema is not None and (not isinstance(ema, (int, float))
                     or isinstance(ema, bool) or not math.isfinite(ema) or ema < 0))
-                or any(type(value) is not int or value < 0 for value in counts)):
+                or any(type(value) is not int or value < 0 for value in counts)
+                or type(trend) is not int or trend not in (-1, 0, 1)):
             raise ValueError("invalid learning rate controller checkpoint")
         self.scale, self.kl_ema = float(scale), ema
         self.stable_count = min(counts[0], self.stable_updates - 1)
+        self.stable_direction = trend
         self.cooldown = min(counts[1], self.cooldown_updates)
         self.observations = counts[2]
+        band = [self.kl_band_lower, self.kl_band_upper] if self.kl_band_lower is not None else None
+        if state.get("kl_band") != band:
+            # Old peak-KL history and a different band's streak are not evidence
+            # for the new final-mean controller. Preserve LR and optimizer state.
+            self.kl_ema = None
+            self.stable_count = self.stable_direction = self.cooldown = 0
         self.rate(scheduled)  # new configured bounds apply immediately on resume
 
 
