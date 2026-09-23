@@ -52,7 +52,7 @@ class GameReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "已经结束"):
                 cpu.command({"op": op, "action": [0, 0], "expected_ply": 0})
 
-    def test_rotated_view_and_compulsory_passes_are_recorded(self):
+    def test_rotated_replay_records_elimination_without_a_compulsory_pass(self):
         cpu = fixtures.SpectatorTests.make_immobile_game(human=2)
         first = cpu.command({"op": "state"})
         cpu.command({"op": "advance"})
@@ -61,9 +61,12 @@ class GameReplayTests(unittest.TestCase):
         for visible, actual in zip(first["pieces"], review["initial"]["pieces"]):
             if visible:
                 self.assertEqual(visible["owner"], actual["owner"])
-        self.assertEqual(review["steps"][0]["event"]["actor"], 0)
+        self.assertFalse(review["initial"]["active_players"][0])
+        self.assertEqual(review["initial"]["passes_remaining"][0], 4)
+        self.assertEqual(review["steps"][0]["event"]["actor"], 3)
         self.assertEqual(review["steps"][0]["event"]["combat"], "pass")
-        self.assertEqual(review["steps"][0]["state"]["passes_remaining"][0], 3)
+        self.assertTrue(all(step["event"]["actor"] != 0 for step in review["steps"]))
+        self.assertEqual(review["steps"][0]["state"]["passes_remaining"][0], 4)
         self.assertEqual(len(review["steps"]), cpu.game.ply_count)
 
 

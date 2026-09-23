@@ -10,6 +10,7 @@ import sqlite3
 import time
 
 from ..training.checkpoint_format import CHECKPOINT_FORMAT_VERSION, SUPPORTED_CHECKPOINT_FORMAT_VERSIONS
+from .exploration import entropy_history
 from .outcomes import OutcomeStore, evaluation_outcomes, training_record
 
 MODE_NAMES = {"four_dark": "四暗棋", "double_open": "双明棋", "two_player": "双人军棋"}
@@ -242,6 +243,12 @@ class Monitor:
         if (latest.get("update", 0) > update or (session_started is not None and resumed_update is not None
                 and latest.get("timestamp_unix", 0) < session_started and latest.get("update", 0) > resumed_update)):
             latest = history[-1] if history else {}
+        entropy_records = list(history)
+        if training_record(latest) and (not entropy_records or latest.get("update", 0) >= entropy_records[-1].get("update", 0)):
+            if entropy_records and latest.get("update") == entropy_records[-1].get("update"):
+                entropy_records.pop()
+            entropy_records.append(latest)
+        exploration = entropy_history(entropy_records)
         try:
             outcomes = self.outcomes.snapshot(run, algorithm=algorithm, mode=spec["mode"], max_update=update,
                 session_started=session_started, resumed_update=resumed_update)
@@ -313,6 +320,7 @@ class Monitor:
                 "required_rate_target": remaining / (self.target_days * 86400),
                 "metrics_age": now - latest["timestamp_unix"] if latest.get("timestamp_unix") is not None else None,
                 "metrics": latest, "resource": heartbeat if fresh else {}, "chart": chart,
+                "entropy": exploration,
                 "outcomes": outcomes, "evaluation_outcomes": evaluation_outcomes(run, selection, spec["mode"]),
                 "historical_opponents": read_json(run / "historical_opponents/status.json"),
                 "historical_evaluation": read_json(run / "historical_opponents/latest_evaluation.json"),

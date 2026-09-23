@@ -416,6 +416,17 @@ class NeuralModelTests(unittest.TestCase):
         with torch.inference_mode(), torch.autocast("cuda", dtype=dtype):
             cached.start_inference_board_cache(max_entries=64)
             cached.encode(prefix_states)
+            # Force unused tails to contain NaNs, as recycled torch.empty
+            # storage can in a larger GPU test/training process. Attention
+            # padding must not allow those values to contaminate shorter rows.
+            store = cached._paged_kv_store
+            self.assertIsNotNone(store)
+            for prefix in cached._inference_temporal_cache.values():
+                tail = prefix.length % store.page_size
+                if tail:
+                    store.storage[:, prefix.page_indices[-1], :, tail:].fill_(
+                        float("nan")
+                    )
             target_states = []
             for game, history in zip(games, histories, strict=True):
                 for _ in range(2):

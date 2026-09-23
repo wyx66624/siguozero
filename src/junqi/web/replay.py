@@ -29,8 +29,11 @@ class ReplayRecorder:
                    if piece != self.previous[code]]
         fields = ("ply", "current_player", "active_players", "result",
                   "no_interaction_plies", "no_capture_plies", "passes_remaining", "ai_moves")
+        state = {key: frame[key] for key in fields}
+        if "revealed_flags" in frame:
+            state["revealed_flags"] = frame["revealed_flags"]
         self.steps.append({"changes": changes, "event": frame["history"][-1],
-                           "state": {key: frame[key] for key in fields}})
+                           "state": state})
         self.previous = pieces
 
     def export(self, *, result, ended_early):

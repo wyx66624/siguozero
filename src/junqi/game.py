@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import Enum
 from functools import lru_cache
 import random
@@ -106,6 +106,8 @@ class GameConfig:
     # The counter measures moves without a removed piece, across all seats.
     no_interaction_draw_plies: int = DEFAULT_NO_CAPTURE_DRAW_PLIES
     max_plies: int | None = None
+    # False is retained only for replaying positions saved under the old rule.
+    eliminate_no_moves: bool = True
 
     def __post_init__(self) -> None:
         try:
@@ -146,6 +148,8 @@ class GameConfig:
 
         if not isinstance(self.dead_rules_enabled, bool):
             raise GameRuleError("dead_rules_enabled must be a boolean")
+        if type(self.eliminate_no_moves) is not bool:
+            raise GameRuleError("eliminate_no_moves must be a boolean")
 
         if (
             isinstance(self.first_player, bool)
@@ -172,6 +176,17 @@ class GameConfig:
     @property
     def player_count(self) -> int:
         return 4 if self.variant is GameVariant.FOUR_PLAYER else 2
+
+    def __setstate__(self, state) -> None:
+        # Frozen/slots dataclasses pickle fields in declaration order. Old
+        # checkpoints have six fields and must retain their replay semantics.
+        names = [field.name for field in fields(self)]
+        if len(state) not in (len(names), len(names) - 1):
+            raise GameRuleError("unsupported saved game configuration")
+        for name, value in zip(names, state):
+            object.__setattr__(self, name, value)
+        if len(state) < len(names):
+            object.__setattr__(self, "eliminate_no_moves", False)
 
     @property
     def turn_step(self) -> int:
@@ -1534,7 +1549,7 @@ class JunqiGame:
         )
         occupants = {code: piece for code, _point, piece in encoded_pieces}
         occupied = frozenset(occupants)
-        actions: list[Action] = [PASS_ACTION] if self._passes_remaining[player] > 0 else []
+        actions: list[Action] = []
         owned_starts = sorted(
             (
                 code,
@@ -1564,6 +1579,10 @@ class JunqiGame:
                 ):
                     actions.append((start, target))
 
+        # A voluntary pass cannot keep an immobile player alive. Keep the
+        # action order stable for policies and old replay probability vectors.
+        if self._passes_remaining[player] > 0 and (actions or not self.config.eliminate_no_moves):
+            actions.insert(0, PASS_ACTION)
         result = tuple(actions)
         self._legal_actions_cache[player] = result
         self._legal_action_sets[player] = frozenset(result)
@@ -2081,6 +2100,7 @@ class JunqiGame:
             self.config.variant.value,
             self.config.information_mode.value,
             self.config.dead_rules_enabled,
+            self.config.eliminate_no_moves,
             self._current_player,
             tuple(self._active),
             tuple(self._flag_revealed),

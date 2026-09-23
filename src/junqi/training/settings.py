@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from ..inventory import INVENTORY_ENCODER_TYPE
+from ..inventory import INVENTORY_ENCODER_TYPE, INVENTORY_ONLY_ENCODER_TYPE
 from .encoding import ACTION_FEATURE_DIM
 from .models import ModelConfig
 from .modes import TrainingMode, normalize_mode
@@ -122,12 +122,14 @@ class TrainingSettings:
     checkpoint_interval_environment_plies: int | None = None
     draw_reward: float = DEFAULT_DRAW_REWARD
     flag_capture_reward: float = 0.0
+    known_nonflag_hq_penalty: float = 0.0
     bomb_commander_reward: float = 0.0
     bomb_army_commander_reward: float = 0.0
     bomb_division_commander_reward: float = 0.0
     futile_attack_penalty: float = 0.0
     futile_attack_ema_decay: float = 0.95
     historical_enabled: bool = False
+    historical_tactical_champion: bool = False
     historical_start_fraction: float = 0.5
     historical_training_fraction: float = 0.2
     historical_teammate_fraction: float = 0.2
@@ -170,6 +172,16 @@ class TrainingSettings:
     lr_increase_on_full_epochs: bool = False
     lr_kl_band_lower: float | None = None
     lr_kl_band_upper: float | None = None
+    lr_epoch_completion: bool = False
+    lr_minimum_completed_epochs: int = 2
+    lr_increase_kl_threshold: float = 0.09
+    ppo_kl_probe_interval_steps: int = 0
+    ppo_critic_full_history_batches: bool = False
+    # Explicit PPO guard, independent of the LR controller's hold band.
+    # None preserves the legacy band-upper / target-multiple fallback.
+    early_stop_kl_threshold: float | None = None
+    mappo_advantage_mode: str = "team_steps"
+    mappo_reward_scope: str = "team"
 
     @classmethod
     def from_yaml(
@@ -281,8 +293,9 @@ class TrainingSettings:
             )
         if tiny and algorithm == "mappo":
             model = replace(model, token_fusion_hidden_dim=model.temporal_dim)
-            if data["models"].get("four_player", {}).get("board_encoder_type") == INVENTORY_ENCODER_TYPE:
-                model = replace(model, board_dim=48, action_dim=16, board_encoder_type=INVENTORY_ENCODER_TYPE)
+            if data["models"].get("four_player", {}).get("board_encoder_type") in (
+                    INVENTORY_ENCODER_TYPE, INVENTORY_ONLY_ENCODER_TYPE):
+                model = replace(model, board_dim=48, action_dim=16)
         model = replace(
             model,
             inference_board_cache_entries=int(
@@ -323,6 +336,8 @@ class TrainingSettings:
         )
         values: dict[str, Any] = {
             "algorithm": algorithm,
+            "mappo_advantage_mode": ppo.get("mappo_advantage_mode", "team_steps") if algorithm == "mappo" else "team_steps",
+            "mappo_reward_scope": ppo.get("mappo_reward_scope", "team") if algorithm == "mappo" else "team",
             "critic_layers": (min(int(ppo.get("critic_layers", 16)), model.temporal_layers)
                               if tiny else int(ppo.get("critic_layers", 16))) if algorithm == "mappo" else None,
             "discount": float(ppo.get("discount", 1.0)),
@@ -338,6 +353,7 @@ class TrainingSettings:
             "ppo_deferred_values": ppo.get("deferred_values", False) if algorithm in ("ppo", "mappo") else False,
             "ppo_pipeline_groups": int(ppo.get("pipeline_groups", 1)) if algorithm in ("ppo", "mappo") else 1,
             "historical_enabled": historical.get("enabled", False) if algorithm in ("ppo", "mappo") else False,
+            "historical_tactical_champion": historical.get("tactical_champion", False),
             "historical_start_fraction": historical.get("start_fraction", 0.5),
             "historical_training_fraction": historical.get("training_fraction", 0.2),
             "historical_teammate_fraction": historical.get("teammate_fraction", 0.2),
@@ -385,6 +401,7 @@ class TrainingSettings:
             "max_passes_per_player": data.get("rules", {}).get("max_passes_per_player", 4),
             "draw_reward": data.get("rules", {}).get("terminal_reward", {}).get("draw", DEFAULT_DRAW_REWARD),
             "flag_capture_reward": ppo.get("flag_capture_reward", 0.0) if algorithm in ("ppo", "mappo") else 0.0,
+            "known_nonflag_hq_penalty": ppo.get("known_nonflag_hq_penalty", 0.0) if algorithm == "mappo" else 0.0,
             "bomb_commander_reward": ppo.get("bomb_commander_reward", 0.0) if algorithm == "mappo" else 0.0,
             "bomb_army_commander_reward": ppo.get("bomb_army_commander_reward", 0.0) if algorithm == "mappo" else 0.0,
             "bomb_division_commander_reward": ppo.get("bomb_division_commander_reward", 0.0) if algorithm == "mappo" else 0.0,
@@ -441,6 +458,13 @@ class TrainingSettings:
             "lr_cooldown_updates": learner["learning_rate"].get("cooldown_updates", 5),
             "lr_ema_decay": learner["learning_rate"].get("ema_decay", .8),
             "lr_probe_samples": learner["learning_rate"].get("probe_samples", 2048),
+            "lr_epoch_completion": (learner["learning_rate"].get("epoch_completion", False)
+                                    if algorithm in ("ppo", "mappo")
+                                    and learner["learning_rate"].get("adaptive", False) else False),
+            "lr_minimum_completed_epochs": learner["learning_rate"].get("minimum_completed_epochs", 2),
+            "lr_increase_kl_threshold": learner["learning_rate"].get("increase_kl_threshold", .09),
+            "ppo_kl_probe_interval_steps": learner["early_stop"].get("probe_interval_steps", 0),
+            "ppo_critic_full_history_batches": ppo.get("critic_full_history_batches", False),
             "lr_increase_on_full_epochs": (learner["learning_rate"].get("increase_on_full_epochs", False)
                                             if algorithm in ("ppo", "mappo")
                                             and learner["learning_rate"].get("adaptive", False) else False),
@@ -472,6 +496,7 @@ class TrainingSettings:
             "early_stop_kl_multiple": float(
                 learner["early_stop"]["observed_kl_multiple"]
             ),
+            "early_stop_kl_threshold": learner["early_stop"].get("kl_threshold"),
             "early_stop_clip_fraction": float(
                 learner["early_stop"]["clipped_sample_fraction"]
             ),
@@ -545,6 +570,10 @@ class TrainingSettings:
                     "ppo_pipeline_groups": 1,
                     "policy_epochs": 1,
                     "critic_epochs": 1,
+                    # Single-epoch smoke runs cannot use the production
+                    # multi-epoch completion controller. Explicit overrides
+                    # below may re-enable it with compatible epoch counts.
+                    "lr_epoch_completion": False,
                     "warmup_updates": 1,
                     "layout_update_interval": 1,
                     "layout_outcomes_per_update": 2,
@@ -558,7 +587,9 @@ class TrainingSettings:
                     "archive_every_updates": 1,
                     "arena_enabled": False,
                     "historical_enabled": False,
+                    "historical_tactical_champion": False,
                     "futile_attack_penalty": 0.0,
+                    "known_nonflag_hq_penalty": 0.0,
                     "bomb_commander_reward": 0.0,
                     "bomb_army_commander_reward": 0.0,
                     "bomb_division_commander_reward": 0.0,
@@ -576,6 +607,7 @@ class TrainingSettings:
                     and "lr_increase_on_full_epochs" not in selected_overrides):
                 values["lr_increase_on_full_epochs"] = False
             if selected_overrides.get("adaptive_learning_rate") is False:
+                values["lr_epoch_completion"] = False
                 for key in ("lr_kl_band_lower", "lr_kl_band_upper"):
                     if key not in selected_overrides:
                         values[key] = None
@@ -639,6 +671,8 @@ class TrainingSettings:
         return result
 
     def validate(self) -> None:
+        from .tactical_logging import TacticalLogSettings
+        TacticalLogSettings.from_config(self.raw_config)
         if (type(self.ppo_clip_absolute_advantage) is not bool
                 or type(self.ppo_unclipped_advantage_threshold) not in (int, float)
                 or not math.isfinite(self.ppo_unclipped_advantage_threshold)
@@ -692,7 +726,31 @@ class TrainingSettings:
                 or not math.isfinite(self.early_stop_kl_multiple) or self.early_stop_kl_multiple <= .5
                 or (self.adaptive_learning_rate and self.algorithm not in ("ppo", "mappo"))):
             raise ValueError("invalid bounded adaptive learning rate settings")
+        threshold = self.early_stop_kl_threshold
+        if self.algorithm != "mappo" and self.mappo_advantage_mode != "team_steps":
+            raise ValueError("personal advantage training requires MAPPO")
+        if (self.mappo_advantage_mode not in ("team_steps", "player_decisions")
+                or self.mappo_reward_scope not in ("team", "player")
+                or (self.mappo_reward_scope == "player" and self.mappo_advantage_mode != "player_decisions")):
+            raise ValueError("invalid MAPPO personal advantage or reward scope settings")
+        if threshold is not None and (isinstance(threshold, bool)
+                or not isinstance(threshold, (int, float))
+                or not math.isfinite(threshold) or threshold <= 0):
+            raise ValueError("explicit KL early-stop threshold must be finite and positive")
         band = (self.lr_kl_band_lower, self.lr_kl_band_upper)
+        if (type(self.lr_epoch_completion) is not bool
+                or type(self.ppo_critic_full_history_batches) is not bool
+                or type(self.ppo_kl_probe_interval_steps) is not int or self.ppo_kl_probe_interval_steps < 0
+                or type(self.lr_minimum_completed_epochs) is not int or self.lr_minimum_completed_epochs < 1
+                or isinstance(self.lr_increase_kl_threshold, bool)
+                or not isinstance(self.lr_increase_kl_threshold, (float, int))
+                or not math.isfinite(self.lr_increase_kl_threshold) or self.lr_increase_kl_threshold <= 0
+                or (self.lr_epoch_completion and (not self.adaptive_learning_rate
+                    or self.lr_increase_on_full_epochs or any(v is not None for v in band)
+                    or self.lr_minimum_completed_epochs > self.policy_epochs
+                    or self.ppo_kl_probe_interval_steps < 1
+                    or threshold is None or self.lr_increase_kl_threshold >= threshold))):
+            raise ValueError("invalid epoch-completion learning rate settings")
         if any(value is not None for value in band) and (
                 not self.adaptive_learning_rate or self.lr_increase_on_full_epochs
                 or any(not isinstance(v, (int, float)) or isinstance(v, bool)
@@ -745,6 +803,11 @@ class TrainingSettings:
             raise ValueError("flag_capture_reward must be finite and nonnegative")
         if self.algorithm not in ("ppo", "mappo") and self.flag_capture_reward != 0:
             raise ValueError("flag_capture_reward requires PPO")
+        if (type(self.known_nonflag_hq_penalty) not in (int, float)
+                or not math.isfinite(self.known_nonflag_hq_penalty) or self.known_nonflag_hq_penalty < 0):
+            raise ValueError("known_nonflag_hq_penalty must be finite and nonnegative")
+        if self.known_nonflag_hq_penalty and self.algorithm != "mappo":
+            raise ValueError("known_nonflag_hq_penalty requires MAPPO")
         from .tactical_rewards import BOMB_REWARD_FIELDS
         for field in BOMB_REWARD_FIELDS.values():
             value = getattr(self, field)
@@ -867,6 +930,12 @@ class TrainingSettings:
             raise ValueError("arena_enabled must be a boolean")
         if type(self.historical_enabled) is not bool:
             raise ValueError("historical_enabled must be a boolean")
+        if type(self.historical_tactical_champion) is not bool:
+            raise ValueError("historical_tactical_champion must be a boolean")
+        if self.historical_tactical_champion and (
+                not self.historical_enabled or self.historical_teammate_fraction != 0
+                or self.mode is TrainingMode.TWO_PLAYER):
+            raise ValueError("tactical champion requires historical opponents enabled and no frozen teammate")
         if type(self.arena_after_half_historical_only) is not bool:
             raise ValueError("arena_after_half_historical_only must be a boolean")
         if self.arena_after_half_historical_only and (
@@ -1008,6 +1077,7 @@ class TrainingSettings:
 
     def serializable(self) -> dict[str, Any]:
         values = asdict(self)
+        values["eliminate_no_moves"] = True
         values["mode"] = self.mode.value
         values["source_path"] = str(self.source_path)
         values["output_root"] = str(self.output_root)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 import math
-from typing import Iterable, Sequence
+from typing import TYPE_CHECKING, Iterable, Sequence
 
 import numpy as np
 import torch
@@ -13,8 +13,11 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
+if TYPE_CHECKING:
+    from .ppo_sampling import PendingActionSamples
+
 from ..board import HEADQUARTERS_COORDINATES
-from ..inventory import INVENTORY_ENCODER_TYPE
+from ..inventory import INVENTORY_ENCODER_TYPE, INVENTORY_ONLY_ENCODER_TYPE
 from ..pieces import (
     DEPLOYMENT_PIECE_SEQUENCE,
     PIECE_TYPE_INDICES,
@@ -27,6 +30,8 @@ from .encoding import (
     ACTION_FEATURE_DIM,
     CONTEXT_ACTION_ENCODER_TYPE,
     CONTEXT_ACTION_FEATURE_DIM,
+    PASS_CONTEXT_ACTION_ENCODER_TYPE,
+    PASS_CONTEXT_ACTION_FEATURE_DIM,
     ACTION_PLAYER_PAD,
     BOARD_PAD_CODE,
     CASUALTY_SLOTS_PER_PLAYER,
@@ -128,10 +133,14 @@ class ModelConfig:
     dead_rules_enabled: bool = True
 
     def __post_init__(self) -> None:
-        if self.action_encoder_type not in (ACTION_ENCODER_TYPE, CONTEXT_ACTION_ENCODER_TYPE):
+        if self.action_encoder_type not in (ACTION_ENCODER_TYPE, CONTEXT_ACTION_ENCODER_TYPE,
+                                            PASS_CONTEXT_ACTION_ENCODER_TYPE):
             raise ValueError("unsupported action encoder")
-        if self.board_encoder_type != INVENTORY_ENCODER_TYPE:
+        if self.board_encoder_type not in (INVENTORY_ENCODER_TYPE, INVENTORY_ONLY_ENCODER_TYPE):
             raise ValueError("unsupported board encoder: only inventory multihot encoding is supported")
+        if ((self.board_encoder_type == INVENTORY_ONLY_ENCODER_TYPE)
+                != (self.action_encoder_type == PASS_CONTEXT_ACTION_ENCODER_TYPE)):
+            raise ValueError("candidate-only board encoding requires the action encoder with pass counts")
         if not self.dead_rules_enabled:
             raise ValueError("inventory encoding requires deterministic dead rules")
         if self.board_dim <= 0 or self.board_chunk_size <= 0:
@@ -174,7 +183,11 @@ class ModelConfig:
 
     @property
     def joint_action_context(self) -> bool:
-        return self.action_encoder_type == CONTEXT_ACTION_ENCODER_TYPE
+        return self.action_encoder_type in (CONTEXT_ACTION_ENCODER_TYPE, PASS_CONTEXT_ACTION_ENCODER_TYPE)
+
+    @property
+    def action_pass_context(self) -> bool:
+        return self.action_encoder_type == PASS_CONTEXT_ACTION_ENCODER_TYPE
 
     @property
     def action_embedding_dim(self) -> int:
@@ -410,7 +423,8 @@ class PreNormEncoderBlock(nn.Module):
 class WholeBoardEncoder(nn.Module):
     """Project 25 candidate slots and relative ownership per board point.
 
-    Mode, casualty and pass features enter the same whole-board projection.
+    Mode bits enter the whole-board projection. Legacy profiles also include
+    casualty/pass features; the candidate-only profile excludes both.
     Candidate slots are required for every observation, including history.
     """
 
@@ -419,8 +433,9 @@ class WholeBoardEncoder(nn.Module):
         self.config = config
         self.board_feature_dim = MAX_BOARD_POINTS * 26
         self.mode_feature_dim = len(MODE_SPECS)
-        self.casualty_feature_dim = MAX_CASUALTY_BITS if config.dead_rules_enabled else 0
-        self.pass_feature_dim = 4
+        candidate_only = config.board_encoder_type == INVENTORY_ONLY_ENCODER_TYPE
+        self.casualty_feature_dim = MAX_CASUALTY_BITS if config.dead_rules_enabled and not candidate_only else 0
+        self.pass_feature_dim = 0 if candidate_only else 4
         self.input_dim = (
             self.board_feature_dim + self.mode_feature_dim + self.casualty_feature_dim + self.pass_feature_dim
         )
@@ -448,10 +463,10 @@ class WholeBoardEncoder(nn.Module):
             raise ValueError("invalid board point tensor shape")
         if mode_ids.shape != (batch,):
             raise ValueError("mode_ids must have shape [batch]")
-        if self.config.dead_rules_enabled:
+        if self.casualty_feature_dim:
             if casualty_bits is None or casualty_bits.shape != (batch, MAX_CASUALTY_BITS):
                 raise ValueError(f"casualty_bits must have shape [batch, {MAX_CASUALTY_BITS}]")
-        elif casualty_bits is not None:
+        elif not self.config.dead_rules_enabled and casualty_bits is not None:
             raise ValueError("casualty_bits must be absent when dead rules are disabled")
         dtype = (torch.get_autocast_dtype(board_codes.device.type)
                  if torch.is_autocast_enabled(board_codes.device.type) else self.projection.weight.dtype)
@@ -470,14 +485,16 @@ class WholeBoardEncoder(nn.Module):
             self.input_dim,
         )
         vector.scatter_(1, mode_indices, 1.0)
-        if casualty_bits is not None:
-            vector[:, self.board_feature_dim + self.mode_feature_dim:-4] = casualty_bits.to(dtype)
-        if passes_remaining is None:
-            passes_remaining = torch.full((batch, 4), 4, device=board_codes.device)
-            passes_remaining[:, 2:] *= (mode_ids != MODE_SPECS[TrainingMode.TWO_PLAYER].mode_index)[:, None]
-        if passes_remaining.shape != (batch, 4):
-            raise ValueError("passes_remaining must have shape [batch, 4]")
-        vector[:, -4:] = passes_remaining.to(dtype)
+        if self.casualty_feature_dim:
+            begin = self.board_feature_dim + self.mode_feature_dim
+            vector[:, begin:begin + self.casualty_feature_dim] = casualty_bits.to(dtype)
+        if self.pass_feature_dim:
+            if passes_remaining is None:
+                passes_remaining = torch.full((batch, 4), 4, device=board_codes.device)
+                passes_remaining[:, 2:] *= (mode_ids != MODE_SPECS[TrainingMode.TWO_PLAYER].mode_index)[:, None]
+            if passes_remaining.shape != (batch, 4):
+                raise ValueError("passes_remaining must have shape [batch, 4]")
+            vector[:, -4:] = passes_remaining.to(dtype)
         return vector
 
     def forward(
@@ -496,16 +513,23 @@ class PublicActionEncoder(nn.Module):
     """Project public action fields, optionally with countdown and alive state.
 
     Joint inputs are endpoints, actor, draw countdown and four relative alive
-    bits. Initial records have no preceding action but still carry rule state.
+    bits, optionally followed by four remaining-pass counts. Initial records
+    have no preceding action but still carry rule state.
     """
 
-    def __init__(self, output_dim: int, *, joint_context: bool = False) -> None:
+    def __init__(self, output_dim: int, *, joint_context: bool = False, passes_context: bool = False) -> None:
         super().__init__()
+        if passes_context and not joint_context:
+            raise ValueError("pass counts require joint action context")
         self.joint_context = joint_context
-        self.projection = nn.Linear(CONTEXT_ACTION_FEATURE_DIM if joint_context else ACTION_FEATURE_DIM, output_dim)
+        self.pass_feature_dim = 4 if passes_context else 0
+        inputs = (PASS_CONTEXT_ACTION_FEATURE_DIM if passes_context else
+                  CONTEXT_ACTION_FEATURE_DIM if joint_context else ACTION_FEATURE_DIM)
+        self.projection = nn.Linear(inputs, output_dim)
 
     def forward(self, fields: Tensor, present: Tensor, *,
-                no_interaction: Tensor | None = None, active_mask: Tensor | None = None) -> Tensor:
+                no_interaction: Tensor | None = None, active_mask: Tensor | None = None,
+                passes_remaining: Tensor | None = None) -> Tensor:
         if fields.ndim < 1 or fields.shape[-1] != ACTION_FEATURE_DIM:
             raise ValueError("action field tensor must end with 6 coordinate/player/countdown values")
         if present.shape != fields.shape[:-1] or present.dtype != torch.bool:
@@ -517,7 +541,12 @@ class PublicActionEncoder(nn.Module):
             moves = fields[..., :5].masked_fill(~present.unsqueeze(-1), 0)
             remaining = (NO_CAPTURE_COUNTER_MAX - no_interaction.unsqueeze(-1)).clamp(min=0)
             active = (active_mask.long().unsqueeze(-1) >> torch.arange(4, device=fields.device)) & 1
-            values = torch.cat((moves, remaining, active), dim=-1).to(self.projection.weight.dtype)
+            parts = (moves, remaining, active)
+            if self.pass_feature_dim:
+                if passes_remaining is None or passes_remaining.shape != (*present.shape, 4):
+                    raise ValueError("joint action encoding requires four remaining-pass counts per token")
+                parts += (passes_remaining,)
+            values = torch.cat(parts, dim=-1).to(self.projection.weight.dtype)
             return self.projection(values)
         values = fields.to(self.projection.weight.dtype).masked_fill(~present.unsqueeze(-1), 0)
         encoded = self.projection(values)
@@ -544,6 +573,7 @@ class PolicyTensorBatch:
     mode_ids: Tensor
     valid_indices: Tensor
     passes_remaining: Tensor
+    action_passes_remaining: Tensor
     inventory_masks: Tensor
 
 
@@ -552,6 +582,7 @@ def collate_policy_states(
     *,
     device: torch.device | str,
     dead_rules_enabled: bool = True,
+    include_casualty_features: bool = True,
 ) -> PolicyTensorBatch:
     if not states:
         raise ValueError("cannot collate an empty policy batch")
@@ -589,14 +620,15 @@ def collate_policy_states(
     raw = raw_cpu.to(requested_device, non_blocking=pin_memory)
     index_data = index_cpu.to(requested_device, non_blocking=pin_memory)
     owner_tensor, valid_indices, length_tensor = index_data.split((packed, packed, batch))
-    fields = torch.zeros((batch * time_steps, 10), dtype=torch.long, device=requested_device)
+    fields = torch.zeros((batch * time_steps, 14), dtype=torch.long, device=requested_device)
     # Padding's current-player embedding remains the established PAD index.
-    fields[:, -1] = ACTION_PLAYER_PAD
-    fields = fields.index_copy(0, valid_indices, raw[:, width:width + 10].long()).view(batch, time_steps, 10)
+    fields[:, 9] = ACTION_PLAYER_PAD
+    fields = fields.index_copy(0, valid_indices, raw[:, width:width + 14].long()).view(batch, time_steps, 14)
     return PolicyTensorBatch(
         states=states,
         board_codes=raw[:, :spec.point_count].long(),
-        casualty_bits=raw[:, spec.point_count:spec.point_count + 75].float() if dead_rules_enabled else None,
+        casualty_bits=(raw[:, spec.point_count:spec.point_count + 75].float()
+                       if dead_rules_enabled and include_casualty_features else None),
         inventory_masks=inventory_words(raw, spec.point_count, dead_rules_enabled),
         token_owner=owner_tensor,
         point_mask=torch.ones((batch, spec.point_count), dtype=torch.bool, device=requested_device),
@@ -607,6 +639,7 @@ def collate_policy_states(
         mode_ids=torch.full((batch,), spec.mode_index, dtype=torch.long, device=requested_device),
         valid_indices=valid_indices,
         passes_remaining=raw[:, width + 10:width + 14].float(),
+        action_passes_remaining=fields[..., 10:14].float(),
     )
 
 
@@ -646,7 +679,8 @@ class GamePolicyTransformer(nn.Module):
         self.config = config or ModelConfig()
         self.board_encoder = WholeBoardEncoder(self.config)
         self.action_encoder = PublicActionEncoder(
-            self.config.action_embedding_dim, joint_context=self.config.joint_action_context)
+            self.config.action_embedding_dim, joint_context=self.config.joint_action_context,
+            passes_context=self.config.action_pass_context)
         temporal_dim = self.config.temporal_dim
         self.token_fusion = (SwiGLU(temporal_dim, self.config.token_fusion_hidden_dim, self.config.dropout)
                              if self.config.token_fusion_hidden_dim else nn.Identity())
@@ -803,6 +837,10 @@ class GamePolicyTransformer(nn.Module):
                 0 if self._fixed_kv_store is None else self._fixed_kv_store.prefill_padded_tokens),
             "encoding/fixed_kv_prefill_max_padded_tokens": float(
                 0 if self._fixed_kv_store is None else self._fixed_kv_store.prefill_max_padded_tokens),
+            "encoding/fixed_kv_prefill_graph_captures": float(
+                0 if self._fixed_kv_store is None else self._fixed_kv_store.prefill_graph_captures),
+            "encoding/fixed_kv_prefill_graph_replays": float(
+                0 if self._fixed_kv_store is None else self._fixed_kv_store.prefill_graph_replays),
             "encoding/cuda_graph_captures": float(0 if self._fixed_kv_store is None else self._fixed_kv_store.graph_captures),
             "encoding/cuda_graph_replays": float(0 if self._fixed_kv_store is None else self._fixed_kv_store.graph_replays),
             "encoding/history_input_states": float(self._history_input_states),
@@ -996,7 +1034,7 @@ class GamePolicyTransformer(nn.Module):
             device=requested_device,
         )
         casualties: Tensor | None = None
-        if self.config.dead_rules_enabled:
+        if self.board_encoder.casualty_feature_dim:
             casualty_cpu = torch.zeros(
                 (len(records), MAX_CASUALTY_BITS),
                 dtype=torch.float32,
@@ -1031,7 +1069,7 @@ class GamePolicyTransformer(nn.Module):
             casualties = casualty_cpu.to(
                 requested_device, non_blocking=pin_memory
             )
-        elif any(record.known_casualty_bits is not None for record in records):
+        elif not self.config.dead_rules_enabled and any(record.known_casualty_bits is not None for record in records):
             raise ValueError("non-dead-rule model must not receive casualty history")
 
         self._board_input_tokens += len(records)
@@ -1084,7 +1122,11 @@ class GamePolicyTransformer(nn.Module):
         ).unsqueeze(1)
         no_interaction = scalar([record.no_interaction_plies for record in records])
         active_mask = scalar([record.active_mask for record in records])
-        actions = self.action_encoder(fields, present, no_interaction=no_interaction, active_mask=active_mask)
+        passes = torch.tensor(
+            [record.passes_remaining[:2] + (0, 0) if mode is TrainingMode.TWO_PLAYER
+             else record.passes_remaining for record in records], dtype=torch.float32, device=self.device)[:, None, :]
+        actions = self.action_encoder(fields, present, no_interaction=no_interaction,
+                                      active_mask=active_mask, passes_remaining=passes)
         tokens = self.token_fusion(torch.cat((actions, board_globals.unsqueeze(1)), dim=-1))
         tokens = (
             tokens
@@ -1488,6 +1530,7 @@ class GamePolicyTransformer(nn.Module):
             states,
             device=self.device,
             dead_rules_enabled=self.config.dead_rules_enabled,
+            include_casualty_features=bool(self.board_encoder.casualty_feature_dim),
         )
         batch_size, time_steps = batch.token_mask.shape
         valid_indices = batch.valid_indices
@@ -1617,6 +1660,7 @@ class GamePolicyTransformer(nn.Module):
         action_embeddings = self.action_encoder(
             batch.action_fields, batch.action_present,
             no_interaction=batch.no_interaction, active_mask=batch.active_mask,
+            passes_remaining=batch.action_passes_remaining,
         )
         tokens = self.token_fusion(torch.cat((action_embeddings, board_globals), dim=-1))
         positions = torch.arange(time_steps, device=self.device).unsqueeze(0)
@@ -1790,9 +1834,12 @@ class GamePolicyTransformer(nn.Module):
         raw = raw_cpu.to(self.device, non_blocking=pin)
         lengths_tensor, rows, positions = metadata_cpu.to(self.device, non_blocking=pin).split(
             (len(groups), len(states), len(states)))
-        fixed_metadata = None if fixed_slots is None else torch.tensor(
-            [(slot, 0, length) for slot, length in zip(fixed_slots, lengths, strict=True)],
-            dtype=torch.long, device=self.device)
+        fixed_metadata = None
+        if fixed_slots is not None:
+            fixed_host = torch.tensor(
+                [(slot, 0, length) for slot, length in zip(fixed_slots, lengths, strict=True)],
+                dtype=torch.long, pin_memory=pin)
+            fixed_metadata = fixed_host.to(self.device, non_blocking=pin)
         function = self._array_temporal_forward
         if self.training and self.device.type == "cuda" and self.config.ppo_compile_mode != "off":
             if self._tensor_learner_callable is None:
@@ -1802,7 +1849,9 @@ class GamePolicyTransformer(nn.Module):
             function = self._tensor_learner_callable
             if self.config.ppo_compile_mode == 'reduce-overhead':
                 torch.compiler.cudagraph_mark_step_begin()
-        tokens = function(raw, lengths_tensor, states[0].mode, fixed_metadata)
+        tokens = (self._fixed_kv_store.prefill(raw, lengths_tensor, states[0].mode, fixed_metadata)
+                  if fixed_metadata is not None else
+                  function(raw, lengths_tensor, states[0].mode, fixed_metadata))
         contexts = tokens[rows, positions]
         if count_history_stats:
             self._history_input_states += len(states)
@@ -1844,13 +1893,14 @@ class GamePolicyTransformer(nn.Module):
             flat[:, :spec.point_count].long(),
             torch.ones((batch * times, spec.point_count), dtype=torch.bool, device=rows.device),
             torch.full((batch * times,), spec.mode_index, dtype=torch.long, device=rows.device),
-            flat[:, spec.point_count:spec.point_count + 75].float() if self.config.dead_rules_enabled else None,
+            flat[:, spec.point_count:spec.point_count + 75].float() if self.board_encoder.casualty_feature_dim else None,
             flat[:, width + 10:width + 14].float(),
             inventory_words(flat, spec.point_count, self.config.dead_rules_enabled),
         ).view(batch, times, -1)
         fields = rows[:, :, width:]
         actions = self.action_encoder(_action_fields_with_countdown(fields), fields[..., 5].bool(),
-                                     no_interaction=fields[..., 6], active_mask=fields[..., 7])
+                                     no_interaction=fields[..., 6], active_mask=fields[..., 7],
+                                     passes_remaining=fields[..., 10:14])
         hidden = (self.token_fusion(torch.cat((actions, board), dim=-1)) + self.position_embedding(positions)
                 + self.mode_embedding(torch.full((batch, 1), spec.mode_index, dtype=torch.long, device=rows.device)))
         hidden = self._add_rule_embeddings(hidden, fields[..., 6].long(), fields[..., 7].long(),
@@ -2014,7 +2064,9 @@ class GamePolicyTransformer(nn.Module):
         offsets = np.cumsum([0, *lengths[:-1]])
         selected = [int(offset) + state.legal_actions.index(action)
                     for offset, state, action in zip(offsets, states, actions, strict=True)]
-        current = joint.index_select(0, torch.tensor(selected, dtype=torch.long, device=self.device)).float()
+        pin = supports_pinned_memory(self.device)
+        selected_cpu = torch.tensor(selected, dtype=torch.long, pin_memory=pin)
+        current = joint.index_select(0, selected_cpu.to(self.device, non_blocking=pin)).float()
         # FP32 reductions keep exact joint entropy, including every legal move.
         logs = joint.float()
         entropy = torch.zeros(len(states), device=self.device).scatter_add_(0, owners, -logs.exp() * logs)
@@ -2085,7 +2137,8 @@ class GamePolicyTransformer(nn.Module):
         temperature: float = 1.0,
         return_log_probs: bool = True,
         sampling_uniforms: Tensor | None = None,
-    ) -> tuple[list[list[tuple[int, int]]], list[Tensor]]:
+        _defer_cuda_result: bool = False,
+    ) -> tuple[list[list[tuple[int, int]]], list[Tensor]] | PendingActionSamples:
         """Joint-policy samples and logs, optionally using per-state RNG draws.
 
         ``sampling_uniforms[batch, sample]`` supplies source and destination
@@ -2119,10 +2172,13 @@ class GamePolicyTransformer(nn.Module):
         if (self.config.ppo_sampling_graphs and self.config.ppo_cuda_graphs and count == 1
                 and sampling_uniforms is None and self._fixed_kv_store is not None
                 and self.device.type == 'cuda' and not self.training):
-            from .ppo_sampling import sample_graph
+            from .ppo_sampling import PendingActionSamples, sample_graph
             uniforms = torch.rand((len(states), 2), device=self.device)
             sampled = sample_graph(self, features.context, source_masks, destination_masks,
-                                    uniforms, temperature).cpu()
+                                    uniforms, temperature)
+            if _defer_cuda_result:
+                return PendingActionSamples(sampled, return_log_probs=return_log_probs)
+            sampled = sampled.cpu()
             pairs = sampled[:, :2].to(torch.long).tolist()
             return ([[tuple(pair)] for pair in pairs],
                     [sampled[i, 2:3] for i in range(len(states))] if return_log_probs else [])

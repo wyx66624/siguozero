@@ -69,7 +69,10 @@ class MonitorTests(unittest.TestCase):
         self.write('resolved_config.json', {'target_environment_plies': 3_000_000_000,
             'checkpoint_policy': 'periodic', 'checkpoint_interval_environment_plies': 10_000_000})
         rows = [{'update': i, 'timestamp_unix': now-500+i, 'cumulative/environment_plies': i*101000,
-                 'rollout/environment_plies': 101000, 'loss/policy_total': i} for i in (10, 11, 12)]
+                 'rollout/environment_plies': 101000, 'loss/policy_total': i,
+                 'policy/opening_entropy_ratio_mass': 0., 'policy/opening_entropy_fraction': 0.,
+                 'policy/other_entropy_ratio_mass': i / 20, 'policy/other_entropy_fraction': 1.}
+                for i in (10, 11, 12)]
         self.write('latest_metrics.json', rows[-1])
         (self.run/'metrics.jsonl').write_text('\n'.join(json.dumps(r) for r in rows)+'\n')
         self.write('training_progress.json', {'pid': 42, 'timestamp_unix': now, 'session_started_unix': now-10,
@@ -85,6 +88,9 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(result['unsaved_steps'], 0)
         self.assertEqual(result['next_checkpoint_steps'], 10_000_000)
         self.assertEqual([r['update'] for r in result['chart']], [10])
+        self.assertEqual(result['entropy']['moving_average'], .5)
+        self.assertEqual(result['entropy']['covered_updates'], 1)
+        self.assertEqual([r['update'] for r in result['entropy']['history']], [10])
         self.assertIsNone(result['cycle_rate'])
 
     def test_crash_shows_saved_progress_and_normal_stop_can_save_between_milestones(self):
@@ -493,7 +499,7 @@ class SpectatorTests(unittest.TestCase):
 
         def step(game, history, **kwargs):
             actor = game.current_player
-            assert actor != human, "the model must not choose the human's compulsory pass"
+            assert actor != human, "an eliminated player must never get an action"
             legal = game.legal_actions()
             if unblock and actor == (human + 2) % 4:
                 board = game.board_for(actor)
@@ -508,27 +514,26 @@ class SpectatorTests(unittest.TestCase):
         cpu.engine = SimpleNamespace(step=step)
         return cpu
 
-    def test_immobile_seat_spectates_before_pass_budget_is_exhausted(self):
+    def test_immobile_seat_is_eliminated_without_using_pass_budget(self):
         for mode in ("four_dark", "double_open"):
             for human in (0, 2):
                 with self.subTest(mode=mode, human=human):
                     cpu = self.make_immobile_game(mode, human=human)
                     before = cpu.command({"op": "state"})
-                    self.assertTrue(before["active_players"][0])
+                    self.assertFalse(before["active_players"][0])
                     self.assertEqual(before["passes_remaining"][0], 4)
-                    self.assertEqual(before["spectator_reason"], "no_legal_moves")
+                    self.assertEqual(before["spectator_reason"], "eliminated")
                     self.assertFalse(before["your_turn"])
                     self.assertEqual(before["legal_actions"], [])
-                    pieces = before["pieces"]
                     state = cpu.command({"op": "advance"})
                     self.assertEqual([frame["ply"] for frame in state["frames"]], [0, 1, 2, 3, 4])
                     first = state["frames"][1]
-                    self.assertEqual(first["history"][-1]["actor"], 0)
-                    self.assertEqual(first["history"][-1]["combat"], "pass")
-                    self.assertEqual(first["pieces"], pieces)
-                    self.assertEqual(first["passes_remaining"][0], 3)
+                    self.assertNotEqual(first["history"][-1]["actor"], 0)
+                    self.assertTrue(all(event["actor"] != 0 for event in state["history"]))
+                    self.assertFalse(any(p and p["owner"] == 0 for p in first["pieces"]))
+                    self.assertEqual(first["passes_remaining"][0], 4)
                     self.assertEqual(first["no_capture_plies"], 1)
-                    self.assertEqual(state["ai_moves"], 3)
+                    self.assertEqual(state["ai_moves"], 4)
                     for _ in range(24):
                         if state["result"]:
                             break
@@ -538,16 +543,15 @@ class SpectatorTests(unittest.TestCase):
                     self.assertEqual(state["ply"], 70)
                     self.assertIsNone(state["spectator_reason"])
 
-    def test_temporarily_blocked_human_regains_control_when_a_move_opens(self):
+    def test_blocked_human_cannot_return_after_turn_elimination(self):
         cpu = self.make_immobile_game(unblock=True)
-        self.assertEqual(cpu.state()["spectator_reason"], "no_legal_moves")
+        self.assertEqual(cpu.state()["spectator_reason"], "eliminated")
         state = cpu.command({"op": "advance"})
         self.assertEqual(state["ply"], 4)
-        self.assertTrue(state["your_turn"])
-        self.assertIsNone(state["spectator_reason"])
-        self.assertIn((6, 10), state["legal_actions"])
-        self.assertEqual(state["passes_remaining"][0], 3)
-        self.assertEqual(cpu.command({"op": "advance"})["ply"], 4)
+        self.assertFalse(state["your_turn"])
+        self.assertEqual(state["spectator_reason"], "eliminated")
+        self.assertEqual(state["legal_actions"], [])
+        self.assertEqual(state["passes_remaining"][0], 4)
 
 
 class HttpTests(unittest.TestCase):

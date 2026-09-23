@@ -26,6 +26,16 @@ from .futile_attack import step_with_evidence
 
 
 @dataclass(frozen=True, slots=True)
+class ValueTarget:
+    """A critic-only perspective; never an additional policy decision."""
+
+    state: PolicyState
+    old_value: float
+    target: float
+    player: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PPOSample:
     state: PolicyState
     action: tuple[int, int]
@@ -38,6 +48,10 @@ class PPOSample:
     draw_value_target: float = 0.0
     learnable: bool = True
     value_state: PolicyState | None = None
+    other_team_value: ValueTarget | None = None
+    additional_values: tuple[ValueTarget, ...] = ()
+    value_player: int | None = None
+    training_diagnostic: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)

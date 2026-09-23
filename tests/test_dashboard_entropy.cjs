@@ -50,3 +50,35 @@ test('annealing displays current phase targets and eventual targets separately f
   assert.ok(!html.includes('NaN') && !html.includes('Infinity'));
   assert.ok(!context.renderExploration({'policy/adaptive_entropy_enabled':1}).includes('逐步下降'));
 });
+
+test('fixed entropy retains phase measurements and does not present inactive targets as controls', () => {
+  const html = context.renderExploration({'policy/adaptive_entropy_enabled':0,
+    'policy/entropy_opening_plies':16, 'policy/entropy_target_ratio':.5,
+    'policy/entropy_target_schedule_enabled':1,
+    'policy/opening_entropy_ratio':.22, 'policy/other_entropy_ratio':.71,
+    'policy/opening_entropy_coefficient':.01, 'policy/opening_entropy_coefficient_next':.01,
+    'policy/entropy_coefficient':.01, 'policy/entropy_coefficient_next':.01,
+    'loss/policy_entropy':-.02});
+  for (const text of ['固定系数', '目标反馈已关闭', '22%', '71%', '0.01 → 0.01', '-0.02']) {
+    assert.ok(html.includes(text), text);
+  }
+  for (const text of ['开局目标', '后续目标', '逐步下降', '本轮 / EMA', '目标通过调节']) {
+    assert.ok(!html.includes(text), text);
+  }
+});
+
+test('rolling normalized entropy shows percent, coverage and phase EMA without raw-entropy substitution', () => {
+  const html = context.renderExploration({'policy/adaptive_entropy_enabled':1,
+    'policy/entropy':1.673, 'policy/opening_entropy_ratio_ema':.43,
+    'policy/entropy_ratio_ema':.46},
+    {window_updates:20, covered_updates:20, available_updates:20, start_update:1002, end_update:1021,
+     environment_plies:1966080, latest_ratio:.4516, moving_average:.4587,
+     history:[{update:1020, moving_average:.4590}, {update:1021, moving_average:.4587}]});
+  for (const text of ['45.87%', '45.16%', '43%', '46%', '1,966,080', '1,002–1,021',
+                      '归一化动作熵趋势', '20 / 20', '按环境步数计算移动平均']) {
+    assert.ok(html.includes(text), text);
+  }
+  assert.ok(!html.includes('167.3%'));
+  assert.ok(context.renderEntropyAverageStat({moving_average:0}).includes('0%'));
+  assert.ok(context.renderEntropyAverageStat({moving_average:null}).includes('等待记录'));
+});

@@ -2,6 +2,52 @@
 from __future__ import annotations
 
 
+def reconcile_known_nonflag_hq_objective(payload, settings, *, adopt: bool = False):
+    config = payload["config"]
+    old = float(config.get("known_nonflag_hq_penalty", 0.0))
+    target = float(settings.known_nonflag_hq_penalty)
+    if old == target:
+        return
+    if not adopt:
+        raise RuntimeError("known nonflag headquarters penalty changed across resume; "
+                           "use --adopt-known-nonflag-hq-penalty to preserve state and adopt it explicitly")
+    state = payload["trainer_state"]
+    state["known_nonflag_hq_objective_migration"] = {
+        "update": int(payload["update"]),
+        "environment_plies": state.get("cumulative", {}).get("environment_plies", 0),
+        "from_penalty": old, "to_penalty": target,
+        "scope": "future_mappo_transitions_only", "perspective": "acting_learner_only",
+        "evidence": "flag_visible_in_other_headquarters_before_action",
+        "attempts_including_failed_attacks": True, "schedule": "constant",
+        "terminal_reward": "additive", "weights_and_optimizer": "preserved",
+    }
+    config["known_nonflag_hq_penalty"] = target
+
+
+def reconcile_player_advantages(payload, settings, *, adopt: bool = False):
+    """Explicitly switch future targets; preserve model, optimizer, RNG and games."""
+    if settings.algorithm != "mappo":
+        return
+    config = payload["config"]
+    old = (config.get("mappo_advantage_mode", "team_steps"), config.get("mappo_reward_scope", "team"))
+    target = (settings.mappo_advantage_mode, settings.mappo_reward_scope)
+    if old == target:
+        return
+    if not adopt:
+        raise RuntimeError("MAPPO advantage/reward ownership changed; use --adopt-player-advantages to preserve state and adopt it explicitly")
+    state = payload["trainer_state"]
+    state["player_advantage_migration"] = {
+        "update": int(payload["update"]),
+        "environment_plies": state.get("cumulative", {}).get("environment_plies", 0),
+        "from_advantage_mode": old[0], "to_advantage_mode": target[0],
+        "from_reward_scope": old[1], "to_reward_scope": target[1],
+        "scope": "future_mappo_transitions_only", "terminal_outcome": "shared_between_allies",
+        "gae_lambda_clock": "individual_decisions" if target[0] == "player_decisions" else "environment_plies",
+        "discount_clock": "environment_plies", "weights_and_optimizer": "preserved",
+    }
+    config.update(mappo_advantage_mode=target[0], mappo_reward_scope=target[1])
+
+
 def reconcile_draw_objective(payload, settings, *, adopt: bool = False):
     config = payload.get("config", {})
     old = float(config.get("draw_reward", config.get("raw_config", {}).get(

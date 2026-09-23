@@ -78,6 +78,7 @@ class CpuGame:
                          "pid": os.getpid(), "threads": torch.get_num_threads(), "seed": self.seed,
                          "temperature": self.temperature,
                          "layout_temperature": PLAY_LAYOUT_TEMPERATURE,
+                         "eliminate_no_moves": self.game.config.eliminate_no_moves,
                          "dead_rules_enabled": self.engine.policy.config.dead_rules_enabled}
         self.inference_seconds = 0.0
         self.ai_moves = 0
@@ -103,12 +104,9 @@ class CpuGame:
             if self.ended or self.game.is_terminal:
                 break
             if self.game.current_player == self.human:
-                if self._spectator_reason() != "no_legal_moves":
-                    break
-                # A compulsory pass requires no human choice or model inference.
-                # Recheck each turn so a temporarily blocked player regains control.
-                self.game.step(PASS_ACTION)
-                self.history.append_after_step(self.game)
+                # The rules engine resolves immobile seats before publishing
+                # the next actor. A remaining human turn is a real choice.
+                break
             else:
                 self.engine.step(self.game, self.history, temperature=self.temperature)
                 self.ai_moves += 1
@@ -183,6 +181,9 @@ class CpuGame:
                 "review_supported": True, "ended": ended,
                 "current_player": observation.current_player, "your_turn": your_turn,
                 "active_players": list(observation.active_players), "result": result,
+                # A deduced flag location is not a commander-death reveal.
+                # Keep the public reveal event separate from piece visibility.
+                "revealed_flags": list(observation.revealed_flags),
                 "spectator_reason": spectator_reason,
                 "no_interaction_plies": self.game.no_interaction_plies,
                 "no_capture_plies": self.game.no_interaction_plies,
@@ -198,6 +199,7 @@ class CpuGame:
                 "legal_actions": list(self.game.legal_actions(self.human)) if your_turn else [],
                 "history": [{"ply": e.ply, "actor": e.actor, "action": e.action,
                              "combat": e.combat.value, "eliminated": e.eliminated_players,
+                             "newly_revealed_flags": list(e.newly_revealed_flags),
                              "flag_captured_owner": e.flag_captured_owner} for e in observation.history]}
 
 

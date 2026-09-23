@@ -22,7 +22,13 @@ test('stopped progress reports discarded work and does not fabricate checkpoint 
 test('adaptive clip panel reports ratio bounds rather than claiming exploration guarantee', () => {
  const html=context.renderClipping({'policy/adaptive_clip_enabled':1,'policy/clip_lower':.25,
   'policy/clip_upper_base':.30,'policy/clip_upper_max':.45,'policy/clip_upper_mean':.4,
-  'policy/clip_minimum':.1,'policy/clip_maximum':.45});
- for(const text of ['0.75','1.3 / 1.45','1.4','0.1 / 0.45','不能据此保证'])assert.ok(html.includes(text),text);
+  'policy/clip_minimum':.1,'policy/clip_maximum':.45,
+  'policy/clip_absolute_advantage':0,'policy/unclipped_advantage_threshold':0});
+ for(const text of ['0.75','1.3 / 1.45','1.4','0.1 / 0.45','erf 平滑调整上界',
+                    '下界对所有样本相同','所有样本均保留 PPO 裁剪','不是动作概率的硬性投影'])assert.ok(html.includes(text),text);
+ assert.ok(!html.includes('自适应熵') && !html.includes('时跳过裁剪'));
+ const legacy=context.renderClipping({'policy/adaptive_clip_enabled':1,
+   'policy/clip_absolute_advantage':1,'policy/unclipped_advantage_threshold':2});
+ assert.ok(legacy.includes('按优势绝对值同时调节上下界') && legacy.includes('≥ 2 时跳过裁剪'));
  assert.equal(context.renderClipping({}), '');
 });

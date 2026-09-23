@@ -1,6 +1,7 @@
-"""One-step bomb rewards, kept outside rule outcomes and actor observations."""
+"""One-step tactical rewards, kept outside rule outcomes and actor observations."""
 from __future__ import annotations
 
+from ..board import ArmPoint, PASS_ACTION, PointKind
 from ..game import CombatOutcome, StepResult
 from ..pieces import PieceType
 
@@ -10,6 +11,37 @@ BOMB_REWARD_FIELDS = {
     PieceType.ARMY_COMMANDER: "bomb_army_commander_reward",
     PieceType.DIVISION_COMMANDER: "bomb_division_commander_reward",
 }
+
+NONFLAG_HQ_PENALIZED_KINDS = frozenset({
+    PieceType.REGIMENT_COMMANDER, PieceType.BRIGADE_COMMANDER,
+    PieceType.DIVISION_COMMANDER, PieceType.ARMY_COMMANDER, PieceType.COMMANDER,
+    PieceType.ENGINEER, PieceType.BOMB,
+})
+
+
+def known_nonflag_hq_entry(game, action) -> bool:
+    """Judge the chosen HQ entry/attack from the acting player's prior knowledge.
+
+    Attempts count even if the attacker dies. A visible flag in the other HQ
+    must establish the location before combat; an unknown flag never qualifies.
+    This also covers an empty nonflag HQ on one's own or an ally's arm.
+    """
+    if action == 0 or tuple(action) == PASS_ACTION or game.current_player is None:
+        return False
+    actor = game.current_player
+    board = game.board_for(actor)
+    if board.point(action[1]).kind is not PointKind.HEADQUARTERS:
+        return False
+    start, end = (board.decode(code) for code in action)
+    attacker = game.piece_at(start)
+    if (attacker is None or attacker.owner != actor
+            or attacker.kind not in NONFLAG_HQ_PENALIZED_KINDS):
+        return False
+    other = ArmPoint(end.seat, 6, 6 - end.column)
+    flag = game.piece_at(other)
+    # Use the identical public/private identity boundary as Actor observations.
+    return (flag is not None and flag.owner == end.seat
+            and game._known_piece_kind(actor, other, flag) is PieceType.FLAG)
 
 
 def bomb_event(result: StepResult) -> tuple[int | None, str | None]:

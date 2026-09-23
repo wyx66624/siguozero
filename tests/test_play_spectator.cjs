@@ -8,7 +8,7 @@ const source = fs.readFileSync(path.join(__dirname, '../src/junqi/web/static/pla
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
 function state(ply, overrides = {}) {
-  return {session_id:'game', model:{mode:'four_dark',update:7,threads:1,pid:1,seed:42},
+  return {session_id:'game', model:{mode:'four_dark',update:7,threads:1,pid:1,seed:42,eliminate_no_moves:true},
     human_seat:0, ply, your_turn:false, current_player:3, active_players:[false,true,true,true],
     result:null, legal_actions:[], inference_seconds:0, passes_remaining:[4,4,4,4],
     no_capture_draw_plies:70,no_capture_plies:0,
@@ -40,6 +40,50 @@ function reviewFixture(){
     steps:[{event:{ply:1,actor:1,action:[0,1],combat:'move'},changes:[[0,null],[1,{...piece,moved:true}]],state:{ply:1}},
       {event:{ply:2,actor:0,action:[1,0],combat:'both_removed'},changes:[[1,null]],state:{ply:2,result:win}}]};
 }
+
+function renderedTexts(element){
+  return [element.textContent,...element.children.flatMap(renderedTexts)];
+}
+
+test('known flag location and commander-death reveal have distinct board labels',async()=>{
+  const flag={owner:1,kind:'flag',name:'军旗',visible:true,moved:false};
+  const commander={owner:1,kind:'commander',name:'司令',visible:true,moved:true};
+  for(const [revealed,label,description] of [
+    [false,'推断旗','司令尚未阵亡'],[true,'亮旗','司令阵亡亮旗'],
+    [undefined,'已知旗','不能据此判断司令是否阵亡']]){
+    const initial=state(122,{active_players:[true,true,true,true],
+      pieces:[flag,revealed===true?null:commander],
+      ...(revealed===undefined?{}:{revealed_flags:[false,revealed,false,false]})});
+    const ui=await mount({initial});
+    const texts=renderedTexts(ui.element('board'));
+    assert.ok(texts.includes(label));
+    assert.ok(texts.some(text=>text.includes(description)));
+    if(revealed!==true){assert.ok(texts.includes('司令'));assert.ok(!texts.includes('亮旗'));}
+  }
+});
+
+test('own and double-open allied flags are visible without a death inference',async()=>{
+  for(const [mode,owner] of [['four_dark',0],['double_open',2]]){
+    const initial=state(0,{model:{mode},active_players:[true,true,true,true],
+      revealed_flags:[false,false,false,false],
+      pieces:[{owner,kind:'flag',name:'军旗',visible:true,moved:false},null]});
+    const ui=await mount({initial});
+    const texts=renderedTexts(ui.element('board'));
+    assert.ok(texts.includes('军旗'));
+    assert.ok(!texts.includes('推断旗')&&!texts.includes('亮旗'));
+  }
+});
+
+test('full-information replay does not label referee flags as public deductions',async()=>{
+  const review=reviewFixture();
+  review.initial.pieces[0]={owner:1,kind:'flag',name:'军旗',visible:true,moved:false};
+  review.initial.revealed_flags=[false,false,false,false];
+  const ui=await mount({savedReview:review});
+  await ui.click('review-open');
+  const texts=renderedTexts(ui.element('board'));
+  assert.ok(texts.includes('军旗'));
+  assert.ok(!texts.includes('推断旗')&&!texts.includes('已知旗'));
+});
 
 async function mount({initial=state(97), advances=[], moved, review, savedReview, restored=true, created,
     catalog, runs=[]} = {}) {
@@ -89,7 +133,7 @@ async function mount({initial=state(97), advances=[], moved, review, savedReview
 }
 
 for(const mode of ['four_dark','double_open'])test(`${mode}: restored eliminated seat advances automatically to team result`,async()=>{
-  const ui=await mount({initial:state(97,{human_seat:2,model:{mode,update:7}}),
+  const ui=await mount({initial:state(97,{human_seat:2,model:{mode,update:7,eliminate_no_moves:true}}),
     advances:[round(97,101),round(101,105,win)]});
   await ui.until(()=>ui.element('turn').textContent==='你方获胜');
   assert.equal(ui.calls.filter(c=>c.op==='advance').length,2);
@@ -183,57 +227,37 @@ test('new workers mark an immobile active human as a spectator and advance autom
   assert.equal(ui.calls.filter(c=>c.op==='advance').length,1);
 });
 
-test('refreshing an old worker with only pass available automatically uses its existing move API',async()=>{
+test('an old game with only pass available requests a new game without sending a pass',async()=>{
   const initial=state(260,{active_players:[true,true,true,true],current_player:0,
-    your_turn:true,legal_actions:[[0,0]]});
-  const waiting=state(262,{active_players:[true,true,true,true],your_turn:false});
-  const returned=state(264,{active_players:[true,true,true,true],current_player:0,
-    your_turn:true,legal_actions:[[0,0],[0,1]]});
-  const ui=await mount({initial,moved:{...returned,frames:[waiting,returned]}});
-  assert.equal(ui.element('turn').textContent,'观战中 · 无子可动');
+    model:{mode:'four_dark'},your_turn:true,legal_actions:[[0,0]]});
+  const ui=await mount({initial});
   assert.equal(ui.element('pass').disabled,true);
-  await ui.tick();
-  assert.equal(ui.element('advance').hidden,false,'pause remains available through legacy AI frames');
-  await ui.until(()=>ui.element('turn').textContent==='轮到你了');
   assert.equal(ui.timers.size,0);
   assert.equal(ui.element('advance').hidden,true);
-  const move=ui.calls.find(c=>c.op==='move');
-  assert.deepEqual(move.body,{session_id:'game',action:[0,0],expected_ply:260});
-  assert.equal(ui.calls.filter(c=>c.op==='move').length,1);
-  assert.equal(ui.element('pass').disabled,false);
+  assert.equal(ui.calls.filter(c=>['move','advance'].includes(c.op)).length,0);
+  assert.match(ui.element('notice').textContent,/请开始新棋局/);
 });
 
-test('forced-pass spectating can be paused before sending an action',async()=>{
+test('an old active game cannot continue through voluntary pass or spectator controls',async()=>{
   const ui=await mount({initial:state(260,{active_players:[true,true,true,true],current_player:0,
-    your_turn:true,legal_actions:[[0,0]]})});
+    model:{mode:'four_dark'},your_turn:true,legal_actions:[[0,0],[0,1]]})});
   await ui.click('advance');
   assert.equal(ui.timers.size,0);
   assert.equal(ui.calls.filter(c=>c.op==='move').length,0);
   assert.equal(ui.element('pass').disabled,true);
-  assert.match(ui.element('notice').textContent,/观战已暂停/);
+  assert.match(ui.element('notice').textContent,/规则已更新/);
 });
 
-test('legacy forced passes preserve the display interval across consecutive rounds',async()=>{
-  const immobile=ply=>state(ply,{active_players:[true,true,true,true],current_player:0,
-    your_turn:true,legal_actions:[[0,0]]});
-  let from=260;
-  const ui=await mount({initial:immobile(from),moved:()=>{
-    const start=from;from+=4;
-    const last=from===268?state(from,{result:win}):immobile(from);
-    return {...last,frames:Array.from({length:4},(_,i)=>i===3?last:
-      state(start+i+1,{active_players:[true,true,true,true]}))};
-  }});
-  await ui.until(()=>ui.element('turn').textContent==='你方获胜');
-  assert.equal(ui.calls.filter(c=>c.op==='move').length,2);
-  const painted=new Map(ui.paints.map(p=>[p.text,p.time]));
-  for(let ply=261;ply<=268;ply++){
-    assert.ok(painted.has(`第 ${ply} 步`));
-    assert.equal(painted.get(`第 ${ply} 步`)-painted.get(`第 ${ply-1} 步`),1000);
-  }
+test('an eliminated seat displays elimination instead of an available pass budget',async()=>{
+  const ui=await mount();
+  assert.equal(ui.element('pass').textContent,'已出局');
+  assert.match(ui.element('pass-status').textContent,/你 已出局/);
+  assert.equal(ui.element('pass').disabled,true);
 });
 
 test('a voluntary pass remains a player choice when there are movable pieces',async()=>{
-  for(const extra of [{legal_actions:[[0,0],[0,1]]},{model:{mode:'two_player'},legal_actions:[[0,0]]}]){
+  for(const mode of ['four_dark','double_open','two_player']){
+    const extra={model:{mode,eliminate_no_moves:true},legal_actions:[[0,0],[0,1]]};
     const ui=await mount({initial:state(260,{active_players:[true,true,true,true],your_turn:true,...extra})});
     assert.equal(ui.timers.size,0);
     assert.equal(ui.element('advance').hidden,true);

@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument('--config', default='configs/bootstrap.yaml')
     parser.add_argument('--microbatch', type=int)
+    parser.add_argument('--minibatch-samples', type=int)
     parser.add_argument('--torch-threads', type=int, default=4)
     parser.add_argument('--environment-workers', type=int)
     parser.add_argument('--samples-per-sequence', type=int)
@@ -107,7 +108,7 @@ def main():
     overrides = {
         "device": "cuda", "base_game_pool_size": games,
         "actor_inference_batch": games, "anchor_batch": transitions,
-        "ppo_minibatch_samples": 512,
+        "ppo_minibatch_samples": args.minibatch_samples or 512,
         "arena_enabled": False, "checkpoint_policy": "evaluation",
         "inference_snapshot_every_updates": 0,
         "historical_enabled": False,

@@ -26,6 +26,8 @@ INVENTORY_SLOTS = tuple(kind for kind in INVENTORY_TYPES for _ in range(PIECE_CO
 TYPE_BITS = {kind: 1 << index for index, kind in enumerate(PIECE_TYPE_ORDER)}
 ALL_TYPES = frozenset(PIECE_TYPE_ORDER)
 INVENTORY_ENCODER_TYPE = "whole_board_inventory_multihot_linear"
+# Same public candidate semantics, without direct casualty/pass board features.
+INVENTORY_ONLY_ENCODER_TYPE = "whole_board_inventory_candidates_linear"
 INVENTORY_MASK_ENCODING = "confirmed_exclusive_slots_v2"
 SLOTS_BY_TYPE = {kind: tuple(i for i, item in enumerate(INVENTORY_SLOTS) if item is kind)
                  for kind in PIECE_TYPE_ORDER}

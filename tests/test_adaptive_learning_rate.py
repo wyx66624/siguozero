@@ -187,14 +187,14 @@ class AdaptiveLearningRateTests(unittest.TestCase):
             finally:
                 raised.logger.close()
 
-    def test_fresh_completion_mode_starts_at_floor_and_reuses_epoch_probe(self):
+    def test_fresh_completion_mode_uses_configured_rate_and_reuses_epoch_probe(self):
         with tempfile.TemporaryDirectory() as directory:
             trainer = SelfPlayTrainer(training_settings(lr_increase_on_full_epochs=True,
-                minimum_learning_rate=5e-6, maximum_learning_rate=1e-4,
+                policy_learning_rate=1e-5, minimum_learning_rate=5e-6, maximum_learning_rate=1e-4,
                 policy_epochs=3, ppo_min_policy_epochs=1, lr_cooldown_updates=0,
                 target_kl=.02, early_stop_kl_multiple=5.), run_directory=directory)
             try:
-                self.assertEqual(trainer._set_policy_lr(1), 5e-6)
+                self.assertEqual(trainer._set_policy_lr(1), 1e-5)
                 with patch.object(trainer, '_final_policy_diagnostics', side_effect=AssertionError('duplicate probe')):
                     result = trainer._finish_learning_rate([], {
                         'optimizer/policy_steps': 3., 'optimizer/policy_epochs': 3.,
@@ -202,7 +202,7 @@ class AdaptiveLearningRateTests(unittest.TestCase):
                         'policy/final_probe_samples': 8., 'policy/final_kl': .09,
                         'policy/final_clip_fraction': .09, 'policy/final_entropy': 2.3,
                         'timing/lr_probe_seconds': .1})
-                self.assertAlmostEqual(result['optimizer/policy_lr_next'], 5.15e-6)
+                self.assertAlmostEqual(result['optimizer/policy_lr_next'], 1.03e-5)
                 self.assertEqual(result['optimizer/lr_reason'], 'completed_epochs')
                 self.assertEqual(result['policy/final_entropy'], 2.3)
             finally:

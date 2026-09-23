@@ -1,7 +1,7 @@
 """Referee-only histories for centralized value learning.
 
 These arrays never replace the visibility-filtered GameHistory used by actors.
-Each team has a fixed seat-relative global view, even after that seat is out.
+Each player has a fixed seat-relative global view, even after that seat is out.
 """
 from __future__ import annotations
 
@@ -86,10 +86,10 @@ class CentralizedHistory:
     def append_encoded_rows(self, rows: np.ndarray):
         self.history.append_encoded_rows(rows)
 
-    def value_state_for(self, team: int):
-        if team not in (0, 1):
-            raise ValueError("centralized value perspective must be team 0 or 1")
-        return PolicyState(self.history.mode, self.history.players[team].records, (), centralized=True)
+    def value_state_for(self, player: int):
+        if type(player) is not int or not 0 <= player < len(self.history.players):
+            raise ValueError("centralized value perspective must be a valid player")
+        return PolicyState(self.history.mode, self.history.players[player].records, (), centralized=True)
 
     def state_dict(self):
         return {"observation_contract": "referee_global_inventory_instances_v2", "history": self.history.state_dict()}

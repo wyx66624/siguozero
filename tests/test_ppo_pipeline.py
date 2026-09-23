@@ -122,10 +122,12 @@ class PipelineTests(unittest.TestCase):
             if p.grad is not None or q.grad is not None:
                 torch.testing.assert_close(p.grad, q.grad, rtol=3e-5, atol=3e-6, msg=name)
 
-    def check_fixed(self, device="cpu", graphs=False):
+    def check_fixed(self, device="cpu", graphs=False, tensor_learner=False):
         config = replace(ModelConfig.tiny(), board_dim=128, temporal_dim=256, temporal_heads=8,
                          temporal_layers=2, temporal_ffn_dim=128, max_transitions=20,
-                         ppo_cuda_graphs=graphs, activation_checkpointing=False)
+                         ppo_cuda_graphs=graphs, ppo_tensor_learner=tensor_learner,
+                         temporal_causal_sdpa=tensor_learner,
+                         activation_checkpointing=False)
         policy = GamePolicyTransformer(config).to(device).eval()
         reference = copy.deepcopy(policy)
         policy.start_ppo_inference_cache(capacity=8, behavior_version=5)
@@ -154,6 +156,9 @@ class PipelineTests(unittest.TestCase):
             self.assertIsNotNone(store.kernels)
             self.assertGreater(store.graph_captures, 0)
             self.assertGreaterEqual(store.graph_replays, store.graph_captures)
+            if tensor_learner:
+                self.assertGreater(store.prefill_graph_captures, 0)
+                self.assertGreater(store.prefill_graph_replays, store.prefill_graph_captures)
         policy.train()
         self.assertIsNone(policy._fixed_kv_store)
 
@@ -196,3 +201,33 @@ class PipelineTests(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA and Triton")
     def test_cuda_graph_decode_matches_reference(self):
         self.check_fixed("cuda", True)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA and Triton")
+    def test_cuda_tensor_prefill_matches_reference_through_window_slides(self):
+        self.check_fixed("cuda", True, tensor_learner=True)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA and Triton")
+    def test_prefill_graphs_share_scratch_across_shapes_and_replaced_slots(self):
+        config = replace(ModelConfig.tiny(), temporal_layers=2, max_transitions=20,
+                         ppo_tensor_learner=True, temporal_causal_sdpa=True,
+                         activation_checkpointing=False)
+        policy = GamePolicyTransformer(config).cuda().eval()
+        reference = copy.deepcopy(policy)
+        game, history = histories(window=20)
+        template = history.state_for(game)
+        policy.start_ppo_inference_cache(capacity=8, behavior_version=5)
+        with torch.inference_mode(), torch.autocast('cuda', dtype=torch.bfloat16):
+            for case, count in enumerate((1, 4, 8, 4, 1, 8)):
+                states = [replace(template, records=ArrayHistory(template.mode,
+                    [template.records[0]] * 21, 20, (1000 + case * 8 + i, 0)).view())
+                    for i in range(count)]
+                actual = policy.encode(states).context
+                expected = reference.encode(states).context
+                torch.testing.assert_close(actual, expected, atol=.02, rtol=.02)
+        store = policy._fixed_kv_store
+        self.assertEqual(store.prefill_graph_captures, 3)
+        self.assertEqual(store.prefill_graph_replays, 6)
+        self.assertEqual(len(store.entries), 8)
+        policy.start_ppo_inference_cache(capacity=8, behavior_version=6)
+        self.assertIsNot(policy._fixed_kv_store, store)
+        self.assertFalse(policy._fixed_kv_store.prefill_graphs)

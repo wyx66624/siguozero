@@ -313,6 +313,13 @@ class PagedKVCache:
             self.num_heads,
             self.head_dim,
         )[:, :max_tokens].transpose(1, 2)
+        if valid_tokens is not None:
+            # An attention score mask cannot sanitize NaNs in unused page
+            # tails: the value product can still evaluate 0 * NaN. Never feed
+            # uninitialized K/V padding to SDPA for shorter batch members.
+            padding = ~valid_tokens.transpose(-1, -2)
+            keys = keys.masked_fill(padding, 0.)
+            values = values.masked_fill(padding, 0.)
         return torch.nn.functional.scaled_dot_product_attention(
             queries.unsqueeze(2),
             keys,

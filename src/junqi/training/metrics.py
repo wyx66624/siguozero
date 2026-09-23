@@ -136,12 +136,20 @@ class MetricLogger:
         )
         os.replace(temporary, self.latest_path)
         if self.writer is not None:
+            from tensorboard.compat.proto.summary_pb2 import Summary
+            from torch.utils.tensorboard.summary import scalar
+
+            summaries = []
             for key, value in record.items():
                 if isinstance(value, (float, int)) and key not in (
                     "update",
                     "timestamp_unix",
                 ):
-                    self.writer.add_scalar(key, value, update)
+                    summaries.extend(scalar(key, value).value)
+            # Preserve each scalar's tag/value/step, with one queued event and
+            # filesystem write instead of hundreds of small cross-WSL writes.
+            if summaries:
+                self.writer._get_file_writer().add_summary(Summary(value=summaries), update)
             self.writer.flush()
         compact = {
             key: round(value, 5) if isinstance(value, float) else value

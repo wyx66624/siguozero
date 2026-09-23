@@ -20,6 +20,7 @@ from .accelerator import (
 
 
 from .checkpoint_format import (ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION, CHECKPOINT_FORMAT_VERSION,
+                                CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION,
                                 SUPPORTED_CHECKPOINT_FORMAT_VERSIONS, checkpoint_format_for_model)
 
 
@@ -27,7 +28,7 @@ def require_current_checkpoint(payload: dict[str, Any]) -> None:
     if payload.get("format_version") not in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS:
         raise ValueError(
             f"unsupported checkpoint format: {payload.get('format_version')!r}; "
-            "exclusive-slot inventory multihot checkpoint architectures require version 15 or 16. "
+            "exclusive-slot inventory multihot checkpoint architectures require version 15, 16 or 17. "
             "Use a new run directory; old board/action encoder weights are incompatible."
         )
     version = payload.get("format_version")
@@ -39,17 +40,18 @@ def require_current_checkpoint(payload: dict[str, Any]) -> None:
         for name in ("policy", "critic", "reference_policy"):
             weights = payload.get(name) or {}
             action = weights.get("action_encoder.projection.weight")
-            expected_action = 10 if version == ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION else 6
+            expected_action = (14 if version == CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION else
+                               10 if version == ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION else 6)
             if action is not None and (action.ndim != 2 or action.shape[1] != expected_action):
                 raise ValueError(f"version {version} checkpoint requires {expected_action} action inputs")
-            if version == ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION and any(key in weights for key in (
+            if version in (ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION, CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION) and any(key in weights for key in (
                     "no_interaction_embedding.weight", "active_embedding.weight", "revealed_embedding.weight")):
                 raise ValueError("joint action checkpoint must not contain separate countdown/alive/revealed embeddings")
             board = weights.get("board_encoder.projection.weight")
             if board is not None:
-                expected = 129 * 26 + 3 + 75 + 4
+                expected = 129 * 26 + 3 + (0 if version == CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION else 75 + 4)
                 if board.ndim != 2 or board.shape[1] != expected:
-                    raise ValueError("inventory multihot checkpoint requires 3436 board inputs")
+                    raise ValueError(f"inventory multihot checkpoint requires {expected} board inputs")
     if version in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS:
         weights = payload.get("critic")
         if payload.get("algorithm") == "mappo" and weights is not None:

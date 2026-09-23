@@ -1,4 +1,4 @@
-"""Requested first-pass coverage, unclipped advantage tails and history sampling."""
+"""First-pass coverage, ACPO clipping and retained history sampling."""
 import copy
 from dataclasses import replace
 import math
@@ -34,14 +34,18 @@ def test_production_steps_mix_and_kl_contract():
     assert settings.arena_interval_environment_plies == 50_000_000
     assert settings.arena_after_half_interval_environment_plies == 50_000_000
     assert settings.arena_champion_only
-    assert settings.lr_kl_band_lower == .08 and settings.lr_kl_band_upper == .14
+    assert settings.lr_epoch_completion
+    assert settings.lr_kl_band_lower is settings.lr_kl_band_upper is None
+    assert settings.lr_minimum_completed_epochs == 2 and settings.lr_increase_kl_threshold == .08
+    assert settings.ppo_kl_probe_interval_steps == 16
+    assert settings.early_stop_kl_threshold == .10
     assert settings.policy_epochs == settings.critic_epochs == 3
     assert settings.ppo_min_policy_epochs == 1 and settings.early_stop_clip_fraction == 1.
     assert not settings.lr_increase_on_full_epochs
     assert settings.lr_increase_factor == 1.05 and settings.lr_decrease_factor == .95
-    assert settings.lr_stable_updates == settings.lr_cooldown_updates == 3
-    assert settings.minimum_learning_rate == 5e-6 and settings.maximum_learning_rate == 1e-4
-    assert math.ceil(settings.historical_start_fraction * settings.target_environment_plies) == 200_000_000
+    assert settings.lr_stable_updates == 1 and settings.lr_cooldown_updates == 0
+    assert settings.minimum_learning_rate == 1e-6 and settings.maximum_learning_rate == 1e-4
+    assert math.ceil(settings.historical_start_fraction * settings.target_environment_plies) == 1_000_000_000
     assert math.ceil(settings.historical_checkpoint_start_fraction * settings.target_environment_plies) == 50_000_000
     assert settings.historical_training_fraction == .5 and settings.historical_teammate_fraction == 0
     assert settings.historical_sampling == 'strength'
@@ -154,7 +158,7 @@ def test_second_epoch_can_stop_mid_pass_after_minibatch_kl_exceeds_limit():
     assert result['optimizer/policy_stop_kl'] == 1
 
 
-def test_absolute_advantages_have_symmetric_bounds_and_unclipped_tail_gradients():
+def test_legacy_optional_absolute_bounds_and_unclipped_tail_gradients():
     advantage = torch.tensor([3., -3., .1, -.1, 1., -1.])
     ratio = torch.tensor([1.8, .2, 1.8, .2, 1.4, .6], requires_grad=True)
     lower, upper = advantage_clip_bounds(advantage, .25, .3, .15, .1, .45, True)
@@ -166,7 +170,35 @@ def test_absolute_advantages_have_symmetric_bounds_and_unclipped_tail_gradients(
     assert outside.tolist() == [0., 0., 1., 1., 0., 0.]
 
 
-def test_unclipped_tail_graph_and_eager_losses_and_gradients_match():
+@pytest.mark.parametrize('environment_plies', [0, 175_000_000, 1_500_000_000, 3_000_000_000])
+def test_production_acpo_bounds_are_signed_smooth_and_clip_extreme_advantages(environment_plies):
+    bounds = scheduled_policy_clip(config(), environment_plies)
+    assert not bounds.absolute_advantage and bounds.unclipped_advantage_threshold == 0
+    advantage = torch.tensor([-100., -3., -2.0001, -2., -1.9999, -1., 0.,
+                               1., 1.9999, 2., 2.0001, 3., 100.], requires_grad=True)
+    lower, upper = advantage_clip_bounds(advantage, bounds.lower, bounds.upper, bounds.bonus,
+                                         bounds.minimum, bounds.maximum, bounds.absolute_advantage)
+    expected = torch.tensor([bounds.upper + bounds.bonus * .5 * (1 + math.erf(a / math.sqrt(2)))
+                             for a in advantage.detach().tolist()]).clamp(bounds.minimum, bounds.maximum)
+    torch.testing.assert_close(upper, expected)
+    torch.testing.assert_close(lower, torch.full_like(lower, bounds.lower))
+    assert not lower.requires_grad and not upper.requires_grad
+    assert upper[1] < upper[6] < upper[-2]
+    assert upper[10] - upper[8] < 1e-4
+    assert upper[4] - upper[2] < 1e-4
+    # Even extreme advantages must plateau after a beneficial ratio change
+    # exceeds its bound. Worsening the objective must retain a corrective gradient.
+    for beneficial in (True, False):
+        ratio = torch.where(advantage.detach() >= 0,
+                            1.8 if beneficial else .2, .2 if beneficial else 1.8).requires_grad_()
+        objective, outside = clipped_surrogate(ratio, advantage, lower, upper,
+                                               bounds.unclipped_advantage_threshold)
+        gradient = torch.autograd.grad(-objective.sum(), ratio)[0]
+        torch.testing.assert_close(gradient, torch.zeros_like(advantage) if beneficial else -advantage.detach())
+        torch.testing.assert_close(outside, torch.ones_like(outside))
+
+
+def test_production_acpo_graph_and_eager_losses_and_gradients_match():
     torch.set_num_threads(1)
     torch.manual_seed(27)
     fixture = graph_test.LearnerGraphTests()
@@ -177,6 +209,7 @@ def test_unclipped_tail_graph_and_eager_losses_and_gradients_match():
     graph = fixture.graph(model, False)
     graph.callable = lambda *args: contexts
     bounds = scheduled_policy_clip(config(), 0)
+    assert not bounds.absolute_advantage and bounds.unclipped_advantage_threshold == 0
     assert graph.stage(model, samples, clip=.2, coefficient=.01, policy_clip=bounds,
                        opening_coefficient=.01, opening_plies=16)
     loss, metrics = graph._loss(model)
@@ -186,11 +219,35 @@ def test_unclipped_tail_graph_and_eager_losses_and_gradients_match():
                                 opening_entropy_coefficient=.01, entropy_opening_plies=16,
                                 sequence_training=True, defer_metrics=True, policy_clip=bounds)
     torch.testing.assert_close(metrics, torch.stack(list(eager.metrics.values())), rtol=2e-6, atol=2e-7)
+    assert eager.metrics['policy/unclipped_advantage_fraction'] == 0
+    assert float(eager.metrics['policy/clip_lower_mean']) == pytest.approx(bounds.lower)
     loss.backward()
     eager.loss.backward()
     for p, q in zip(model.parameters(), reference.parameters()):
         if q.grad is not None:
             torch.testing.assert_close(p.grad, q.grad, rtol=2e-5, atol=3e-7)
+
+
+def test_resume_adopts_acpo_bounds_without_restoring_old_tail_exemption(tmp_path):
+    old = training_settings(ppo_adaptive_clip=True, ppo_clip_absolute_advantage=True,
+                           ppo_unclipped_advantage_threshold=2., target_environment_plies=3_000_000_000)
+    trainer = SelfPlayTrainer(old, run_directory=tmp_path)
+    trainer.train()
+    saved = torch.load(trainer.checkpoints.latest_path, map_location='cpu', weights_only=False)
+    trainer.logger.close()
+    current = replace(old, ppo_clip_absolute_advantage=False, ppo_unclipped_advantage_threshold=0.)
+    resumed = SelfPlayTrainer(current, run_directory=tmp_path)
+    try:
+        assert resumed.update == saved['update']
+        assert resumed.cumulative == saved['trainer_state']['cumulative']
+        for name in ('policy', 'critic', 'layout', 'reference_layout',
+                     'policy_optimizer', 'critic_optimizer', 'layout_optimizer'):
+            torch.testing.assert_close(getattr(resumed, name).state_dict(), saved[name], rtol=0, atol=0)
+        bounds = resumed._policy_clip()
+        assert bounds == scheduled_policy_clip(current, resumed.cumulative['environment_plies'])
+        assert not bounds.absolute_advantage and bounds.unclipped_advantage_threshold == 0
+    finally:
+        resumed.logger.close()
 
 
 def test_strength_sampling_matches_main_formula_and_survives_resume(tmp_path):

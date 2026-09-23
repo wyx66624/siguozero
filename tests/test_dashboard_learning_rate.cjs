@@ -67,3 +67,17 @@ test('KL band explains both streaks, observation period, and the mean KL guard',
  assert.ok(summary.includes('0.15'));
  assert.ok(!summary.includes('目标 0.02'));
 });
+
+test('epoch completion explains partial coverage and uses final probe KL', () => {
+ const m={'optimizer/adaptive_lr_enabled':1,'optimizer/lr_epoch_completion':1,
+  'optimizer/lr_reason':'incomplete_required_epochs','optimizer/lr_increase_factor':1.05,
+  'optimizer/lr_decrease_factor':.95,'optimizer/lr_increase_kl_threshold':.09,
+  'optimizer/policy_epochs':1.25,'optimizer/policy_epochs_max':3,
+  'policy/early_stop_kl_threshold':.1,'policy/kl_probe_interval_steps':16,
+  'policy/final_probe_samples':8192,'policy/final_kl':.104,'policy/approx_kl_old':.04};
+ const html=context.renderLearningRate(m);
+ for(const value of ['第二个 epoch 未完成','下降 5%','1.25 / 3','每 16 次','8,192','最终 KL < 0.09','第一遍完整训练'])assert.ok(html.includes(value),value);
+ assert.ok(!html.includes('稳定轮次 / 要求'));
+ assert.ok(context.renderKlStat(m).includes('0.104'));
+ assert.ok(!context.renderKlStat(m).includes('0.04'));
+});

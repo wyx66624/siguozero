@@ -23,7 +23,7 @@ import numpy as np
 from ..game import GameConfig, JunqiGame
 from .packed_observation import observation_rows
 from .futile_attack import step_with_evidence
-from .tactical_rewards import bomb_event
+from .tactical_rewards import bomb_event, known_nonflag_hq_entry
 
 
 class EnvironmentState(NamedTuple):
@@ -47,17 +47,27 @@ class EnvironmentStep(NamedTuple):
     centralized_records: np.ndarray | None = None
     bomb_owner: int | None = None
     bombed_kind: str | None = None
+    tactical: dict | None = None
+    known_nonflag_hq: bool = False
 
 
 def environment_state(game):
     return EnvironmentState(game.current_player, tuple(game.legal_actions()) if not game.is_terminal else ())
 
 
-def _advance(index, game, action, mode, *, track_futile_attacks=False, centralized_critic=False):
+def _advance(index, game, action, mode, *, track_futile_attacks=False, centralized_critic=False,
+             tactical_logging=False, track_known_nonflag_hq=False):
     player = game.current_player
     if player is None:
         raise RuntimeError('terminal game remained in PPO environment')
     team = game.team_of(player)
+    tactical = None
+    if tactical_logging:
+        from .tactical_events import public_tactical_event
+        started = time.perf_counter()
+        tactical = public_tactical_event(game, action)
+        tactical["diagnostic_seconds"] = time.perf_counter() - started
+    nonflag_hq = track_known_nonflag_hq and known_nonflag_hq_entry(game, action)
     result, futile_attack = step_with_evidence(game, action, enabled=track_futile_attacks)
     rows = observation_rows(game, mode)
     terminal = game.is_terminal
@@ -67,11 +77,14 @@ def _advance(index, game, action, mode, *, track_futile_attacks=False, centraliz
         from .mappo_encoding import centralized_observation_rows
         centralized_rows = centralized_observation_rows(game, mode, public_rows=rows)
     bomb_owner, bombed_kind = bomb_event(result)
+    if tactical is not None:
+        from .tactical_events import finish_tactical_event
+        finish_tactical_event(tactical, result, game)
     return EnvironmentStep(index, environment_state(game), rows, terminal,
                            rewards[player] if terminal else 0., rewards,
                            1 if terminal or game.team_of(game.current_player) == team else -1,
                            result.flag_captured_owner, futile_attack, centralized_rows,
-                           bomb_owner, bombed_kind)
+                           bomb_owner, bombed_kind, tactical, nonflag_hq)
 
 
 @lru_cache(maxsize=2)
@@ -134,6 +147,8 @@ def _worker():
     games, mode = {}, None
     track_futile_attacks = False
     centralized_critic = False
+    tactical_indices = frozenset()
+    track_known_nonflag_hq = False
     try:
         while True:
             command, payload = _receive(sys.stdin.buffer)
@@ -141,7 +156,9 @@ def _worker():
                 return
             if command == 'initialize':
                 mode, replacements, track_futile_attacks = payload[:3]
-                centralized_critic = payload[3] if len(payload) == 4 else False
+                centralized_critic = payload[3] if len(payload) >= 4 else False
+                tactical_indices = frozenset(payload[4]) if len(payload) >= 5 else frozenset()
+                track_known_nonflag_hq = payload[5] if len(payload) >= 6 else False
                 games = dict(replacements)
                 value = [(index, environment_state(game)) for index, game in games.items()]
             elif command == 'step':
@@ -150,7 +167,9 @@ def _worker():
                 started = time.perf_counter()
                 value = ([_advance(index, games[index], action, mode,
                                    track_futile_attacks=track_futile_attacks,
-                                   centralized_critic=centralized_critic) for index, action in actions],
+                                   centralized_critic=centralized_critic,
+                                   track_known_nonflag_hq=track_known_nonflag_hq,
+                                   tactical_logging=index in tactical_indices) for index, action in actions],
                          time.perf_counter() - started)
             elif command == 'snapshot':
                 games.update(payload)
@@ -207,7 +226,8 @@ class ParallelPPOEnvironment:
             raise RuntimeError(f'PPO environment worker {worker} failed:\n{value}')
         return value
 
-    def begin(self, pool, *, track_futile_attacks=False, centralized_critic=False):
+    def begin(self, pool, *, track_futile_attacks=False, centralized_critic=False, tactical_indices=(),
+              track_known_nonflag_hq=False):
         if self.active_workers:
             raise RuntimeError('cannot replace a PPO pool during an outstanding step')
         self._start(len(pool.slots))
@@ -216,7 +236,9 @@ class ParallelPPOEnvironment:
         for worker, process in enumerate(self.processes):
             games = [(i, slot.game) for i, slot in enumerate(pool.slots) if i % len(self.processes) == worker]
             payload = (pool.mode, games, track_futile_attacks)
-            if centralized_critic:
+            if centralized_critic or tactical_indices or track_known_nonflag_hq:
+                payload += (centralized_critic, tuple(tactical_indices))
+            if track_known_nonflag_hq:
                 payload += (True,)
             _send(process.stdin, ('initialize', payload))
         for worker in range(len(self.processes)):

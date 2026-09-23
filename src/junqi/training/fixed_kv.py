@@ -41,6 +41,8 @@ class FixedKVCache:
         self.storage: Tensor | None = None
         self.contexts: Tensor | None = None
         self.graphs: OrderedDict[tuple, tuple] = OrderedDict()
+        self.prefill_graphs: OrderedDict[tuple, tuple] = OrderedDict()
+        self.prefill_graph_pool = None
         self.cuda_graphs = cuda_graphs
         self.kernels = None
         if model.device.type == "cuda":
@@ -54,6 +56,7 @@ class FixedKVCache:
         self.prefill_padded_tokens = self.prefill_max_padded_tokens = 0
         self.submitted_decode_tokens = 0
         self.graph_captures = self.graph_replays = 0
+        self.prefill_graph_captures = self.prefill_graph_replays = 0
         self._encode_calls = 0
         self.allocator_trimmed_bytes = 0
 
@@ -191,6 +194,49 @@ class FixedKVCache:
             hidden = layer.incremental_output(hidden, attended.transpose(1, 2).reshape(batch, queries, -1))
         normalized = self.model.temporal_norm(hidden)
         return normalized[torch.arange(batch, device=raw.device), (metadata[:, 2] - 1).clamp_min(0)]
+
+    def prefill(self, raw: Tensor, lengths: Tensor, mode, metadata: Tensor) -> Tensor:
+        """Replay recurring full windows without changing their KV contents.
+
+        Short/large cold batches retain the ordinary path. Captures belong to
+        this frozen cache, so clearing it also releases every reference to its
+        KV addresses before weights or the behavior version can change.
+        """
+        forward = self.model._array_temporal_forward
+        if (not self.cuda_graphs or self.kernels is None or self.model.training
+                or torch.is_grad_enabled() or raw.shape[0] > 8
+                or raw.shape[1] != self.model.config.max_sequence_tokens):
+            return forward(raw, lengths, mode, metadata)
+        key = (tuple(raw.shape), mode, torch.is_autocast_enabled('cuda'),
+               torch.get_autocast_dtype('cuda'))
+        entry = self.prefill_graphs.get(key)
+        if entry is None:
+            static_raw, static_lengths, static_meta = raw.clone(), lengths.clone(), metadata.clone()
+            stream = warmup_stream(raw.device)
+            stream.wait_stream(torch.cuda.current_stream(raw.device))
+            with torch.cuda.stream(stream):
+                for _ in range(2):
+                    forward(static_raw, static_lengths, mode, static_meta)
+            torch.cuda.current_stream(raw.device).wait_stream(stream)
+            if self.prefill_graph_pool is None:
+                self.prefill_graph_pool = torch.cuda.graph_pool_handle()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, pool=self.prefill_graph_pool):
+                output = forward(static_raw, static_lengths, mode, static_meta)
+            entry = graph, static_raw, static_lengths, static_meta, output
+            self.prefill_graphs[key] = entry
+            self.prefill_graph_captures += 1
+            while len(self.prefill_graphs) > 8:
+                self.prefill_graphs.popitem(last=False)
+        else:
+            self.prefill_graphs.move_to_end(key)
+        graph, static_raw, static_lengths, static_meta, output = entry
+        static_raw.copy_(raw)
+        static_lengths.copy_(lengths)
+        static_meta.copy_(metadata)
+        graph.replay()
+        self.prefill_graph_replays += 1
+        return output
 
     def _run_decode(self, raw: Tensor, metadata: Tensor, extent: int, mode) -> Tensor:
         if not self.cuda_graphs or self.kernels is None:

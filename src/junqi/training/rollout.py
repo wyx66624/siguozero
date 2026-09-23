@@ -76,12 +76,16 @@ class RolloutMetrics:
     flag_capture_reward_abs_sum: float = 0.0
     futile_attacks: int = 0
     futile_attack_reward_abs_sum: float = 0.0
+    known_nonflag_hq_entries: int = 0
+    known_nonflag_hq_reward_sum: float = 0.0
     bombed_commanders: int = 0
     bombed_army_commanders: int = 0
     bombed_division_commanders: int = 0
     bomb_reward_sum: float = 0.0
     wall_seconds: float = 0.0
     actor_inference_seconds: float = 0.0
+    actor_result_wait_seconds: float = 0.0
+    actor_deferred_batches: int = 0
     environment_step_seconds: float = 0.0
     environment_workers: int = 1
     environment_worker_seconds: float = 0.0
@@ -119,6 +123,13 @@ class RolloutMetrics:
         setattr(self, field, getattr(self, field) + 1)
         self.bomb_reward_sum += reward
 
+    def record_known_nonflag_hq(self, event: bool, coefficient: float, *, learnable=True) -> float:
+        if not event or not learnable or coefficient == 0:
+            return 0.0
+        self.known_nonflag_hq_entries += 1
+        self.known_nonflag_hq_reward_sum -= coefficient
+        return -coefficient
+
     def as_dict(self) -> dict[str, float | int]:
         return {
             "rollout/policy_samples": self.policy_samples,
@@ -139,12 +150,16 @@ class RolloutMetrics:
             "rollout/futile_attacks": self.futile_attacks,
             "rollout/futile_attack_rate": self.futile_attacks / max(1, self.policy_samples),
             "rollout/futile_attack_reward_abs_sum": self.futile_attack_reward_abs_sum,
+            "rollout/known_nonflag_hq_entries": self.known_nonflag_hq_entries,
+            "rollout/known_nonflag_hq_reward_sum": self.known_nonflag_hq_reward_sum,
             "rollout/bombed_commanders": self.bombed_commanders,
             "rollout/bombed_army_commanders": self.bombed_army_commanders,
             "rollout/bombed_division_commanders": self.bombed_division_commanders,
             "rollout/bomb_reward_sum": self.bomb_reward_sum,
             "rollout/wall_seconds": self.wall_seconds,
             "rollout/actor_inference_seconds": self.actor_inference_seconds,
+            "rollout/actor_result_wait_seconds": self.actor_result_wait_seconds,
+            "rollout/actor_deferred_batches": self.actor_deferred_batches,
             "rollout/environment_step_work_seconds": self.environment_step_seconds,
             "rollout/environment_workers": self.environment_workers,
             "rollout/environment_worker_seconds_sum": self.environment_worker_seconds,
@@ -277,6 +292,41 @@ class FrozenPolicyActor:
                 all_logs.extend(logs)
                 start += batch_size
         return all_actions, all_logs
+
+    def sample_async(
+        self, states: Sequence[PolicyState], *, count: int = 1,
+        temperature: float = 1.0, return_log_probs: bool = True,
+        sampling_uniforms: torch.Tensor | None = None,
+    ):
+        """Submit one CUDA sampling wave; defer its mandatory CPU result wait.
+
+        All model/cache mutations and random draws are still submitted on the
+        caller's thread and stream. CPU rules/history bookkeeping may run before
+        the returned result is read. Portable and split-batch paths stay eager.
+        """
+        options = dict(count=count, return_log_probs=return_log_probs)
+        if temperature != 1.0:
+            options['temperature'] = temperature
+        if sampling_uniforms is not None:
+            options['sampling_uniforms'] = sampling_uniforms
+        if (len(states) == 0 or self.device_type != 'cuda' or count != 1 or sampling_uniforms is not None
+                or len(states) > self.max_batch_size or self.policy.training
+                or not self.policy.config.ppo_sampling_graphs
+                or not self.policy.config.ppo_cuda_graphs
+                or self.policy._fixed_kv_store is None):
+            return self.sample(states, **options)
+        with torch.inference_mode(), torch.autocast(
+            device_type='cuda', dtype=self.amp_dtype or torch.float32,
+            enabled=self.amp_dtype is not None,
+        ):
+            try:
+                return self.policy.sample_action_groups(states, _defer_cuda_result=True, **options)
+            except RuntimeError as error:
+                if not is_out_of_memory(error, self.device_type):
+                    raise
+        # Reuse the existing bounded OOM retry rather than retaining a failed
+        # asynchronous result or permanently selecting a smaller fast path.
+        return self.sample(states, **options)
 
     def reset_temporal_prefixes(self) -> None:
         """Bound KV memory between independent anchor waves."""

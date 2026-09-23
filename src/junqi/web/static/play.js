@@ -5,7 +5,7 @@ const outcomes={win:'你方获胜',loss:'你方落败',draw:'本局和棋'};
 const reasons={team_eliminated:'一方全部出局',no_capture_draw:'连续 70 步没有吃子',no_interaction_draw:'旧规则：连续 60 步无交战',max_plies_draw:'达到该对局配置的步数上限'};
 const combat={pass:'跳过回合',move:'行棋',attacker_wins:'进攻获胜',defender_wins:'进攻失利',both_removed:'双方移除'};
 const isPass=a=>a[0]===0&&a[1]===0;
-const canPass=()=>!!state?.your_turn&&!isSpectator()&&state.legal_actions.some(isPass);
+const canPass=()=>!!state?.your_turn&&!needsRuleRestart()&&!isSpectator()&&state.legal_actions.some(isPass)&&state.legal_actions.some(a=>!isPass(a));
 const moveText=e=>isPass(e.action)?'跳过回合':`${e.action[0]} → ${e.action[1]} · ${combat[e.combat]}`;
 let models=[],state=null,session=sessionStorage.getItem('junqi-session'),selected=null,busy=false;
 let spectatorPaused=false,spectatorTimer=null;
@@ -29,7 +29,8 @@ function viewedState(next){
  }
  return {...next,spectator_reason:reason};
 }
-function isSpectator(){return !reviewing&&!!session&&!!state&&!state.result&&!state.ended&&['four_dark','double_open'].includes(state.model.mode)&&!!state.spectator_reason;}
+function needsRuleRestart(){return !reviewing&&!!session&&!!state&&!state.result&&!state.ended&&state.model.eliminate_no_moves!==true;}
+function isSpectator(){return !needsRuleRestart()&&!reviewing&&!!session&&!!state&&!state.result&&!state.ended&&['four_dark','double_open'].includes(state.model.mode)&&!!state.spectator_reason;}
 function updateSpectatorControls(){
  const watching=isSpectator();$('advance').hidden=!watching;
  $('advance').disabled=busy&&(!watching||spectatorPaused);
@@ -134,6 +135,17 @@ function updateModelInfo(){const m=models.find(m=>m.id===$('model').value);if(!m
  seats.forEach((label,i)=>{const o=document.createElement('option');o.value=i;o.textContent=label;$('seat').append(o)});if(Number(previous)<seats.length)$('seat').value=previous;$('new').disabled=busy;
 }
 function svg(tag,attrs={},text){const e=document.createElementNS(ns,tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);if(text!=null)e.textContent=text;return e;}
+function piecePresentation(piece){
+ const ordinary={name:piece.name,description:piece.name};
+ if(piece.kind!=='flag'||reviewing)return ordinary;
+ const revealed=state.revealed_flags?.[piece.owner];
+ if(revealed===true)return {name:'亮旗',description:'军旗（司令阵亡亮旗）'};
+ if(piece.owner===0||(state.model.mode==='double_open'&&piece.owner===2))return ordinary;
+ if(revealed===false)return {name:'推断旗',description:'军旗（根据公开信息确定旗位，司令尚未阵亡）'};
+ // Older live workers do not report reveal events. Visible identity alone
+ // cannot establish commander death, even when the flag is known exactly.
+ return {name:'已知旗',description:'军旗（旗位已知，不能据此判断司令是否阵亡）'};
+}
 function renderBoard(){
  const board=$('board'),two=state.model.mode==='two_player',points=state.board.points;
  board.replaceChildren();board.setAttribute('viewBox',two?'-3.1 -6.7 6.2 13.4':'-8.7 -8.7 17.4 17.4');
@@ -141,13 +153,14 @@ function renderBoard(){
  for(const p of state.board.paths){const a=points[p.from],b=points[p.to];board.append(svg('line',{x1:a.x,y1:a.y,x2:b.x,y2:b.y,stroke:p.kind==='railway'?'#567387':'#3a5265','stroke-width':p.kind==='railway'?'.065':'.035','stroke-dasharray':p.kind==='railway'?'.13 .06':''}));}
  const last=state.history.at(-1);if(last&&!isPass(last.action)){const a=points[last.action[0]],b=points[last.action[1]];board.append(svg('line',{x1:a.x,y1:a.y,x2:b.x,y2:b.y,stroke:'#d2bd7c','stroke-width':'.08',opacity:'.7'}));}
  for(const p of points){
-  const piece=state.pieces[p.code],target=targets.has(p.code),source=selected===p.code,canSelect=state.your_turn&&origins.has(p.code);
-  const label=`点 ${p.code}${piece?' · '+player(piece.owner)+' '+piece.name:''}${target?' · 可落点':canSelect?' · 可选择':''}`;
+  const piece=state.pieces[p.code],target=targets.has(p.code),source=selected===p.code,canSelect=state.your_turn&&!needsRuleRestart()&&origins.has(p.code);
+  const presentation=piece?piecePresentation(piece):null;
+  const label=`点 ${p.code}${piece?' · '+player(piece.owner)+' '+presentation.description:''}${target?' · 可落点':canSelect?' · 可选择':''}`;
   const group=svg('g',{class:'point',transform:`translate(${p.x} ${p.y})`,role:'button',tabindex:'0','aria-label':label});
   group.append(svg('title',{},label));
   const shape=p.kind==='camp'?'circle':'rect';const attrs=shape==='circle'?{r:'.30'}:{x:'-.29',y:'-.21',width:'.58',height:'.42',rx:p.kind==='headquarters'?'.03':'.08'};
   group.append(svg(shape,{...attrs,class:'node',fill:'#152636',stroke:p.kind==='headquarters'?'#7b7b61':'#526c7d','stroke-width':'.025'}));
-  if(piece){group.append(svg('rect',{x:'-.37',y:'-.25',width:'.74',height:'.50',rx:'.07',fill:piece.visible?'#223b4b':'#1a2e3b',stroke:colors[piece.owner],'stroke-width':source?'.065':'.035'}));group.append(svg('text',{class:'piece-label',fill:colors[piece.owner]},piece.name));}
+  if(piece){group.append(svg('rect',{x:'-.37',y:'-.25',width:'.74',height:'.50',rx:'.07',fill:piece.visible?'#223b4b':'#1a2e3b',stroke:colors[piece.owner],'stroke-width':source?'.065':'.035'}));group.append(svg('text',{class:'piece-label',fill:colors[piece.owner]},presentation.name));}
   if(!piece)group.append(svg('text',{class:'code-label',y:'.06'},p.code));
   if(source)group.append(svg('rect',{x:'-.44',y:'-.32',width:'.88',height:'.64',rx:'.1',fill:'none',stroke:'#f7df95','stroke-width':'.05'}));
   if(target)group.append(svg('circle',{r:'.16',fill:'#76efb6',opacity:'.85',class:'target','pointer-events':'none'}));
@@ -156,19 +169,20 @@ function renderBoard(){
  }
  if(two){board.append(svg('text',{x:0,y:'.08','text-anchor':'middle',fill:'#69889f','font-size':'.18','letter-spacing':'.25'},'前 线'));}
  document.querySelector('.legend').innerHTML=two?'<span class="s0">● 己方</span><span class="s1">● 对手</span><span>虚线：铁路 · 圆形：行营</span>':'<span class="s0">● 己方</span><span class="s2">● 对家队友</span><span class="s1">● 左侧对手</span><span class="s3">● 右侧对手</span><span>虚线：铁路 · 圆形：行营</span>';
+ if(!reviewing)document.querySelector('.legend').innerHTML+='<span>推断旗 / 已知旗：只表示旗位已知；亮旗：司令阵亡。</span>';
 }
 function render(){
  selected=null;renderBoard();$('ply').textContent=`第 ${state.ply} 步`;
- $('turn').textContent=reviewing?(reviewIndex?'明棋复盘':'明棋复盘 · 初始布阵'):state.result?outcomes[state.result.outcome]:state.ended?'棋局已结束':isSpectator()&&state.spectator_reason==='no_legal_moves'?'观战中 · 无子可动':state.your_turn?'轮到你了':`${player(state.current_player)}的回合`;
+ $('turn').textContent=reviewing?(reviewIndex?'明棋复盘':'明棋复盘 · 初始布阵'):state.result?outcomes[state.result.outcome]:state.ended?'棋局已结束':needsRuleRestart()?'规则已更新 · 请重新开局':isSpectator()&&state.spectator_reason==='no_legal_moves'?'观战中 · 无子可动':state.your_turn?'轮到你了':`${player(state.current_player)}的回合`;
  updateSpectatorControls();
  $('pass').disabled=busy||!canPass();
- $('pass').textContent=`跳过回合 · 剩余 ${state.passes_remaining?.[0]??0} 次`;
- $('pass-status').textContent=state.passes_remaining?`剩余跳过次数：${state.passes_remaining.map((n,i)=>`${player(i)} ${n}`).join(' · ')}。还差 ${Math.max(0,state.no_capture_draw_plies-state.no_capture_plies)} 步无吃子和棋。`:'';
+ $('pass').textContent=state.active_players?.[0]===false?'已出局':`跳过回合 · 剩余 ${state.passes_remaining?.[0]??0} 次`;
+ $('pass-status').textContent=state.passes_remaining?`无子可动时立即出局。剩余跳过次数：${state.passes_remaining.map((n,i)=>`${player(i)} ${state.active_players?.[i]===false?'已出局':n}`).join(' · ')}。还差 ${Math.max(0,state.no_capture_draw_plies-state.no_capture_plies)} 步无吃子和棋。`:'';
  const m=state.model;$('model-details').replaceChildren();
  const rows=[['棋种',names[m.mode]],['训练轮次',`update ${m.update}`],['出招方式',m.temperature===0?'argmax · 最大概率':m.temperature==null?'—':`温度 ${m.temperature}`],['布阵温度',m.layout_temperature??'—'],['运行设备',`CPU · ${m.threads} 线程`],['对弈进程',`PID ${m.pid}`],['GPU 上下文',m.cuda_initialized?'异常':'未创建'],['本轮 AI 耗时',`${state.inference_seconds.toFixed(2)} 秒`],['随机种子',m.seed],['规则',m.dead_rules_enabled?'含确定性推断规则':'基础规则']];
  for(const [label,value]of rows){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=value;$('model-details').append(dt,dd);}
  $('moves').replaceChildren();for(const e of [...state.history].reverse()){const li=document.createElement('li');li.textContent=`${e.ply}. ${player(e.actor)} ${moveText(e)}`;$('moves').append(li);}
- message(reviewing?`${state.history.length?player(state.history.at(-1).actor)+' '+moveText(state.history.at(-1)):'双方初始布阵'}。已显示全部棋子的真实身份，仅供复盘。`:state.result?`${outcomes[state.result.outcome]} · ${reasons[state.result.reason]||state.result.reason}。可点击“明棋复盘”查看整局。`:state.ended?'棋局已结束，可点击“明棋复盘”查看已走过程。':isSpectator()?(spectatorPaused?'观战已暂停，点击“继续观战至终局”恢复。':state.spectator_reason==='no_legal_moves'?'你已无子可动，自动观战中；只能跳过的回合会自动处理。':'你的席位已出局，正在自动观战，直至整局结束。'):state.your_turn?'点击有浅蓝标记的己方棋子，再选择绿色落点。':`等待${player(state.current_player)}行棋…`);
+ message(reviewing?`${state.history.length?player(state.history.at(-1).actor)+' '+moveText(state.history.at(-1)):'双方初始布阵'}。已显示全部棋子的真实身份，仅供复盘。`:state.result?`${outcomes[state.result.outcome]} · ${reasons[state.result.reason]||state.result.reason}。可点击“明棋复盘”查看整局。`:state.ended?'棋局已结束，可点击“明棋复盘”查看已走过程。':needsRuleRestart()?'规则已更新：无子可动即出局。请开始新棋局应用新规则，当前棋局仍可结束并保存复盘。':isSpectator()?(spectatorPaused?'观战已暂停，点击“继续观战至终局”恢复。':state.spectator_reason==='no_legal_moves'?'你已无子可动，轮到你的回合时将直接出局，继续观战。':'你的席位已出局，正在自动观战，直至整局结束。'):state.your_turn?'点击有浅蓝标记的己方棋子，再选择绿色落点。':`等待${player(state.current_player)}行棋…`);
  updateReviewControls();
 }
 async function presentTurn(response){
@@ -195,15 +209,12 @@ async function advanceSpectator(){
  setBusy(true);message('正在自动观战，继续推进棋局…');
  try{
   const before=state.ply;
-  // Older workers stop at every human turn; use their existing move API for
-  // a forced pass so refreshing can resume the user's current game in place.
-  const forcedPass=state.your_turn&&state.legal_actions.length>0&&state.legal_actions.every(isPass);
-  await presentTurn(await (forcedPass?api('move',{action:[0,0],expected_ply:before}):api('advance')));
+  await presentTurn(await api('advance'));
   if(state.ply<=before&&!state.result)throw Error('棋局未能继续推进，请稍后重试');
  }catch(e){spectatorPaused=true;message(`自动观战已暂停：${e.message}。可点击“继续观战至终局”重试。`,true)}
  finally{setBusy(false)}
 }
-async function choose(code){if(busy||reviewing||!state?.your_turn||isSpectator())return;
+async function choose(code){if(busy||reviewing||needsRuleRestart()||!state?.your_turn||isSpectator())return;
  if(selected!=null&&state.legal_actions.some(a=>!isPass(a)&&a[0]===selected&&a[1]===code)){
   const action=[selected,code];setBusy(true);message('CPU 模型正在思考…');
   try{await presentTurn(await api('move',{action,expected_ply:state.ply}));}catch(e){message(e.message,true)}finally{setBusy(false)}

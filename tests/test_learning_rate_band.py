@@ -191,3 +191,74 @@ def test_disabling_adaptation_from_expand_yaml_clears_band():
     settings = TrainingSettings.from_yaml('configs/expand_mappo_training.yaml', 'four_dark',
         model_scale='main', overrides={'adaptive_learning_rate': False})
     assert settings.lr_kl_band_lower is settings.lr_kl_band_upper is None
+
+
+@pytest.mark.parametrize('value', [0, -.1, True, float('nan'), float('inf'), '0.1'])
+def test_invalid_explicit_kl_guard_is_rejected(value):
+    with pytest.raises(ValueError, match='KL early-stop threshold'):
+        replace(training_settings(), early_stop_kl_threshold=value).validate()
+
+
+def test_legacy_band_separates_epoch_guard_from_lr_decrease_threshold():
+    settings = replace(TrainingSettings.from_yaml('configs/expand_mappo_training.yaml', 'four_dark',
+        model_scale='main'), lr_epoch_completion=False, lr_kl_band_lower=.08, lr_kl_band_upper=.12)
+    trainer = SelfPlayTrainer.__new__(SelfPlayTrainer)
+    trainer.settings = settings
+    assert trainer._policy_kl_stop_threshold() == .10
+    assert (settings.lr_kl_band_lower, settings.lr_kl_band_upper) == (.08, .12)
+    c = controller(kl_band_upper=.12)
+    for kl in [.11, .12, .11, .12]:
+        assert c.observe(scheduled=1e-4, kl=kl, early_stopped=True) == (1e-5, 0)
+        assert c.reason == 'hold' and c.stable_count == 0
+    for count in (1, 2):
+        assert c.observe(scheduled=1e-4, kl=.120001, early_stopped=True) == (1e-5, 0)
+        assert c.stable_count == count
+    assert c.observe(scheduled=1e-4, kl=.120001, early_stopped=True)[0] == pytest.approx(.95e-5)
+    assert c.cooldown == 3
+
+
+@pytest.mark.parametrize('probes,expected_epochs', [([.100001], 1), ([.10, .11], 2),
+    ([.08, .09, .10], 3)])
+def test_independent_guard_checks_complete_epochs_and_preserves_critic(probes, expected_epochs):
+    trainer = SelfPlayTrainer.__new__(SelfPlayTrainer)
+    trainer.settings = SimpleNamespace(policy_epochs=3, critic_epochs=3, ppo_min_policy_epochs=1,
+        target_kl=.02, early_stop_kl_multiple=5, early_stop_clip_fraction=1,
+        early_stop_kl_threshold=.10, lr_increase_on_full_epochs=False,
+        lr_kl_band_lower=.08, lr_kl_band_upper=.12)
+    trainer.update = 0
+    trainer.logger = SimpleNamespace(event=lambda message: None)
+    samples, seen = list(range(13)), []
+    trainer._ppo_optimizer_batches = lambda rows: [rows[i:i+5] for i in range(0, len(rows), 5)]
+    def update(batch, **kwargs):
+        seen.extend(batch)
+        return {'policy/approx_kl_old': .3, 'policy/clip_fraction': .1,
+                'policy/entropy': 2., 'optimizer/policy_steps': 1.}
+    trainer._update_policy_batch = update
+    trainer._update_critic_batch = lambda batch, **kw: {'optimizer/critic_steps': 1.}
+    with patch.object(trainer, '_final_policy_diagnostics', side_effect=[{
+        'policy/final_kl': kl, 'policy/final_clip_fraction': .1,
+        'policy/final_probe_samples': 8., 'timing/lr_probe_seconds': .1} for kl in probes]):
+        result = trainer._update_ppo_minibatches(samples, critic=False)
+        critic = trainer._update_ppo_minibatches(samples, critic=True)
+    assert seen == samples * expected_epochs
+    assert result['optimizer/policy_first_pass_coverage'] == 1
+    assert result['optimizer/policy_epochs'] == expected_epochs
+    assert result['optimizer/policy_stop_kl'] == (probes[-1] > .10)
+    assert critic['optimizer/critic_epochs'] == 3
+
+
+def test_band_threshold_edit_resets_streak_but_preserves_rate_ema_and_cooldown():
+    old = controller()
+    for _ in range(3):
+        observe(old, .15)
+    assert old.cooldown == 3
+    new = controller(kl_band_upper=.12)
+    new.load_state_dict(old.state_dict(), legacy_scale=1, scheduled=1e-4)
+    assert new.rate(1e-4) == old.rate(1e-4)
+    assert new.cooldown == old.cooldown and new.kl_ema == old.kl_ema
+    for remaining in (2, 1, 0):
+        new.observe(scheduled=1e-4, kl=.13, early_stopped=True)
+        assert new.cooldown == remaining and new.stable_count == 0
+    old.cooldown, old.stable_count, old.stable_direction = 0, 2, -1
+    new.load_state_dict(old.state_dict(), legacy_scale=1, scheduled=1e-4)
+    assert new.stable_count == new.stable_direction == 0

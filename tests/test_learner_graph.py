@@ -8,7 +8,7 @@ import torch
 
 from junqi.training.history_arrays import ArrayHistory
 from junqi.training.learner_graph import PackedLearnerGraph
-from junqi.training.models import GamePolicyTransformer, GameValueTransformer, ModelConfig, PolicyFeatures
+from junqi.training.models import GameCentralValueTransformer, GamePolicyTransformer, GameValueTransformer, ModelConfig, PolicyFeatures
 from junqi.training.ppo import PPOSample, policy_ppo_loss, critic_ppo_loss
 from junqi.training.accelerator import trim_cuda_cache
 from types import SimpleNamespace
@@ -76,6 +76,89 @@ class LearnerGraphTests(unittest.TestCase):
         self.assertFalse(graph.stage(model,samples,**options))
         self.assertFalse(graph.host)
         self.assertEqual(len(samples),3)
+
+    def test_staging_waits_before_reusing_pinned_host_targets(self):
+        model = GamePolicyTransformer(ModelConfig.tiny())
+        graph = self.graph(model, False)
+        samples = self.batch()
+        options = dict(clip=.2, coefficient=.01, opening_coefficient=.04, opening_plies=1)
+        self.assertTrue(graph.stage(model, samples, **options))
+        before = graph.host['targets'].clone()
+        waited = []
+        def consumed():
+            torch.testing.assert_close(graph.host['targets'], before)
+            waited.append(True)
+        graph._staging_consumed = SimpleNamespace(synchronize=consumed)
+        changed = [replace(s, advantage=s.advantage + 7) for s in samples]
+        self.assertTrue(graph.stage(model, changed, **options))
+        self.assertEqual(waited, [True])
+        self.assertFalse(torch.equal(graph.host['targets'], before))
+
+    def test_cuda_staging_rotates_host_inputs_without_changing_device_addresses(self):
+        model = GamePolicyTransformer(ModelConfig.tiny())
+        graph = self.graph(model, False)
+        # Exercise the CUDA staging lifetime without requiring a GPU. Copies
+        # are synchronous here, while events record which host slot is reused.
+        def buffer(name, shape, dtype):
+            if name not in graph.host:
+                graph.host[name] = torch.empty(shape, dtype=dtype)
+            if name not in graph.device:
+                graph.device[name] = torch.empty(shape, dtype=dtype)
+            return graph.host[name].numpy()
+        graph._buffer = buffer
+        events = []
+        class Event:
+            def __init__(self):
+                self.waits = 0
+                events.append(self)
+            def synchronize(self):
+                self.waits += 1
+            def record(self, stream):
+                pass
+        from unittest.mock import PropertyMock
+        samples = self.batch()
+        options = dict(clip=.2, coefficient=.01, opening_coefficient=.04, opening_plies=1)
+        with patch.object(type(model), 'device', new_callable=PropertyMock,
+                          return_value=torch.device('cuda')), \
+                patch('torch.cuda.Event', Event), patch('torch.cuda.current_stream', return_value=None):
+            addresses = []
+            host_addresses = []
+            for step in range(7):
+                changed = [replace(s, advantage=s.advantage + step) for s in samples]
+                self.assertTrue(graph.stage(model, changed, **options))
+                addresses.append(tuple(t.data_ptr() for t in graph.device.values()))
+                host_addresses.append(graph.host['targets'].data_ptr())
+                torch.testing.assert_close(graph.device['targets'][:len(samples), 1],
+                                           torch.tensor([s.advantage for s in changed]))
+        self.assertTrue(all(value == addresses[0] for value in addresses))
+        self.assertEqual(len(set(host_addresses)), 3)
+        self.assertEqual(host_addresses[0], host_addresses[3])
+        self.assertEqual([event.waits for event in events], [2, 1, 1])
+
+    def test_scalar_mappo_graph_matches_both_team_losses_and_gradients(self):
+        from test_mappo_value_coverage import transitions
+        from junqi.training.mappo import critic_training_samples, team_generalized_advantages
+        samples = team_generalized_advantages(transitions()[:3], bootstrap_values=(0., 0.),
+            discount=1., gae_lambda=.95, behavior_version=0)
+        samples = critic_training_samples(samples)
+        model = GameCentralValueTransformer(ModelConfig.tiny())
+        reference = copy.deepcopy(model)
+        graph = self.graph(model, True)
+        contexts = torch.randn(8, model.config.temporal_dim)
+        graph.callable = lambda *args: contexts
+        self.assertTrue(graph.stage(model, samples, clip=.2, coefficient=.5,
+                                   opening_coefficient=None, opening_plies=16))
+        loss, metrics = graph._loss(model)
+        features = PolicyFeatures(contexts[:len(samples)], torch.ones(len(samples),129,dtype=torch.bool))
+        with patch.object(reference, '_encode_full', return_value=features):
+            output = critic_ppo_loss(reference, samples, clip_epsilon=.2, value_coefficient=.5,
+                                     sequence_training=True, defer_metrics=True)
+        torch.testing.assert_close(loss, output.loss)
+        torch.testing.assert_close(metrics, torch.stack(list(output.metrics.values())))
+        loss.backward()
+        output.loss.backward()
+        torch.testing.assert_close(model.value_head.weight.grad, reference.value_head.weight.grad)
+        torch.testing.assert_close(model.value_head.bias.grad, reference.value_head.bias.grad)
 
     def test_sparse_sampling_masks_equal_dense_reduction(self):
         model=GamePolicyTransformer(ModelConfig.tiny())

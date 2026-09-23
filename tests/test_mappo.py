@@ -59,7 +59,8 @@ class MAPPOTests(unittest.TestCase):
             self.assertEqual(settings.model.board_dim, 384)
             self.assertEqual(settings.model.action_dim, 128)
             self.assertTrue(settings.model.joint_action_context)
-            self.assertEqual(settings.model.board_encoder_type, "whole_board_inventory_multihot_linear")
+            self.assertEqual(settings.model.board_encoder_type, "whole_board_inventory_candidates_linear")
+            self.assertTrue(settings.model.action_pass_context)
             self.assertEqual(settings.model.temporal_dim, 512)
             self.assertEqual(settings.model.token_fusion_hidden_dim, 512)
             self.assertEqual(settings.model.temporal_heads, 8)
@@ -68,7 +69,7 @@ class MAPPOTests(unittest.TestCase):
             self.assertEqual(settings.critic_layers, 16)
             self.assertEqual(settings.step_budget_counter, "environment_plies")
             self.assertIn("runs_expand_mappo", str(settings.resolve_run_directory()))
-            self.assertEqual(checkpoint_format_for_model(settings.model), 16)
+            self.assertEqual(checkpoint_format_for_model(settings.model), 17)
         legacy = TrainingSettings.from_yaml(ROOT / "configs/local_4090_training.yaml", MODE, model_scale="main")
         self.assertEqual((legacy.algorithm, legacy.model.board_dim, legacy.model.token_fusion_hidden_dim), ("ppo", 128, 0))
         self.assertEqual(checkpoint_format_for_model(legacy.model), 15)
@@ -227,6 +228,8 @@ class MAPPOTests(unittest.TestCase):
         for sample in samples:
             self.assertFalse(sample.state.centralized)
             self.assertTrue(sample.value_state.centralized)
+            self.assertTrue(sample.other_team_value.state.centralized)
+            self.assertIsNot(sample.other_team_value.state, sample.value_state)
             self.assertEqual(sample.value_state.legal_actions, ())
             self.assertIn(sample.action, sample.state.legal_actions)
         restored = make_pool()
@@ -268,11 +271,13 @@ class MAPPOTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             trainer = SelfPlayTrainer(settings, run_directory=directory)
             trainer.train()
+            self.assertEqual(trainer.cumulative["environment_plies"], 8)
             payload = torch.load(trainer.checkpoints.latest_path, map_location="cpu", weights_only=False)
             require_current_checkpoint(payload)
-            self.assertEqual(payload["format_version"], 16)
+            self.assertEqual(payload["format_version"], 17)
             for key in ('policy', 'critic'):
-                self.assertEqual(payload[key]['action_encoder.projection.weight'].shape[1], 10)
+                self.assertEqual(payload[key]['action_encoder.projection.weight'].shape[1], 14)
+                self.assertEqual(payload[key]['board_encoder.projection.weight'].shape[1], 3357)
                 self.assertFalse(any(name in payload[key] for name in (
                     'no_interaction_embedding.weight', 'active_embedding.weight', 'revealed_embedding.weight')))
             with self.assertRaisesRegex(ValueError, 'version does not match'):

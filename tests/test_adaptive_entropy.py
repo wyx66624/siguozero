@@ -33,7 +33,7 @@ class TablePolicy(torch.nn.Module):
         super().__init__()
         self.logits = torch.nn.Parameter(torch.tensor(logits, dtype=torch.float32))
 
-    def forward(self, states, actions):
+    def forward(self, states, actions, *, pack_sequences=False):
         return [self.logits[i, :len(state.legal_actions)].log_softmax(0) for i, state in enumerate(states)]
 
 
@@ -137,6 +137,59 @@ class AdaptiveEntropyTests(unittest.TestCase):
         logs = policy.logits.log_softmax(-1)
         expected = .01 * (logs.exp() * logs).sum()
         self.assertTrue(torch.equal(output.loss, expected))
+
+    def test_fixed_entropy_resume_preserves_learning_state_and_phase_observations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = training_settings()
+            trainer = SelfPlayTrainer(settings, run_directory=directory)
+            trainer.train()
+            trainer.entropy_controllers['opening'].coefficient = .018
+            trainer.entropy_controllers['other'].coefficient = .006
+            trainer.save_checkpoint(reason='fixed-entropy-resume-test', archive=False)
+            saved = torch.load(trainer.checkpoints.latest_path, map_location='cpu', weights_only=False)
+            trainer.logger.close()
+            fixed = replace(settings, adaptive_entropy=False, entropy_coefficient=.01,
+                            entropy_minimum=.01, entropy_maximum=.01,
+                            entropy_opening_maximum=.01, entropy_target_schedule=())
+            resumed = SelfPlayTrainer(fixed, run_directory=directory)
+            try:
+                self.assertEqual(resumed.update, saved['update'])
+                self.assertEqual(resumed.cumulative, saved['trainer_state']['cumulative'])
+                for name in ('policy', 'critic', 'layout', 'reference_layout',
+                             'policy_optimizer', 'critic_optimizer', 'layout_optimizer'):
+                    torch.testing.assert_close(getattr(resumed, name).state_dict(), saved[name], rtol=0, atol=0)
+                self.assertEqual(random.getstate(), saved['rng_state']['python'])
+                torch.testing.assert_close(torch.get_rng_state(), saved['rng_state']['torch_cpu'], rtol=0, atol=0)
+                s = replace(states(1)[0], legal_actions=((0, 1), (1, 2)))
+                later = replace(s, records=s.records * 20)
+                samples = [PPOSample(x, (0, 1), 0., 0., 0., 0., 0) for x in (s, later)]
+                # Use identical distributions in both phases: entropy alone must
+                # have the same gradient, independent of the old phase controls.
+                resumed.policy = TablePolicy([[4., 0.], [4., 0.]])
+                resumed.policy_parallel = resumed.policy
+                out = policy_ppo_loss(resumed.policy, samples, clip_epsilon=.2,
+                    entropy_coefficient=resumed.entropy_controllers['other'].coefficient,
+                    opening_entropy_coefficient=resumed.entropy_controllers['opening'].coefficient,
+                    entropy_opening_plies=resumed.entropy_opening_plies)
+                out.loss.backward()
+                torch.testing.assert_close(resumed.policy.logits.grad[0], resumed.policy.logits.grad[1], rtol=0, atol=0)
+                resumed.policy_optimizer = torch.optim.SGD(resumed.policy.parameters(), lr=0.)
+                metrics = resumed._update_policy(samples)
+                self.assertEqual(metrics['policy/adaptive_entropy_enabled'], 0.)
+                self.assertEqual(metrics['policy/entropy_target_schedule_enabled'], 0.)
+                for phase, prefix in (('opening', 'policy/opening_entropy'), ('other', 'policy/entropy')):
+                    c = resumed.entropy_controllers[phase]
+                    self.assertFalse(c.enabled)
+                    self.assertEqual(c.coefficient, .01)
+                    self.assertEqual(c.updates, 0)
+                    self.assertIsNone(c.entropy_ema)
+                    self.assertEqual(metrics[prefix + '_coefficient'], .01)
+                    self.assertEqual(metrics[prefix + '_coefficient_next'], .01)
+                    self.assertGreater(metrics[f'policy/{phase}_entropy_ratio'], 0.)
+                self.assertAlmostEqual(metrics['loss/policy_total'], -.01 * metrics['policy/entropy'], places=7)
+                self.assertAlmostEqual(metrics['policy/opening_entropy_ratio'], metrics['policy/other_entropy_ratio'])
+            finally:
+                resumed.logger.close()
 
     def test_trainer_updates_once_and_restores_controller_with_old_checkpoint_fallback(self):
         with tempfile.TemporaryDirectory() as directory:

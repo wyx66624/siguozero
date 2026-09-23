@@ -20,7 +20,10 @@ def attend_grouped(Q, CACHE_K, CACHE_V, META, OUT, QS0, QS1, QS2,
     normalizer = tl.full((BLOCK_M,), 0., tl.float32)
     maximum = tl.full((BLOCK_M,), -1.0e6, tl.float32)
     base = (slot * HEADS + head) * CAPACITY * DIM
-    for start in range(0, EXTENT, BLOCK_N):
+    # Each program owns one game/head. Other games' longer histories must not
+    # force this program to multiply fully masked tail tiles. CUDA graphs can
+    # still reuse the kernel because the bound comes from live metadata.
+    for start in range(0, tl.minimum(prefix + count, EXTENT), BLOCK_N):
         times = start + tl.arange(0, BLOCK_N)
         valid_keys = (times < prefix + count) & (times < CAPACITY)
         k = tl.load(CACHE_K + base + times[None, :] * DIM + dims[:, None], valid_keys[None, :], 0)

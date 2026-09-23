@@ -1,8 +1,9 @@
 # Expanded four-player MAPPO: private actor, full-information scalar critic.
 # Single RTX 4090 training profile; measured launch evidence is kept under output/diagnostics.
 # Start a new run with --model-scale main; do not resume the 256-wide PPO run.
+# Four-player input contract is now v17; v16 checkpoints need an explicit migration or a new run.
 schema_version: 1
-config_revision: 25
+config_revision: 33
 experiment_name: siguozero_expand_mappo
 rules:
   game_modes:
@@ -96,6 +97,7 @@ board_piece_codes:
     exhausted_exact_inventory_prunes_future_candidates: true
     use_referee_hidden_identity_to_infer: false
   exact_casualty_prior:
+    # Retained rule/history bookkeeping; v17 does not feed these 75 bits to the network.
     slots_per_player: 25
     slot_order: same_as_models.layout.piece_sequence
     values: binary_exactly_known_dead
@@ -121,13 +123,18 @@ models:
     dropout: 0.0
   four_player:
     action_embedding_dim: 128
-    # 4 coordinates + previous actor + draw countdown + 4 relative alive bits.
+    # 4 coordinates + previous actor + draw countdown + 4 alive + 4 pass counts.
     # No separate countdown/alive/revealed-flag embedding in this profile.
-    action_encoder_type: coordinates_player_countdown_active_linear
+    action_encoder_type: coordinates_player_countdown_active_passes_linear
     board_embedding_dim: 384
-    board_encoder_type: whole_board_inventory_multihot_linear
+    board_encoder_type: whole_board_inventory_candidates_linear
     # 129 * (25 interchangeable inventory slots + 1 relative owner), plus
-    # the existing 3 mode + 75 exact casualty + 4 pass features: 3436 -> 384.
+    # 3 mode bits: 3357 -> 384. No direct casualty or pass board features.
+    # Public casualty bookkeeping still constrains the per-piece candidates.
+    action_input_dim: 14
+    board_input_dim: 3357
+    board_casualty_input_dim: 0
+    board_pass_input_dim: 0
     transition_token_dim: 512
     token_fusion_hidden_dim: 512
     temporal_layers: 16
@@ -188,6 +195,7 @@ models:
     greedy_argmax: false
     final_player_setup_validation: true
   policy:
+    # Legacy/two-player base contract. The four_player profile above overrides it.
     architecture: board_encoder_plus_causal_transition_transformer
     action_encoder:
       architecture: coordinates_player_linear
@@ -269,10 +277,15 @@ ppo:
   critic_layers: 16
   discount: 1.0
   gae_lambda: 0.95
-  # Each captured flag: +0.2 for the capturing team, -0.2 for the losing team.
+  # Each player has its own rotated value view and decision-time GAE.
+  mappo_advantage_mode: player_decisions
+  mappo_reward_scope: player
+  # Each captured flag: +0.2 for the captor, -0.2 for the flag owner.
   # Added to any terminal reward on the same step; zero disables event shaping.
   flag_capture_reward: 0.2
-  # Actual bomb casualties, credited once to the bomb's team (attack or defense).
+  # Fixed personal cost, based on flag knowledge before entering/attacking the other HQ.
+  known_nonflag_hq_penalty: 0.2
+  # Actual bomb casualties, credited once to the bomb owner (attack or defense).
   # Linear decay in global environment steps; zero from half the step budget.
   bomb_commander_reward: 0.03
   bomb_army_commander_reward: 0.01
@@ -282,11 +295,18 @@ ppo:
   futile_attack_ema_decay: 0.95
   value_coefficient: 0.5
   value_clip_epsilon: 0.2
-  critic_learning_rate: 0.0001
+  critic_learning_rate: 1.0e-05
   critic_epochs: 3
   sequence_training: true
   max_samples_per_sequence: 256
-  optimizer_minibatch_samples: 512
+  # Keep each critic history together before shuffling optimizer batches.
+  # Each epoch retains all four perspectives; Critic Adam batches use 4096 labels.
+  critic_full_history_batches: true
+  # Actor samples per Adam step. Personal MAPPO trains four value perspectives
+  # per transition, using four times as many value rows with the same step budget.
+  # 98304 / 1024 = 96 minibatches per epoch for both models (user limit: 384).
+  # Keep the Actor batch at 1024; optimize execution before increasing it again.
+  optimizer_minibatch_samples: 1024
   environment_workers: 16
   learner_microbatch_by_model_scale:
     main: 32
@@ -311,13 +331,15 @@ ppo:
   deferred_values: true
   pipeline_groups: 2
   fused_optimizer: true
-  # Two bounded learner shapes share scratch memory; optimizer/finite guard stay eager.
+  # Bounded learner shapes share scratch memory; optimizer/finite guard stay eager.
   learner_cuda_graphs: true
   cuda_memory_fraction: 0.90
   adaptive_clip:
     enabled: true
-    absolute_advantage: true
-    unclipped_advantage_threshold: 2.0
+    # ACPO eqs. 4-6: signed advantages smoothly modulate only the upper bound.
+    # Every sample retains the clipped surrogate, including |advantage| >= 2.
+    absolute_advantage: false
+    unclipped_advantage_threshold: 0.0
     minimum: 0.10
     maximum: 0.45
     advantage_scale: 0.5
@@ -371,19 +393,20 @@ learner:
   max_epochs_per_batch: 3
   clip_epsilon: 0.2
   learning_rate:
-    initial: 0.0001
+    initial: 1.0e-05
     adaptive: true
-    minimum: 5.0e-06
+    minimum: 1.0e-06
     maximum: 1.0e-04
-    # Final probe mean controls LR; three consecutive out-of-band updates
-    # move it 5%, followed by three observation-only updates. No cosine/warmup.
+    # Keep the first pass complete; control LR by coverage of later epochs.
+    # Fewer than two complete epochs: -5%; all three and final KL < .08: +5%.
     increase_on_full_epochs: false
-    kl_band_lower: 0.08
-    kl_band_upper: 0.14
+    epoch_completion: true
+    minimum_completed_epochs: 2
+    increase_kl_threshold: 0.08
     increase_factor: 1.05
     decrease_factor: 0.95
-    stable_updates: 3
-    cooldown_updates: 3
+    stable_updates: 1
+    cooldown_updates: 0
     ema_decay: 0.8
     probe_samples: 8192
   gradient_norm_clip: 1.0
@@ -399,24 +422,24 @@ learner:
     opening_plies: 16  # separate opening and later-play entropy controllers
     mode_overrides:
       four_dark:
-        minimum: 0.001
+        # PPO paper, Table 5 (Atari): fixed raw-entropy bonus c2=0.01.
+        # The same coefficient applies to opening and later play, including resume.
+        initial: 0.01
+        adaptive_to_target_entropy: false
+        minimum: 0.01
         maximum: 0.01
-        opening_maximum: 0.02
+        opening_maximum: 0.01
+        # Inactive legacy targets; normalized entropy remains a diagnostic only.
         target_ratio: 0.50
         opening_target_ratio: 0.50
-        # [completed global environment steps, opening target, later-play target].
-        # Hold 0.50 through 350M, then interpolate linearly; resume keeps progress.
-        target_schedule:
-          - [0, 0.50, 0.50]
-          - [350000000, 0.50, 0.50]
-          - [1500000000, 0.40, 0.40]
-          - [3000000000, 0.35, 0.35]
+        target_schedule: []
   kl:
     initial_coefficient: 0.02
     target_per_action: 0.02
   early_stop:
-    # KL-band mode checks the probe mean after each complete epoch against
-    # kl_band_upper (0.14). The legacy minibatch limit below is inactive there.
+    # Same fixed 8192-sample mean after the first pass and during passes 2/3.
+    kl_threshold: 0.10
+    probe_interval_steps: 16
     # Do not stop for ratio clipping alone.
     minimum_policy_epochs: 1
     observed_kl_multiple: 5.0
@@ -495,6 +518,13 @@ runtime:
   # Model versions are all retained; keep a bounded set of full optimizer/game-pool states.
   keep_checkpoint_archives: 3
   metrics_every_updates: 1
+  # Observational only: rotated CPU lanes, exact replay segments and real personal GAE.
+  tactical_logging:
+    enabled: true
+    environment_lanes: 2
+    probe_samples: 96
+    keep_updates: 100
+    max_detail_mib: 1024
   resource_monitor_interval_seconds: 15
   inference_snapshot_every_updates: 5
   auto_reduce_microbatch_on_oom: true
@@ -511,7 +541,11 @@ scale_gate:
   next_policy_temporal_ffn_dim: 2048
 historical_opponents:
   enabled: true
-  start_fraction: 0.06666666666666667  # 200M of the 3B environment-step budget.
+  # Optional opponent mode, OFF: live champion + public tactical hard rules.
+  # When enabled, replaces the sampled historical opponent, using the same
+  # start_fraction/training_fraction. Learner and teammate remain unmodified.
+  tactical_champion: false
+  start_fraction: 0.3333333333333333  # 1B of the 3B environment-step budget.
   training_fraction: 0.5
   teammate_fraction: 0.0
   snapshot_fractions: [0.016666666666666666, 0.03333333333333333, 0.05]

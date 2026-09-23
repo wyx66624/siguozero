@@ -36,12 +36,15 @@ function renderOutcomes(r){
  <details class="outcome-history"><summary>最近 ${o.recent.length} 轮结算记录</summary>${rows?`<div class="table-scroll"><table><thead><tr><th>训练轮次</th><th>结算${o.unit==='branches'?'分支':'局数'}</th><th>胜</th><th>和</th><th>负</th><th>日志累计</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<p>尚无结算记录</p>'}</details>
  <div class="evaluation-summary"><h4>${championOnly(r)?'历史冠军挑战记录（含此前评测）':observing(r)?'单一旧基准评测记录（含此前冠军评测）':r.evaluation_type==='historical_only'?'前半程冠军评测记录（已停止）':'对阵最优模型的评测'}</h4><p>${evaluation}${e?.unavailable_rounds?` · ${fmt(e.unavailable_rounds)} 轮报告暂不可用`:''}</p>${championOnly(r)||observing(r)?`<p>${evaluationPlan(r)}</p>`:r.after_half_historical_only?`<p>${r.evaluation_type==='historical_only'?'当前仅评测历史对手集，继续使用最新模型。':'达到 15 亿步后仅评测历史对手集，继续使用最新模型。'}</p>`:''}</div></section>`;
 }
-function chart(records,key,color){
+function chart(records,key,color,percentage=false){
  const values=records.filter(r=>Number.isFinite(r[key]));
  if(!values.length)return '<div class="chart-empty">尚无已完成训练轮次的数据</div>';
  const nums=values.map(r=>r[key]),lo=Math.min(...nums),hi=Math.max(...nums),span=hi-lo||1;
  const points=nums.map((v,i)=>`${12+i*556/Math.max(1,nums.length-1)},${105-(v-lo)/span*80}`).join(' ');
- return `<svg class="chart" viewBox="0 0 580 135" preserveAspectRatio="none" aria-label="训练损失曲线"><path d="M12 20H568M12 65H568M12 110H568" stroke="#293647" stroke-dasharray="3 5"/><polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/><text x="12" y="14">${hi.toFixed(5)}</text><text x="12" y="128">update ${values[0].update}</text><text x="568" y="128" text-anchor="end">${values.at(-1).update} · min ${lo.toFixed(5)}</text></svg>`;
+ const value=v=>percentage?`${fmt(v*100,2)}%`:v.toFixed(5);
+ const labels=`<text x="12" y="14">${value(hi)}</text><text x="12" y="128">update ${values[0].update}</text><text x="568" y="128" text-anchor="end">${values.at(-1).update} · min ${value(lo)}</text>`;
+ const svg=`<svg class="chart" viewBox="0 0 580 135" preserveAspectRatio="none" aria-label="${percentage?'归一化动作熵趋势':'训练损失曲线'}"><path d="M12 20H568M12 65H568M12 110H568" stroke="#293647" stroke-dasharray="3 5"/><polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke"/>${percentage?'':labels}</svg>`;
+ return percentage?`<div class="chart-title"><span>最高 ${value(hi)}</span><span>最低 ${value(lo)}</span></div>${svg}<div class="chart-title"><span>update ${values[0].update}</span><span>update ${values.at(-1).update}</span></div>`:svg;
 }
 function renderHistorical(r){
  const h=r.historical_opponents,e=r.historical_evaluation;
@@ -65,15 +68,24 @@ function renderHistorical(r){
  <details><summary>各历史版本出场概率与训练胜 / 和 / 负（基准学习席位所在队视角）</summary><p>重合棋局分别计入对手与队友统计，不能将两列局数相加。对手难度只用当前队友条件下的结果更新。${winRateSampling?'胜率估计更侧重近期对局，和棋计为未获胜；未交手版本从 50% 初值开始。':''}</p><div class="table-scroll"><table><thead><tr><th>版本</th><th>环境步</th><th>下个批次概率</th>${winRateSampling?'<th>学习队胜率估计</th>':''}<th>作为对手</th><th>作为队友</th></tr></thead><tbody>${rows}</tbody></table></div></details>
  ${evalRows?`<h3>${e.evaluation_type==='champion'?'历史冠军挑战赛':e.evaluation_type==='fixed_reference'?'固定旧基准棋力评测':'冻结对手集评测'}</h3><p>评测模型 update ${fmt(e.candidate_update)} · ${e.evaluation_type==='champion'?'挑战得分率':'最弱一项得分率'} ${pct(e.minimum_score)} · ${e.evaluation_type==='champion'?`${e.promoted?'冠军更新为':'保留冠军'} update ${fmt(e.best_update)}；训练继续使用最新模型`:e.observational_only?'仅观察训练成果，继续使用最新模型；评测不触发回滚':e.promotion_allowed?'历史对手门槛通过':'历史对手门槛未通过'}。区间以完整四局轮换组计算。</p><div class="table-scroll"><table><thead><tr><th>对手</th><th>局数</th><th>胜 / 和 / 负</th><th>得分率</th><th>校正置信区间</th><th>结论</th></tr></thead><tbody>${evalRows}</tbody></table></div>${teammateTable}`:championOnly(r)?'<p>等待冠军挑战赛完成；训练胜率不等同于棋力评测。</p>':observing(r)?'<p>等待首次包含历史队友的 500 局评测；此前结果保留在上方。训练胜率不等同于棋力评测。</p>':'<p>尚无后半程对手集评测；训练胜率不等同于棋力评测。</p>'}</section>`;
 }
-function renderExploration(m){
+const entropyPercent=v=>Number.isFinite(v)?`${fmt(v*100,2)}%`:'等待记录';
+function renderEntropyAverageStat(entropy){
+ return stat(`动作归一化熵 · 近 ${fmt(entropy?.window_updates??20)} 轮移动平均`,entropyPercent(entropy?.moving_average));
+}
+function renderExploration(m,entropy){
  if(m['policy/adaptive_entropy_enabled']==null)return '<section class="outcome-section"><h3>策略探索</h3><p>等待训练记录探索指标。</p></section>';
+ const adaptive=Boolean(m['policy/adaptive_entropy_enabled']);
  const pct=v=>v==null?'本轮无可选动作样本':fmt(v*100,2)+'%';
  const target=v=>v==null?'等待记录':fmt(v*100,2)+'%';
  const openingTarget=m['policy/opening_entropy_target_ratio']??m['policy/entropy_target_ratio'];
  const otherTarget=m['policy/other_entropy_target_ratio']??m['policy/entropy_target_ratio'];
- const annealing=m['policy/entropy_target_schedule_enabled']?`<p class="hint">熵目标随累计环境步数逐步下降，到 ${fmt(m['policy/entropy_target_schedule_end_environment_plies'])} 步，开局目标 ${target(m['policy/opening_entropy_target_final'])}、后续目标 ${target(m['policy/other_entropy_target_final'])}；恢复训练沿用累计进度。</p>`:'';
+ const annealing=adaptive&&m['policy/entropy_target_schedule_enabled']?`<p class="hint">熵目标随累计环境步数逐步下降，到 ${fmt(m['policy/entropy_target_schedule_end_environment_plies'])} 步，开局目标 ${target(m['policy/opening_entropy_target_final'])}、后续目标 ${target(m['policy/other_entropy_target_final'])}；恢复训练沿用累计进度。</p>`:'';
  const coefficient=prefix=>`${fmt(m[prefix+'_coefficient'],5)} → ${fmt(m[prefix+'_coefficient_next'],5)}${m[prefix+'_coefficient_max']==null?'':` · 上限 ${fmt(m[prefix+'_coefficient_max'],5)}`}`;
- return `<section class="outcome-section"><h3>策略探索 · ${m['policy/adaptive_entropy_enabled']?'自适应已启用':'固定系数'}</h3><p>前 ${fmt(m['policy/entropy_opening_plies'])} 个全局行动为开局。归一化熵：开局目标 ${target(openingTarget)}，后续目标 ${target(otherTarget)}；系数显示本轮使用值 → 下一轮值。</p>${annealing}<div class="stats">${stat('开局归一化熵',pct(m['policy/opening_entropy_ratio']))}${stat('开局探索系数',coefficient('policy/opening_entropy'))}${stat('后续阶段归一化熵',pct(m['policy/other_entropy_ratio']))}${stat('后续阶段探索系数',coefficient('policy/entropy'))}${stat('熵奖励损失贡献',fmt(m['loss/policy_entropy'],5))}</div><p class="hint">目标通过调节熵奖励系数影响探索，实测熵不会立即等于目标；棋力仍以完整对局评测为准。</p></section>`;
+ const rolling=entropy?`<div class="stats">${stat('本轮整体归一化熵',entropyPercent(entropy.latest_ratio))}${renderEntropyAverageStat(entropy)}${stat('移动窗口覆盖环境步',fmt(entropy.environment_plies))}</div><p class="hint">最近 ${fmt(entropy.window_updates)} 个已完成训练轮次中，${fmt(entropy.covered_updates)} / ${fmt(entropy.available_updates)} 轮有有效记录${entropy.start_update==null?'':` · update ${fmt(entropy.start_update)}–${fmt(entropy.end_update)}`}。每个状态先算 H / ln(合法动作数)，排除只有一个合法动作的状态；每轮按样本占比合并开局与后续阶段，再按环境步数计算移动平均。每轮数值取训练过程的观测平均。</p><div class="chart-title"><span>整体归一化动作熵 · ${fmt(entropy.window_updates)} 轮移动平均</span><span>历史日志自动恢复</span></div>${chart(entropy.history??[],'moving_average','#5bd9bc',true)}`:'';
+ const control=adaptive?`归一化熵：开局目标 ${target(openingTarget)}，后续目标 ${target(otherTarget)}`:'使用固定原始熵奖励，归一化熵仅用于观测，目标反馈已关闭';
+ const phase=name=>adaptive?`${pct(m['policy/'+name+'_entropy_ratio'])} / ${entropyPercent(m['policy/'+(name==='opening'?'opening_entropy':'entropy')+'_ratio_ema'])}`:pct(m['policy/'+name+'_entropy_ratio']);
+ const hint=adaptive?'阶段 EMA 为训练记录的指数移动平均。目标通过调节熵奖励系数影响探索，实测熵不会立即等于目标；棋力仍以完整对局评测为准。':'开局和后续阶段使用同一固定系数；实测熵变化不会调整系数。棋力仍以完整对局评测为准。';
+ return `<section class="outcome-section"><h3>策略探索 · ${adaptive?'自适应已启用':'固定系数'}</h3>${rolling}<p>前 ${fmt(m['policy/entropy_opening_plies'])} 个全局行动为开局。${control}；系数显示本轮使用值 → 下一轮值。</p>${annealing}<div class="stats">${stat('开局归一化熵 · '+(adaptive?'本轮 / EMA':'本轮'),phase('opening'))}${stat('开局探索系数',coefficient('policy/opening_entropy'))}${stat('后续阶段归一化熵 · '+(adaptive?'本轮 / EMA':'本轮'),phase('other'))}${stat('后续阶段探索系数',coefficient('policy/entropy'))}${stat('熵奖励损失贡献',fmt(m['loss/policy_entropy'],5))}</div><p class="hint">${hint}</p></section>`;
 }
 function renderFutileAttacks(m){
  if(!m['training/futile_attack_penalty_initial'])return '';
@@ -90,6 +102,12 @@ function renderLearningRate(m){
  const bandMode=!!m['optimizer/lr_kl_band_enabled'];
  const klOnly=!!m['optimizer/lr_feedback_kl_only'];
  const pct=v=>v==null||!Number.isFinite(Number(v))?'—':`${fmt(100*v,2)}%`;
+ if(m['optimizer/lr_epoch_completion']){
+  const up=pct((m['optimizer/lr_increase_factor']??1)-1),down=pct(1-(m['optimizer/lr_decrease_factor']??1));
+  const threshold=fmt(m['policy/early_stop_kl_threshold'],3),rise=fmt(m['optimizer/lr_increase_kl_threshold'],3);
+  const reasons={incomplete_required_epochs:`第二个 epoch 未完成，学习率下降 ${down}`,completed_low_kl:`全部 epoch 完成且 KL < ${rise}，学习率上调 ${up}`,hold:'本轮保持学习率',lower_bound:'已达到学习率下限',upper_bound:'已达到学习率上限',no_samples:'本轮无学习样本'};
+  return `<section class="outcome-section" aria-label="动态学习率"><h3>学习率 · 按 epoch 完成情况调整</h3><p>${escapeHTML(reasons[m['optimizer/lr_reason']]||m['optimizer/lr_reason']||'等待观测')}。显示本轮使用值 → 下一轮值。</p><div class="stats">${stat('策略学习率',`${sci(m['optimizer/policy_lr'])} → ${sci(m['optimizer/policy_lr_next'])}`)}${stat('学习率下限 / 上限',`${sci(m['optimizer/policy_lr_min'])} / ${sci(m['optimizer/policy_lr_max'])}`)}${stat('最终策略 KL',fmt(m['policy/final_kl'],5))}${stat('实际训练遍数 / 上限',`${fmt(m['optimizer/policy_epochs'],3)} / ${fmt(m['optimizer/policy_epochs_max'])}`)}${stat('KL 早停阈值',threshold)}${stat('第三遍完成后的上调阈值',`< ${rise}`)}${stat('中途探针次数',fmt(m['policy/intermediate_kl_probes']))}${stat('本轮早停',m['optimizer/policy_early_stopped']?'是 · KL':'否')}${stat('Clip 探针 / 小批次峰值',`${pct(m['policy/final_clip_fraction'])} / ${pct(m['policy/minibatch_clip_max'])}`)}</div><p class="hint">第一遍完整训练；第二、三遍每 ${fmt(m['policy/kl_probe_interval_steps'])} 次优化更新及遍末检查同一组 ${fmt(m['policy/final_probe_samples'])} 个样本，平均 KL > ${threshold} 时停止剩余 Actor 更新。第二遍未完整结束，下调 ${down}；第三遍完整结束且最终 KL < ${rise}，上调 ${up}；其余情况保持。逐轮判断，不累计确认轮次。所有 KL 相对于本轮采样策略；Critic 保留完整训练。探针总耗时 ${fmt(m['timing/lr_probe_seconds'],3)} 秒。</p></section>`;
+ }
  const reasons={initial:'等待观测',hold:bandMode?'KL 在保持区间内，学习率不变':completionMode?'保持学习率':'保持倍率，随基础计划衰减',no_samples:'本轮无学习样本',high_kl:bandMode?'连续确认 KL 偏高，小幅降低学习率':'KL 反馈超标，降低学习率',high_clip:'裁剪比例超标，降低学习率',early_stop:'本轮触发早停，暂停回升',clip_guard:'裁剪比例偏高，暂停回升',cooldown:'调整后观察，保持学习率',warmup:'预热期间暂停回升',collecting_stable:'累计稳定轮次',collecting_low_kl:'累计 KL 偏低轮次',collecting_high_kl:'累计 KL 偏高轮次',low_kl:'连续稳定且 KL 偏低，小幅回升',completed_epochs:'完整完成全部 epoch，提高学习率',incomplete_epochs:'未完成全部 epoch，保持学习率',upper_bound:'已达到上限',lower_bound:'已达到下限'};
  const kl=m['policy/final_kl'],ema=m['policy/final_kl_ema'];
  const limits=`<div class="stats">${bandMode?stat('KL 保持区间',`${fmt(m['optimizer/lr_kl_band_lower'],4)}–${fmt(m['optimizer/lr_kl_band_upper'],4)}`):stat(completionMode?'本轮 KL 反馈':'KL 目标',fmt(m[completionMode?'policy/lr_kl_feedback':'policy/target_kl'],4))}${stat(bandMode?'epoch 末平均 KL 早停阈值':completionMode?'KL 早停阈值':'小批次 KL 早停阈值',fmt(m['policy/early_stop_kl_threshold'],4))}${stat('Clip 探针 / 小批次峰值',`${pct(m['policy/final_clip_fraction'])} / ${pct(m['policy/minibatch_clip_max'])}`)}${stat('实际训练遍数 / 上限',`${fmt(m['optimizer/policy_epochs'],2)} / ${fmt(m['optimizer/policy_epochs_max'])}`)}</div>`;
@@ -98,6 +116,7 @@ function renderLearningRate(m){
  return `<section class="outcome-section" aria-label="动态学习率"><h3>学习率 · 有界自适应</h3><p>${escapeHTML(reasons[m['optimizer/lr_reason']]||m['optimizer/lr_reason']||'等待观测')}。显示本轮使用值 → 下一轮值。</p><div class="stats">${stat('策略学习率',`${sci(m['optimizer/policy_lr'])} → ${sci(m['optimizer/policy_lr_next'])}`)}${stat('学习率下限 / 上限',`${sci(m['optimizer/policy_lr_min'])} / ${sci(m['optimizer/policy_lr_max'])}`)}${stat(completionMode?'轮末 KL / 反馈平滑值':'最终策略 KL / 平滑值',`${kl==null?'—':fmt(kl,5)} / ${ema==null?'—':fmt(ema,5)}`)}${recovery}${stat('本轮早停',m['optimizer/policy_early_stopped']?`是 · ${[m['optimizer/policy_stop_kl']?'KL':'',m['optimizer/policy_stop_clip']?'裁剪比例':''].filter(Boolean).join(' / ')||'保护触发'}`:'否')}</div>${limits}<p class="hint">最终策略统计取自更新结束后的 ${fmt(m['policy/final_probe_samples'])} 个学习样本；探针总耗时 ${fmt(m['timing/lr_probe_seconds'],3)} 秒。${hint}</p></section>`;
 }
 function renderKlStat(m){
+ if(m['optimizer/lr_epoch_completion'])return stat(`最终平均 KL · 早停 ${fmt(m['policy/early_stop_kl_threshold'],2)}`,fmt(m['policy/final_kl'],5));
  return m['optimizer/lr_kl_band_enabled']?stat(`最终平均 KL · 保持 ${fmt(m['optimizer/lr_kl_band_lower'],2)}–${fmt(m['optimizer/lr_kl_band_upper'],2)}`,fmt(m['policy/final_kl'],5)):stat('KL · 目标 '+fmt(m['policy/target_kl'],3),fmt(m['policy/approx_kl_old']??m['policy/kl_reference'],5));
 }
 function renderProgress(r){
@@ -113,7 +132,10 @@ function renderClipping(m){
  if(m['policy/adaptive_clip_enabled']==null)return '';
  if(!m['policy/adaptive_clip_enabled'])return '<section class="outcome-section"><h3>PPO 裁剪 · 固定区间</h3></section>';
  const ratio=(key,sign=1)=>m[key]==null?'—':fmt(1+sign*m[key],4);
- return `<section class="outcome-section" aria-label="优势自适应裁剪"><h3>PPO 裁剪 · 阶段与优势自适应</h3><p>高优势动作允许更大的概率比上界；随训练进度在 1/3、1/2、3/4 等节点间平滑收窄。</p><div class="stats">${stat('概率比下界',ratio('policy/clip_lower',-1))}${stat('概率比上界：基准 / 最高',`${ratio('policy/clip_upper_base')} / ${ratio('policy/clip_upper_max')}`)}${stat('本轮上界均值',ratio('policy/clip_upper_mean'))}${stat('裁剪偏移硬下限 / 上限',`${fmt(m['policy/clip_minimum'],3)} / ${fmt(m['policy/clip_maximum'],3)}`)}</div><p class="hint">裁剪控制更新幅度；探索仍由自适应熵鼓励。KL 与早停保护继续生效，不能据此保证避免局部最优。</p></section>`;
+ const mechanism=m['policy/clip_absolute_advantage']?'按优势绝对值同时调节上下界。':'按带正负号的优势经 erf 平滑调整上界，下界对所有样本相同。';
+ const threshold=m['policy/unclipped_advantage_threshold'];
+ const exceptions=threshold>0?`优势绝对值 ≥ ${fmt(threshold,3)} 时跳过裁剪。`:'所有样本均保留 PPO 裁剪，不按优势大小豁免。';
+ return `<section class="outcome-section" aria-label="优势自适应裁剪"><h3>PPO 裁剪 · 阶段与优势自适应</h3><p>${mechanism}${exceptions}边界基准按已配置的训练进度日程计算。</p><div class="stats">${stat('概率比下界',ratio('policy/clip_lower',-1))}${stat('概率比上界：基准 / 最高',`${ratio('policy/clip_upper_base')} / ${ratio('policy/clip_upper_max')}`)}${stat('本轮上界均值',ratio('policy/clip_upper_mean'))}${stat('裁剪偏移硬下限 / 上限',`${fmt(m['policy/clip_minimum'],3)} / ${fmt(m['policy/clip_maximum'],3)}`)}</div><p class="hint">裁剪限制 surrogate 中继续改善动作的收益，不是动作概率的硬性投影。探索由熵项鼓励，KL 早停继续按配置生效。</p></section>`;
 }
 function renderRun(r){
  const m=r.metrics,rate=r.cycle_rate, days=r.target_days??20, target=r.required_rate_target??r.required_rate_20d,ok=rate!=null&&rate>=target;
@@ -122,11 +144,11 @@ function renderRun(r){
  ${renderProgress(r)}
  ${renderOutcomes(r)}
  ${renderHistorical(r)}
- ${renderExploration(m)}
+ ${renderExploration(m,r.entropy)}
  ${renderFutileAttacks(m)}
  ${renderLearningRate(m)}
  ${renderClipping(m)}
- <div class="stats">${stat('当前 update / 可恢复检查点',`${fmt(r.update)} / ${fmt(r.checkpoint_update)}`)}${stat('训练主进程',r.processes.length ? r.processes.map(p=>`PID ${p.pid}`).join(' / ') : '未运行')}${stat('rank 心跳 / 最久心跳',`${r.heartbeat_count}/${r.world_size} · ${r.heartbeat_age==null?'—':fmt(r.heartbeat_age)+' 秒'}`)}${stat('完整周期吞吐（最近 '+r.rate_updates+' 轮）',rate==null?'等待测量':fmt(rate)+' 步/s')}${stat('轮内吞吐（不含轮间开销）',r.inner_rate==null?'—':fmt(r.inner_rate)+' 步/s')}${stat('剩余任务 '+days+' 天所需吞吐',fmt(target)+' 步/s')}${stat('按当前周期吞吐预测剩余',duration(r.eta_seconds))}${stat(days+' 天吞吐条件',rate==null?'等待测量':ok?'已达到':'尚未达到',rate==null?'':ok?'good':'warn')}${stat('Policy loss',fmt(m['loss/policy_total'],5))}${stat('Critic loss',fmt(m['loss/critic_total'],5))}${renderKlStat(m)}${stat('熵 / clip 比例',`${fmt(m['policy/entropy'],3)} / ${fmt(m['policy/clip_fraction'],3)}`)}</div>
+ <div class="stats">${stat('当前 update / 可恢复检查点',`${fmt(r.update)} / ${fmt(r.checkpoint_update)}`)}${stat('训练主进程',r.processes.length ? r.processes.map(p=>`PID ${p.pid}`).join(' / ') : '未运行')}${stat('rank 心跳 / 最久心跳',`${r.heartbeat_count}/${r.world_size} · ${r.heartbeat_age==null?'—':fmt(r.heartbeat_age)+' 秒'}`)}${stat('完整周期吞吐（最近 '+r.rate_updates+' 轮）',rate==null?'等待测量':fmt(rate)+' 步/s')}${stat('轮内吞吐（不含轮间开销）',r.inner_rate==null?'—':fmt(r.inner_rate)+' 步/s')}${stat('剩余任务 '+days+' 天所需吞吐',fmt(target)+' 步/s')}${stat('按当前周期吞吐预测剩余',duration(r.eta_seconds))}${stat(days+' 天吞吐条件',rate==null?'等待测量':ok?'已达到':'尚未达到',rate==null?'':ok?'good':'warn')}${stat('Policy loss',fmt(m['loss/policy_total'],5))}${stat('Critic loss',fmt(m['loss/critic_total'],5))}${renderKlStat(m)}${stat('原始熵 / clip 比例',`${fmt(m['policy/entropy'],3)} / ${fmt(m['policy/clip_fraction'],3)}`)}${renderEntropyAverageStat(r.entropy)}</div>
  <div class="charts"><div><div class="chart-title"><span>Policy loss</span><span>策略损失</span></div>${chart(r.chart,'loss/policy_total','#87c7ff')}</div><div><div class="chart-title"><span>${['ppo','mappo'].includes(r.algorithm)?'Critic':'Layout'} loss</span><span>${['ppo','mappo'].includes(r.algorithm)?'价值':'布阵'}损失</span></div>${chart(r.chart,['ppo','mappo'].includes(r.algorithm)?'loss/critic_total':'loss/layout_total','#78d3b6')}</div></div>
  <details><summary>运行记录与评测状态</summary><p>已完成评测 ${r.evaluated_rounds} 轮 · ${championOnly(r)?`使用最新训练模型，下轮对阵历史冠军 update ${fmt(r.best_update)}`:observing(r)?`使用最新模型，固定旧基准 update ${fmt(r.best_update)}`:r.evaluation_type==='historical_only'?'使用最新模型，冠军评测已停止':`最优模型 update ${fmt(r.best_update)}`} · 保存策略 ${escapeHTML(r.checkpoint_policy||'未知')} · 最近指标 ${r.metrics_age==null?'—':fmt(r.metrics_age/60)+' 分钟前'}</p><pre>${escapeHTML(r.logs.join('\n'))}</pre></details></article>`;
 }

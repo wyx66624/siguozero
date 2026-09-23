@@ -7,6 +7,7 @@ or critic is archived in the historical library.
 from __future__ import annotations
 
 import copy
+from collections import Counter
 import json
 import math
 from pathlib import Path
@@ -22,6 +23,8 @@ from .inference_weights import install_packed_weights, matrix_parameter_names
 from .historical_cache import HistoricalWeightCache
 from .models import GamePolicyTransformer, PieceConditionedLayoutPointerDecoder, layout_sample_from_trace
 from .rollout import FrozenPolicyActor
+from .tactical_opponent import (LIVE_CHAMPION_ID, RULE_PRIORITY, RULE_VERSION,
+                               TacticalOpponentActor, committed_champion, pack_state_dict)
 
 
 SCENARIOS = ("self_play", "historical_opponents", "historical_teammate", "historical_both")
@@ -85,6 +88,8 @@ class HistoricalOpponents:
         self.archive_count = 0
         self.archive_seconds = 0.
         self._checkpoint_cpu_state = None
+        self.champion_entry = None
+        self.tactical_rule_counts = Counter()
         if self.enabled and self.catalog_path.exists():
             catalog = json.loads(self.catalog_path.read_text(encoding="utf-8"))
             if not self._compatible_contract(catalog.get("contract"),
@@ -176,7 +181,8 @@ class HistoricalOpponents:
             self.pending_cohort = self._choose_cohort()
         if self.weight_cache is not None:
             self.weight_cache.trim()
-            if self.pending_cohort is not None and self.pending_cohort["id"] != self.loaded_id:
+            if (not self.settings.historical_tactical_champion and self.pending_cohort is not None
+                    and self.pending_cohort["id"] != self.loaded_id):
                 entry = next(e for e in self.panel() if e["id"] == self.pending_cohort["id"])
                 self.weight_cache.prefetch(entry)
 
@@ -257,6 +263,8 @@ class HistoricalOpponents:
         return self._archive_snapshot(policy, layout, update=update, kind="checkpoint", milestones=[])
 
     def probabilities(self):
+        if self.settings.historical_tactical_champion:
+            return {LIVE_CHAMPION_ID: 1.}
         panel = self.panel()
         if not panel:
             return {}
@@ -320,6 +328,9 @@ class HistoricalOpponents:
                     teammate_fraction=self.settings.historical_teammate_fraction)
 
     def sampling_contract(self):
+        if self.settings.historical_tactical_champion:
+            return dict(strategy=LIVE_CHAMPION_ID, rule_version=RULE_VERSION,
+                        priority=list(RULE_PRIORITY), refresh="rollout_boundary")
         if self.settings.historical_sampling == "strength":
             return dict(strategy="strength", temperature=self.settings.historical_win_rate_temperature,
                         ema_alpha=self.settings.historical_win_rate_ema_alpha, draws="excluded",
@@ -339,6 +350,18 @@ class HistoricalOpponents:
             return
         pinned = {identifier for s in pool.slots for identifier in (s.opponent_id, s.teammate_id)
                   if identifier is not None}
+        if self.settings.historical_tactical_champion:
+            if pinned and pinned != {LIVE_CHAMPION_ID}:
+                raise RuntimeError("finish existing historical games before switching opponent modes")
+            self.active_id, self.active_probability, self.active_panel_size = LIVE_CHAMPION_ID, 1., 1
+            self.pending_cohort = None
+            # There is no historical-cohort drain: ongoing games follow the
+            # latest committed champion at the next rollout boundary.
+            self.cohort_started = 0
+            self._load_active(actor)
+            self.actor = TacticalOpponentActor(self.policy, rule_counts=self.tactical_rule_counts,
+                amp_dtype=actor.amp_dtype, max_batch_size=actor.max_batch_size)
+            return
         if pinned and pinned != {self.active_id}:
             raise RuntimeError("unfinished games do not match the resident historical cohort")
         if self.active_id is None or (not pinned and self.cohort_started >= self.cohort_limit):
@@ -384,15 +407,18 @@ class HistoricalOpponents:
         self._checkpoint_cpu_state = None
 
     def _load_active(self, actor):
-        if self.loaded_id == self.active_id:
-            return
         boundary = time.perf_counter()
-        entry = next(e for e in self.panel() if e["id"] == self.active_id)
-        cached = self.weight_cache is not None
+        tactical = self.settings.historical_tactical_champion
+        entry = (committed_champion(self.directory.parent, self.context) if tactical else
+                 next(e for e in self.panel() if e["id"] == self.active_id))
+        loaded_id = entry["sha256"] if tactical else self.active_id
+        if self.loaded_id == loaded_id:
+            return
+        cached = self.weight_cache is not None and not tactical
         if cached:
             packs = self.weight_cache.get(entry)
         else:
-            path = self.directory / entry["file"]
+            path = (self.directory.parent / "model_selection" if tactical else self.directory) / entry["file"]
             if entry["sha256"] not in self._verified:
                 if sha256_file(path) != entry["sha256"]:
                     raise ValueError("frozen historical snapshot hash changed")
@@ -401,7 +427,10 @@ class HistoricalOpponents:
             if (payload["mode"] != self.settings.mode.value or payload["format_version"] != checkpoint_format_for_model(self.settings.model)
                     or payload["config"]["no_capture_draw_plies"] != self.settings.no_capture_draw_plies):
                 raise ValueError("historical opponent checkpoint contract mismatch")
-            packs = payload["packed_weights"]
+            if payload.get("dead_rules_enabled") != self.settings.dead_rules_enabled:
+                raise ValueError("frozen opponent dead-rule variant mismatch")
+            packs = (payload["packed_weights"] if "packed_weights" in payload else
+                     {name: pack_state_dict(payload[name]) for name in ("policy", "layout")})
         self.clear_caches()
         if self.policy is None:
             # Preserve the learner's random stream on lazy initialization and resume.
@@ -426,7 +455,12 @@ class HistoricalOpponents:
                 event.record(torch.cuda.current_stream(self.context.device))
                 event.synchronize()
             self.weight_cache.finish_upload()
-        self.loaded_id = self.active_id
+        if tactical:
+            changed_champion = self.champion_entry is None or self.champion_entry["sha256"] != entry["sha256"]
+            self.champion_entry = dict(entry)
+            if changed_champion:
+                self.layout_queue.clear()
+        self.loaded_id = loaded_id
         self.load_count += 1
         self.load_seconds += time.perf_counter() - boundary
 
@@ -440,7 +474,8 @@ class HistoricalOpponents:
         targets = self.role_targets()
         for key, fraction in targets.items():
             self.role_credits[key] += fraction
-        allowed = (["self_play"] if self.cohort_started >= self.cohort_limit else
+        allowed = (["self_play"] if (self.cohort_started >= self.cohort_limit
+                    and not self.settings.historical_tactical_champion) else
                    [k for k in SCENARIOS if targets[k] > 0])
         most = max(self.role_credits[k] for k in allowed)
         scenario = self.rng.choice([k for k in allowed if self.role_credits[k] >= most - 1e-9])
@@ -493,6 +528,8 @@ class HistoricalOpponents:
         # Only the fixed-current-teammate stratum informs opponent quality.
         if scenario != "historical_opponents":
             return
+        if self.settings.historical_tactical_champion:
+            return  # Do not mix a changing hard-rule champion into history ratings.
         if self.settings.historical_sampling == "strength":
             record(self.win_rate_results, opponent)
             if reward == 0:
@@ -535,6 +572,9 @@ class HistoricalOpponents:
                     role_credits=dict(self.role_credits), scenario_started=dict(self.scenario_started),
                     scenario_results=copy.deepcopy(self.scenario_results),
                     teammate_results=copy.deepcopy(self.teammate_results), seat_offsets=dict(self.seat_offsets),
+                    **(dict(champion_entry=copy.deepcopy(self.champion_entry),
+                            tactical_rule_counts=dict(self.tactical_rule_counts))
+                       if self.settings.historical_tactical_champion else {}),
                     layout_queue=[dict(mode=s.mode.value, position_indices=s.position_indices,
                                        old_log_probs=s.old_log_probs) for s in self.layout_queue])
 
@@ -584,7 +624,9 @@ class HistoricalOpponents:
         self.pending_cohort = copy.deepcopy(state.get("pending_cohort"))
         if self.pending_cohort is not None:
             choice = self.pending_cohort
-            if (choice["id"] not in {e["id"] for e in self.panel()}
+            valid_ids = ({LIVE_CHAMPION_ID} if self.settings.historical_tactical_champion
+                         else {e["id"] for e in self.panel()})
+            if (choice["id"] not in valid_ids
                     or not 0 < choice["probability"] <= 1 or choice["panel_size"] < 1):
                 raise ValueError("invalid saved historical prefetch choice")
         self.cohort_limit = state.get("cohort_limit", self.settings.historical_cohort_games)
@@ -602,9 +644,16 @@ class HistoricalOpponents:
             self.mixed_completed = self.quality_update_games = self.completed
         self.layout_queue = [layout_sample_from_trace(s["mode"], s["position_indices"], s["old_log_probs"])
                              for s in state["layout_queue"]]
+        self.champion_entry = copy.deepcopy(state.get("champion_entry"))
+        self.tactical_rule_counts = Counter(state.get("tactical_rule_counts", {}))
 
     def metrics(self):
         return {"historical/active": int(self.active), "historical/threshold_environment_plies": self.threshold,
+                "historical/tactical_champion_enabled": int(self.settings.historical_tactical_champion),
+                **({"tactical_opponent/champion_update": (self.champion_entry or {}).get("update", -1),
+                    **{f"tactical_opponent/{name}": self.tactical_rule_counts[name]
+                       for name in (*RULE_PRIORITY, "model_fallback")}}
+                   if self.settings.historical_tactical_champion else {}),
                 "historical/evaluation_opponents": len(self.evaluation_panel()),
                 "historical/checkpoint_start_environment_plies": (self.checkpoint_threshold
                     if math.isfinite(self.checkpoint_threshold) else None),
@@ -644,6 +693,8 @@ class HistoricalOpponents:
             atomic_json(self.directory / "status.json", dict(
                 **self.metrics(), progress=self.progress, active_id=self.active_id,
                 sampling=self.sampling_contract(),
+                **({"live_champion": copy.deepcopy(self.champion_entry)}
+                   if self.settings.historical_tactical_champion else {}),
                 pending_cohort=copy.deepcopy(self.pending_cohort),
                 unfinished_historical_games=sum(s.opponent_id is not None or s.teammate_id is not None for s in pool.slots),
                 scenarios=[dict(id=k, target_fraction=v, started=self.scenario_started[k],

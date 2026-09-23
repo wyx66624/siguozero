@@ -34,7 +34,19 @@ class PackedLearnerGraph:
     ACTIONS = 65536
     SOURCES = 16384
 
-    def __init__(self, model, *, critic, amp_dtype, tokens=4096, sources=16384, pool=None):
+    def __init__(self, model, *, critic, amp_dtype, tokens=4096, sources=16384, pool=None,
+                 value_samples=None, policy_samples=None, gradient_cache=None):
+        # MAPPO supplies two team or four player values per transition. The
+        # gathered value rows grow; the packed temporal-token budget stays.
+        self.SAMPLES = 1024 if critic and not hasattr(model, 'draw_value_head') else 512
+        if value_samples is not None:
+            if not critic or value_samples not in (512, 1024, 2048, 4096):
+                raise ValueError("invalid critic graph value sample capacity")
+            self.SAMPLES = value_samples
+        if policy_samples is not None:
+            if critic or policy_samples not in (512, 1024):
+                raise ValueError("invalid policy graph sample capacity")
+            self.SAMPLES = policy_samples
         self.TOKENS = tokens
         self.SOURCES = sources
         self.pool = pool
@@ -46,6 +58,10 @@ class PackedLearnerGraph:
         self.grads = None
         self.replays = self.captures = 0
         self.callable = None
+        self._staging_consumed = None
+        self._host_stages = []
+        self._next_host_stage = 0
+        self.gradient_cache = gradient_cache
 
     @staticmethod
     def action_metadata(states):
@@ -60,6 +76,7 @@ class PackedLearnerGraph:
     def _buffer(self, name, shape, dtype):
         if name not in self.host:
             self.host[name] = torch.empty(shape, dtype=dtype, pin_memory=True)
+        if name not in self.device:
             self.device[name] = torch.empty(shape, dtype=dtype, device='cuda')
         return self.host[name].numpy()
 
@@ -96,6 +113,17 @@ class PackedLearnerGraph:
                 return False
             self.used_sources = len(unique)
         self.mode = mode
+        # Stage ahead of the GPU when one Adam batch needs several replays.
+        # Only host inputs rotate: captured device addresses remain fixed and
+        # every copy/replay is ordered on the same stream. A slot's event guards
+        # its pinned memory until its preceding H2D copies have consumed it.
+        if model.device.type == 'cuda':
+            slot = self._next_host_stage
+            if slot == len(self._host_stages):
+                self._host_stages.append((self.host if slot == 0 else {}, None))
+            self.host, self._staging_consumed = self._host_stages[slot]
+        if self._staging_consumed is not None:
+            self._staging_consumed.synchronize()
         width = observation_width(mode, model.config.dead_rules_enabled) + 14
         raw = self._buffer('raw', (1, self.TOKENS, width), torch.int16)[0]
         positions = self._buffer('positions', (1, self.TOKENS), torch.int64)[0]
@@ -148,6 +176,12 @@ class PackedLearnerGraph:
                      float(opening_coefficient is not None), bounds.upper, bounds.bonus, bounds.minimum, bounds.maximum,
                      float(bounds.absolute_advantage), bounds.unclipped_advantage_threshold)
         for name, host in self.host.items():self.device[name].copy_(host,non_blocking=True)
+        if model.device.type == 'cuda':
+            if self._staging_consumed is None:
+                self._staging_consumed = torch.cuda.Event()
+            self._staging_consumed.record(torch.cuda.current_stream(model.device))
+            self._host_stages[slot] = (self.host, self._staging_consumed)
+            self._next_host_stage = (slot + 1) % 3
         return True
 
     def _loss(self, model):
@@ -202,6 +236,11 @@ class PackedLearnerGraph:
 
     def run(self, model):
         if self.graph is None:
+            # Actor/Critic and bounded token buckets share this Python
+            # frame. Eight cached variants are insufficient alongside packed
+            # fallbacks; reserve a bounded cache instead of falling into eager.
+            from torch._dynamo import config as compiler_config
+            compiler_config.recompile_limit = max(compiler_config.recompile_limit, 32)
             self.callable=torch.compile(model._packed_temporal_forward,dynamic=False,mode='default')
             stream=warmup_stream(model.device);stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream),torch.autocast('cuda',dtype=self.amp_dtype):
@@ -209,9 +248,25 @@ class PackedLearnerGraph:
                     model.zero_grad(set_to_none=True)
                     loss,_=self._loss(model);loss.backward()
             torch.cuda.current_stream().wait_stream(stream)
+            shared = None
+            if self.gradient_cache is not None:
+                # Warmup gradients live outside every graph's private pool.
+                # Keep one set per model instead of one full parameter-sized
+                # set for every token/source/value shape in the graph bank.
+                shared = self.gradient_cache.get('grads')
+                if shared is None:
+                    shared = self.gradient_cache['grads'] = tuple(p.grad for p in self.parameters)
+                elif any((p.grad is None) != (g is None)
+                         for p,g in zip(self.parameters,shared,strict=True)):
+                    raise RuntimeError('learner graph parameter usage changed between shapes')
             model.zero_grad(set_to_none=True)
+            if shared is not None:
+                for parameter,grad in zip(self.parameters,shared,strict=True):
+                    parameter.grad = grad
             self.graph=torch.cuda.CUDAGraph()
             with torch.cuda.graph(self.graph,stream=stream,pool=self.pool),torch.autocast('cuda',dtype=self.amp_dtype):
+                if shared is not None:
+                    torch._foreach_zero_([grad for grad in shared if grad is not None])
                 self.loss,self.metrics=self._loss(model)
                 self.loss.backward()
             self.loss = self.loss.detach()
