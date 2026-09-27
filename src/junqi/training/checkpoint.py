@@ -49,7 +49,12 @@ def require_current_checkpoint(payload: dict[str, Any]) -> None:
                 raise ValueError("joint action checkpoint must not contain separate countdown/alive/revealed embeddings")
             board = weights.get("board_encoder.projection.weight")
             if board is not None:
-                expected = 129 * 26 + 3 + (0 if version == CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION else 75 + 4)
+                points = model.get("board_point_capacity", 129)
+                if type(points) is not int or points not in (60, 129):
+                    raise ValueError("checkpoint board point capacity must be 60 or 129")
+                if points == 60 and payload.get("mode") != "two_player":
+                    raise ValueError("60-point checkpoints require two-player mode")
+                expected = points * 26 + 3 + (0 if version == CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION else 75 + 4)
                 if board.ndim != 2 or board.shape[1] != expected:
                     raise ValueError(f"inventory multihot checkpoint requires {expected} board inputs")
     if version in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS:
@@ -272,6 +277,8 @@ def restore_training_state(
                 or payload.get("config", {}).get("critic_layers") != critic.config.temporal_layers):
             raise RuntimeError("MAPPO architecture/critic depth changed across resume")
         saved_model = payload.get("config", {}).get("model", {})
+        if saved_model.get("board_point_capacity", 129) != policy.config.board_point_capacity:
+            raise RuntimeError("MAPPO board point capacity changed across resume; use a new run directory")
         if ((saved_model.get("action_dim") or saved_model.get("board_dim")) != policy.config.action_embedding_dim
                 or saved_model.get("board_encoder_type") != policy.config.board_encoder_type
                 or saved_model.get("action_encoder_type", "coordinates_player_linear") != policy.config.action_encoder_type):

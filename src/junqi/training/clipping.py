@@ -1,6 +1,7 @@
-"""Bounded, progress-scheduled advantage-aware PPO clipping.
+"""ACPO advantage-aware PPO clipping with an optional legacy schedule.
 
 The upper-bound erf modulation follows ACPO (arXiv:2510.00690, eqs. 5-6).
+An explicit delta is additive; otherwise legacy base-scaled widening applies.
 The progress schedule, absolute-advantage bounds and optional unclipped tail are
 project-specific extensions, not its reuse curriculum.
 Advantages are the detached, globally normalized PPO rollout advantages; never
@@ -28,30 +29,41 @@ class PolicyClip:
     lower: float
     upper: float
     bonus: float = 0.0
-    minimum: float = 0.1
-    maximum: float = 0.45
+    minimum: float | None = 0.1
+    maximum: float | None = 0.45
     progress: float = 0.0
     absolute_advantage: bool = False
     unclipped_advantage_threshold: float = 0.0
+    progress_scheduled: bool = False
 
     @classmethod
     def fixed(cls, epsilon):
         return cls(epsilon, epsilon, minimum=epsilon, maximum=epsilon)
 
     def metrics(self):
-        return {"policy/clip_progress": self.progress,
+        high = self.upper + self.bonus
+        metrics = {"policy/clip_progress": self.progress,
+                "policy/clip_progress_scheduled": float(self.progress_scheduled),
+                "policy/clip_hard_bounds_enabled": float(self.minimum is not None or self.maximum is not None),
                 "policy/clip_lower": self.lower,
                 "policy/clip_upper_base": self.upper,
-                "policy/clip_upper_max": min(self.maximum, self.upper + self.bonus),
-                "policy/clip_minimum": self.minimum,
-                "policy/clip_maximum": self.maximum,
+                "policy/clip_delta": self.bonus,
+                "policy/clip_upper_max": high if self.maximum is None else min(self.maximum, high),
                 "policy/clip_absolute_advantage": float(self.absolute_advantage),
                 "policy/unclipped_advantage_threshold": self.unclipped_advantage_threshold}
+        if self.minimum is not None:
+            metrics["policy/clip_minimum"] = self.minimum
+        if self.maximum is not None:
+            metrics["policy/clip_maximum"] = self.maximum
+        return metrics
 
 
 def scheduled_policy_clip(settings, environment_plies: int) -> PolicyClip:
     if not settings.ppo_adaptive_clip:
         return PolicyClip.fixed(settings.clip_epsilon)
+    if settings.ppo_clip_mode == "acpo":
+        return PolicyClip(settings.ppo_clip_lower, settings.ppo_clip_upper,
+                          settings.ppo_clip_delta, minimum=None, maximum=None)
     progress = min(1.0, max(0.0, environment_plies / settings.target_environment_plies))
     schedule = settings.ppo_clip_schedule
     lower, upper = schedule[-1][1:]
@@ -62,20 +74,24 @@ def scheduled_policy_clip(settings, environment_plies: int) -> PolicyClip:
             upper = left[2] + fraction * (right[2] - left[2])
             break
     minimum, maximum = settings.ppo_clip_minimum, settings.ppo_clip_maximum
+    bonus = (upper * settings.ppo_clip_advantage_scale
+             if settings.ppo_clip_delta is None else settings.ppo_clip_delta)
     return PolicyClip(min(maximum, max(minimum, lower)),
                       min(maximum, max(minimum, upper)),
-                      upper * settings.ppo_clip_advantage_scale, minimum, maximum, progress,
-                      settings.ppo_clip_absolute_advantage, settings.ppo_unclipped_advantage_threshold)
+                      bonus, minimum, maximum, progress,
+                      settings.ppo_clip_absolute_advantage, settings.ppo_unclipped_advantage_threshold,
+                      progress_scheduled=True)
 
 
 def advantage_clip_upper(advantage, upper, bonus, minimum, maximum):
     # No gradients through the bound; all operands stay on the learner device.
     percentile = 0.5 * (1 + torch.erf(advantage.detach() / math.sqrt(2)))
-    return (upper + bonus * percentile).clamp(min=minimum, max=maximum)
+    bound = upper + bonus * percentile
+    return bound if minimum is None and maximum is None else bound.clamp(min=minimum, max=maximum)
 
 
 def advantage_clip_bounds(advantage, lower, upper, bonus, minimum, maximum, absolute=False):
-    """Apply the same widening to positive and negative advantage magnitudes."""
+    """Use signed ACPO upper bounds, or the legacy absolute-advantage extension."""
     magnitude = advantage.detach().abs()
     enabled = torch.as_tensor(absolute, device=advantage.device) > 0
     signal = torch.where(enabled, magnitude, advantage.detach())

@@ -506,6 +506,7 @@ def _upload_targets(rows, reference):
 def policy_ppo_loss(
     policy: nn.Module, samples: Sequence[PPOSample], *, clip_epsilon: float,
     entropy_coefficient: float,
+    source_entropy_coefficient: float = 0.0,
     sequence_training: bool = False,
     defer_metrics: bool = False,
     opening_entropy_coefficient: float | None = None,
@@ -522,8 +523,9 @@ def policy_ppo_loss(
     states = [sample.state for sample in samples]
     options = {"pack_sequences": True} if sequence_training else {}
     if hasattr(getattr(policy, "module", policy), "ppo_statistics"):
-        current, entropies = policy(states, [state.legal_actions for state in states],
-                                    ppo_actions=[sample.action for sample in samples], **options)
+        current, entropies, source_entropies = policy(
+            states, [state.legal_actions for state in states],
+            ppo_actions=[sample.action for sample in samples], include_source_entropy=True, **options)
         entropy = entropies.mean()
     else:
         # Keep the public loss usable with small external/test policy modules.
@@ -534,6 +536,15 @@ def policy_ppo_loss(
         ]).float()
         entropies = torch.stack([-(row.exp() * row).sum() for row in logs])
         entropy = entropies.mean()
+        source_entropies = []
+        for state, row in zip(states, logs, strict=True):
+            by_source = {}
+            for index, (source, _) in enumerate(state.legal_actions):
+                by_source.setdefault(source, []).append(index)
+            marginal_logs = torch.stack([row[indices].float().logsumexp(0)
+                                         for indices in by_source.values()])
+            source_entropies.append(-(marginal_logs.exp() * marginal_logs).sum())
+        source_entropies = torch.stack(source_entropies)
     rows = [(sample.old_log_prob, sample.advantage,
              math.log(len(sample.state.legal_actions)) if len(sample.state.legal_actions) > 1 else 0.,
              float(len(sample.state.records) <= entropy_opening_plies)) for sample in samples]
@@ -551,6 +562,19 @@ def policy_ppo_loss(
         states, entropies, coefficient=entropy_coefficient,
         opening_coefficient=opening_entropy_coefficient, opening_plies=entropy_opening_plies,
         metadata=metadata[:, 2:])
+    # H(joint) = H(source) + E_source[H(destination | source)]. The extra
+    # marginal bonus increases source exploration without raising the
+    # conditional destination coefficient. Neither entropy is normalized.
+    source_entropy = source_entropies.float().mean()
+    source_bonus = source_entropy_coefficient * source_entropy
+    exploration_metrics.update({
+        "loss/policy_joint_entropy": -entropy_bonus.detach(),
+        "loss/policy_source_entropy": -source_bonus.detach(),
+        "policy/source_entropy": source_entropy.detach(),
+        "policy/conditional_destination_entropy": (entropy - source_entropy).detach(),
+    })
+    entropy_bonus = entropy_bonus + source_bonus
+    exploration_metrics["loss/policy_entropy"] = -entropy_bonus.detach()
     loss = policy_loss - entropy_bonus
     if empty:
         loss = loss * 0

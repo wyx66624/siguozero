@@ -10,7 +10,7 @@ import sqlite3
 import time
 
 from ..training.checkpoint_format import CHECKPOINT_FORMAT_VERSION, SUPPORTED_CHECKPOINT_FORMAT_VERSIONS
-from .exploration import entropy_history
+from .exploration import SourceEntropyStore, entropy_history
 from .outcomes import OutcomeStore, evaluation_outcomes, training_record
 
 MODE_NAMES = {"four_dark": "四暗棋", "double_open": "双明棋", "two_player": "双人军棋"}
@@ -97,9 +97,15 @@ class Monitor:
         self.target_days = float(config.get("target_days", 20))
         if not math.isfinite(self.target_days) or self.target_days <= 0:
             raise ValueError("target_days must be finite and positive")
-        self.outcomes = OutcomeStore(self.root / "output/local_console/outcomes.sqlite3")
+        self.output_directory = (self.root / config.get("output_directory", "output/local_console")).resolve()
+        if not self.output_directory.is_relative_to(self.root):
+            raise ValueError("console output directory must be inside the project")
+        self.outcomes = OutcomeStore(self.output_directory / "outcomes.sqlite3")
+        self.source_entropies = SourceEntropyStore()
         self.specs = []
         for spec in config["runs"]:
+            if not isinstance(spec.get("planned_settings", {}), dict):
+                raise ValueError("planned_settings must be a mapping")
             path = (self.root / spec["path"]).resolve()
             if not path.is_relative_to(self.root):
                 raise ValueError("run directories must be inside the project")
@@ -170,7 +176,10 @@ class Monitor:
 
     def run_status(self, spec):
         run, now = spec["path"], time.time()
-        settings = read_json(run / "resolved_config.json")
+        saved_settings = read_json(run / "resolved_config.json")
+        # Planned values label the not-yet-started run. They never manufacture
+        # metrics, a checkpoint or a trainer, and a saved config replaces them.
+        settings = saved_settings or spec.get("planned_settings", {})
         latest = read_json(run / "latest_metrics.json")
         history = [row for row in tail_records(run / "metrics.jsonl") if training_record(row)]
         if not training_record(latest) and history:
@@ -198,7 +207,7 @@ class Monitor:
             processes.append(publishing)
         heartbeat = fresh[0] if fresh else (alive_resources[0] if alive_resources else {})
         counter = settings.get("step_budget_counter", latest.get("training/step_budget_counter"))
-        counter = counter or ("environment_plies" if spec["mode"] != "two_player" else "continuation_plies")
+        counter = counter or ("environment_plies" if algorithm in ("ppo", "mappo") else "continuation_plies")
         target_key = "target_" + counter
         target = settings.get(target_key) or latest.get("training/" + target_key) or 3_000_000_000
         checkpoint_steps = checkpoint.get("cumulative", {}).get(counter, checkpoint.get(counter))
@@ -248,13 +257,15 @@ class Monitor:
             if entropy_records and latest.get("update") == entropy_records[-1].get("update"):
                 entropy_records.pop()
             entropy_records.append(latest)
+        world = int(heartbeat.get("distributed/world_size", latest.get("distributed/world_size", 1)))
         exploration = entropy_history(entropy_records)
+        source_exploration = self.source_entropies.snapshot(run, entropy_records,
+            world_size=world, session_started=session_started, resumed_update=resumed_update)
         try:
             outcomes = self.outcomes.snapshot(run, algorithm=algorithm, mode=spec["mode"], max_update=update,
                 session_started=session_started, resumed_update=resumed_update)
         except (OSError, sqlite3.Error):
             outcomes = {"available": False, "error": "对局统计暂时不可用，下一次刷新会重试"}
-        world = int(heartbeat.get("distributed/world_size", latest.get("distributed/world_size", 1)))
         status = "stopped"
         if processes:
             status = "running" if len(fresh) >= world else "stale"
@@ -290,6 +301,12 @@ class Monitor:
                 "experimental": spec.get("experimental", False), "status": status,
                 "phase": heartbeat.get("training/phase", "waiting"),
                 "algorithm": algorithm,
+                "configuration_source": "resolved" if saved_settings else "planned" if settings else "unknown",
+                "training_plan": {key: settings.get(key) for key in (
+                    "ppo_clip_mode", "draw_reward", "flag_capture_reward", "known_nonflag_hq_penalty",
+                    "bomb_commander_reward", "bomb_army_commander_reward", "bomb_division_commander_reward",
+                    "futile_attack_penalty", "historical_enabled", "historical_start_environment_plies",
+                    "historical_start_fraction", "historical_training_fraction", "historical_sampling")},
                 "update": update,
                 "checkpoint_update": checkpoint.get("update"), "best_update": selection.get("best_update"),
                 "evaluated_rounds": len(selection.get("rounds", [])), "counter": counter,
@@ -308,7 +325,9 @@ class Monitor:
                 "checkpoint_interval_steps": settings.get("checkpoint_interval_environment_plies"),
                 "next_checkpoint_steps": ((checkpoint_steps // settings["checkpoint_interval_environment_plies"] + 1)
                     * settings["checkpoint_interval_environment_plies"] if checkpoint_steps is not None
-                    and settings.get("checkpoint_policy") == "periodic" and settings.get("checkpoint_interval_environment_plies") else None),
+                    and settings.get("checkpoint_policy") == "periodic" and settings.get("checkpoint_interval_environment_plies")
+                    else settings.get("checkpoint_interval_environment_plies") if not saved_settings
+                    and spec.get("planned_settings") and not completed else None),
                 "progress_source": "live" if processes else "checkpoint" if checkpoint_steps is not None else "unverified_log",
                 "processes": [{"pid": p["pid"], "started": p["started"]} for p in processes],
                 "heartbeat_count": len(fresh), "world_size": world,
@@ -321,6 +340,7 @@ class Monitor:
                 "metrics_age": now - latest["timestamp_unix"] if latest.get("timestamp_unix") is not None else None,
                 "metrics": latest, "resource": heartbeat if fresh else {}, "chart": chart,
                 "entropy": exploration,
+                "source_entropy": source_exploration,
                 "outcomes": outcomes, "evaluation_outcomes": evaluation_outcomes(run, selection, spec["mode"]),
                 "historical_opponents": read_json(run / "historical_opponents/status.json"),
                 "historical_evaluation": read_json(run / "historical_opponents/latest_evaluation.json"),

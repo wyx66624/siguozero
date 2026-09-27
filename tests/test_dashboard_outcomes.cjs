@@ -9,6 +9,29 @@ const source = fs.readFileSync(path.join(__dirname, '../src/junqi/web/static/das
 const context = {};
 vm.runInNewContext(source.slice(0, source.indexOf('let loading=false;')), context);
 
+test('ACPO panel shows fixed baselines and no extra epsilon hard bounds', () => {
+  const html=context.renderClipping({'policy/adaptive_clip_enabled':1,
+    'policy/clip_progress_scheduled':0,'policy/clip_hard_bounds_enabled':0,
+    'policy/clip_lower':.2,'policy/clip_upper_base':.2,'policy/clip_upper_max':.25,
+    'policy/clip_upper_mean':.225,'policy/clip_delta':.05,
+    'policy/clip_absolute_advantage':0,'policy/unclipped_advantage_threshold':0});
+  for(const text of ['ACPO 优势自适应','上下界基准固定','不使用训练进度日程','额外 ε 硬限幅',
+                     '未启用','0.8','1.2','1.25','优势放宽量 δ','0.05'])
+    assert.ok(html.includes(text),text);
+  assert.ok(!html.includes('边界基准按已配置的训练进度日程计算'));
+  assert.ok(!html.includes('裁剪偏移硬下限 / 上限'));
+  assert.ok(!html.includes('NaN') && !html.includes('undefined'));
+});
+
+test('legacy clipping metrics retain the schedule and hard-bound description', () => {
+  const html=context.renderClipping({'policy/adaptive_clip_enabled':1,
+    'policy/clip_lower':.25,'policy/clip_upper_base':.3,'policy/clip_upper_max':.45,
+    'policy/clip_upper_mean':.375,'policy/clip_minimum':.1,'policy/clip_maximum':.45});
+  assert.ok(html.includes('边界基准按已配置的训练进度日程计算'));
+  assert.ok(html.includes('裁剪偏移硬下限 / 上限'));
+  assert.ok(!html.includes('未启用'));
+});
+
 test('growing training library and bounded RAM cache are distinct from the evaluation panel', () => {
   const html=context.renderHistorical({historical_opponents:{
     'historical/opponents':241,'historical/evaluation_opponents':6,
@@ -115,7 +138,7 @@ test('an unavailable result index leaves the rest of the dashboard usable', () =
   assert.ok(!html.includes('<script>'));
 });
 
-test('historical panel shows the half gate, per-opponent results and uncertainty', () => {
+test('historical panel shows the configured gate, per-opponent results and uncertainty', () => {
   assert.equal(context.renderHistorical({}), '');
   const run = {historical_opponents:{'historical/active':0,
     'historical/threshold_environment_plies':1500000000, 'historical/opponents':2,
@@ -125,8 +148,19 @@ test('historical panel shows the half gate, per-opponent results and uncertainty
       {opponent_update:10,games:100,wins:40,draws:10,losses:50,score:.45,score_ci:[.2,.7],below_half:true},
       {opponent_update:20,games:100,wins:80,draws:0,losses:20,score:.8,score_ci:[.65,.95],confirmed_regression:false}]}};
   const html = context.renderHistorical(run);
-  for (const text of ['等待训练达到一半','1,500,000,000','目标 20%','历史对手门槛未通过','低于 50%','显著领先','校正置信区间'])
+  for (const text of ['等待训练达到启用门槛','1,500,000,000','目标 20%','历史对手门槛未通过','低于 50%','显著领先','校正置信区间'])
     assert.ok(html.includes(text), text);
+});
+
+test('current tactical opponent is one adaptive identity, with public rule counters', () => {
+  const html=context.renderHistorical({historical_opponents:{
+    'historical/tactical_current_enabled':1,'historical/threshold_environment_plies':1000000000,
+    'historical/opponents':3,'tactical_opponent/defend_flag':4,'tactical_opponent/bomb_known_high':5,
+    sampling:{strategy:'strength'},opponents:[{id:'live_current_tactical',kind:'current_tactical',
+      update:3200,environment_plies:314572800,probability:.25,results:{wins:2,draws:3,losses:4}}]}});
+  for(const text of ['单一身份','模型更新不增加身份','师长/军长/司令','守旗 4 / 炸大子 5',
+                    '1,000,000,000','25%','2 / 3 / 4']) assert.ok(html.includes(text),text);
+  assert.ok(!html.includes('NaN')&&!html.includes('undefined'));
 });
 
 test('teammate and opponent fractions and overlap remain separate in the dashboard', () => {

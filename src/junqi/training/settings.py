@@ -90,10 +90,15 @@ class TrainingSettings:
     ppo_learner_cuda_graphs: bool = False
     ppo_cuda_memory_fraction: float | None = None
     ppo_adaptive_clip: bool = False
-    ppo_clip_minimum: float = 0.1
-    ppo_clip_maximum: float = 0.45
+    ppo_clip_mode: str = "scheduled"
+    ppo_clip_lower: float = 0.2
+    ppo_clip_upper: float = 0.2
+    ppo_clip_minimum: float | None = 0.1
+    ppo_clip_maximum: float | None = 0.45
     ppo_clip_advantage_scale: float = 0.5
-    ppo_clip_schedule: tuple[tuple[float, float, float], ...] = DEFAULT_CLIP_SCHEDULE
+    # ACPO's additive widening; None preserves the legacy base * scale rule.
+    ppo_clip_delta: float | None = None
+    ppo_clip_schedule: tuple[tuple[float, float, float], ...] | None = DEFAULT_CLIP_SCHEDULE
     ppo_clip_absolute_advantage: bool = False
     ppo_unclipped_advantage_threshold: float = 0.0
     ppo_min_policy_epochs: int = 0
@@ -130,7 +135,9 @@ class TrainingSettings:
     futile_attack_ema_decay: float = 0.95
     historical_enabled: bool = False
     historical_tactical_champion: bool = False
+    historical_tactical_current: bool = False
     historical_start_fraction: float = 0.5
+    historical_start_environment_plies: int | None = None
     historical_training_fraction: float = 0.2
     historical_teammate_fraction: float = 0.2
     historical_snapshot_fractions: tuple[float, ...] = (0.05, 0.1, 0.2, 0.3, 0.4)
@@ -152,6 +159,8 @@ class TrainingSettings:
     layout_max_behavior_age: int = 0
     layout_microbatch_size: int = 32
     adaptive_entropy: bool = False
+    source_entropy_coefficient: float = 0.0
+    layout_entropy_coefficient: float | None = None
     entropy_minimum: float = 0.005
     entropy_maximum: float = 0.02
     entropy_opening_maximum: float | None = None
@@ -175,6 +184,7 @@ class TrainingSettings:
     lr_epoch_completion: bool = False
     lr_minimum_completed_epochs: int = 2
     lr_increase_kl_threshold: float = 0.09
+    lr_decrease_kl_threshold: float = 0.10
     ppo_kl_probe_interval_steps: int = 0
     ppo_critic_full_history_batches: bool = False
     # Explicit PPO guard, independent of the LR controller's hold band.
@@ -218,21 +228,38 @@ class TrainingSettings:
         entropy = {**entropy, **entropy_overrides.get(normalized.value, {})}
         runtime = data.get("runtime", {})
         ppo = data.get("ppo", {})
+        # Legacy profiles retain their GRPO two-player default; the expanded
+        # profile explicitly opts both board variants into the shared learner.
+        mode_algorithm = "grpo" if normalized is TrainingMode.TWO_PLAYER else ppo.get("algorithm", "ppo")
+        ppo_overrides = ppo.get("mode_overrides", {})
+        if (not isinstance(ppo_overrides, dict) or any(
+                key not in {mode.value for mode in TrainingMode} or not isinstance(value, dict)
+                for key, value in ppo_overrides.items())):
+            raise ValueError("ppo mode_overrides must map training modes to settings")
+        selected_ppo = ppo_overrides.get(normalized.value, {})
+        algorithm = selected_ppo.get("algorithm", mode_algorithm)
+        ppo = {**ppo, **selected_ppo}
         adaptive_clip = ppo.get("adaptive_clip", {})
         if not isinstance(adaptive_clip, dict):
             raise ValueError("ppo.adaptive_clip must be a mapping")
+        clip_mode = adaptive_clip.get("mode", "scheduled")
         historical = data.get("historical_opponents", {})
         if not isinstance(historical, dict):
             raise ValueError("historical_opponents must be a mapping")
+        historical_overrides = historical.get("mode_overrides", {})
+        if (not isinstance(historical_overrides, dict) or any(
+                key not in {mode.value for mode in TrainingMode} or not isinstance(value, dict)
+                for key, value in historical_overrides.items())):
+            raise ValueError("historical_opponents mode_overrides must map training modes to settings")
+        historical = {**historical, **historical_overrides.get(normalized.value, {})}
         model_selection = data.get("model_selection", {})
         if not isinstance(model_selection, dict):
             raise ValueError("model_selection must be a mapping")
-        four_player_selection = model_selection.get("four_player", {})
-        if not isinstance(four_player_selection, dict):
-            raise ValueError("model_selection.four_player must be a mapping")
-        if normalized is not TrainingMode.TWO_PLAYER:
-            model_selection = {**model_selection, **four_player_selection}
-        algorithm = "grpo" if normalized is TrainingMode.TWO_PLAYER else ppo.get("algorithm", "ppo")
+        profile_name = "two_player" if normalized is TrainingMode.TWO_PLAYER else "four_player"
+        mode_selection = model_selection.get(profile_name, {})
+        if not isinstance(mode_selection, dict):
+            raise ValueError(f"model_selection.{profile_name} must be a mapping")
+        model_selection = {**model_selection, **mode_selection}
         configured_dead_rules = runtime.get("dead_rules_enabled", True)
         if not isinstance(configured_dead_rules, bool):
             raise ValueError("runtime.dead_rules_enabled must be a boolean")
@@ -271,14 +298,15 @@ class TrainingSettings:
             raise ValueError(
                 "model_scale must be bootstrap, main, or extended"
             )
-        if normalized is not TrainingMode.TWO_PLAYER:
-            profile = data["models"].get("four_player", {})
-            if not isinstance(profile, dict):
-                raise ValueError("models.four_player must be a mapping")
+        profile = data["models"].get(profile_name, {})
+        if not isinstance(profile, dict):
+            raise ValueError(f"models.{profile_name} must be a mapping")
+        if profile:
             model = replace(model,
+                            board_point_capacity=int(profile.get("board_point_capacity", model.board_point_capacity)),
                             board_encoder_type=str(profile.get("board_encoder_type", model.board_encoder_type)),
                             action_encoder_type=str(profile.get("action_encoder_type", model.action_encoder_type)))
-        if normalized is not TrainingMode.TWO_PLAYER and not tiny:
+        if profile and not tiny:
             board_dim = int(profile.get("board_embedding_dim", model.board_dim))
             action_dim = int(profile.get("action_embedding_dim", model.board_dim))
             model = replace(
@@ -293,7 +321,7 @@ class TrainingSettings:
             )
         if tiny and algorithm == "mappo":
             model = replace(model, token_fusion_hidden_dim=model.temporal_dim)
-            if data["models"].get("four_player", {}).get("board_encoder_type") in (
+            if profile.get("board_encoder_type") in (
                     INVENTORY_ENCODER_TYPE, INVENTORY_ONLY_ENCODER_TYPE):
                 model = replace(model, board_dim=48, action_dim=16)
         model = replace(
@@ -354,7 +382,9 @@ class TrainingSettings:
             "ppo_pipeline_groups": int(ppo.get("pipeline_groups", 1)) if algorithm in ("ppo", "mappo") else 1,
             "historical_enabled": historical.get("enabled", False) if algorithm in ("ppo", "mappo") else False,
             "historical_tactical_champion": historical.get("tactical_champion", False),
+            "historical_tactical_current": historical.get("tactical_current", False),
             "historical_start_fraction": historical.get("start_fraction", 0.5),
+            "historical_start_environment_plies": historical.get("start_environment_plies"),
             "historical_training_fraction": historical.get("training_fraction", 0.2),
             "historical_teammate_fraction": historical.get("teammate_fraction", 0.2),
             "historical_snapshot_fractions": tuple(historical.get("snapshot_fractions", (0.05, 0.1, 0.2, 0.3, 0.4))),
@@ -376,10 +406,14 @@ class TrainingSettings:
             "ppo_learner_cuda_graphs": ppo.get("learner_cuda_graphs", False) if algorithm in ("ppo", "mappo") else False,
             "ppo_cuda_memory_fraction": ppo.get("cuda_memory_fraction") if algorithm in ("ppo", "mappo") else None,
             "ppo_adaptive_clip": adaptive_clip.get("enabled", False) if algorithm in ("ppo", "mappo") else False,
-            "ppo_clip_minimum": adaptive_clip.get("minimum", 0.1),
-            "ppo_clip_maximum": adaptive_clip.get("maximum", 0.45),
+            "ppo_clip_mode": clip_mode,
+            "ppo_clip_lower": adaptive_clip.get("lower", learner["clip_epsilon"]),
+            "ppo_clip_upper": adaptive_clip.get("upper", learner["clip_epsilon"]),
+            "ppo_clip_minimum": adaptive_clip.get("minimum", None if clip_mode == "acpo" else 0.1),
+            "ppo_clip_maximum": adaptive_clip.get("maximum", None if clip_mode == "acpo" else 0.45),
             "ppo_clip_advantage_scale": adaptive_clip.get("advantage_scale", 0.5),
-            "ppo_clip_schedule": adaptive_clip.get("schedule", DEFAULT_CLIP_SCHEDULE),
+            "ppo_clip_delta": adaptive_clip.get("delta"),
+            "ppo_clip_schedule": adaptive_clip.get("schedule", None if clip_mode == "acpo" else DEFAULT_CLIP_SCHEDULE),
             "ppo_clip_absolute_advantage": adaptive_clip.get("absolute_advantage", False) if algorithm in ("ppo", "mappo") else False,
             "ppo_unclipped_advantage_threshold": adaptive_clip.get("unclipped_advantage_threshold", 0.0) if algorithm in ("ppo", "mappo") else 0.0,
             "grpo_equivalent_plies": None,
@@ -463,6 +497,7 @@ class TrainingSettings:
                                     and learner["learning_rate"].get("adaptive", False) else False),
             "lr_minimum_completed_epochs": learner["learning_rate"].get("minimum_completed_epochs", 2),
             "lr_increase_kl_threshold": learner["learning_rate"].get("increase_kl_threshold", .09),
+            "lr_decrease_kl_threshold": learner["learning_rate"].get("decrease_kl_threshold", .10),
             "ppo_kl_probe_interval_steps": learner["early_stop"].get("probe_interval_steps", 0),
             "ppo_critic_full_history_batches": ppo.get("critic_full_history_batches", False),
             "lr_increase_on_full_epochs": (learner["learning_rate"].get("increase_on_full_epochs", False)
@@ -481,6 +516,8 @@ class TrainingSettings:
             "clip_epsilon": float(learner["clip_epsilon"]),
             "gradient_norm_clip": float(learner["gradient_norm_clip"]),
             "entropy_coefficient": float(entropy["initial"]),
+            "source_entropy_coefficient": float(entropy.get("source_coefficient", 0.0)),
+            "layout_entropy_coefficient": entropy.get("layout_coefficient"),
             "adaptive_entropy": entropy.get("adaptive_to_target_entropy", False),
             "entropy_minimum": float(entropy.get("minimum", 0.005)),
             "entropy_maximum": float(entropy.get("maximum", 0.02)),
@@ -588,6 +625,7 @@ class TrainingSettings:
                     "arena_enabled": False,
                     "historical_enabled": False,
                     "historical_tactical_champion": False,
+                    "historical_tactical_current": False,
                     "futile_attack_penalty": 0.0,
                     "known_nonflag_hq_penalty": 0.0,
                     "bomb_commander_reward": 0.0,
@@ -682,27 +720,43 @@ class TrainingSettings:
             raise ValueError("absolute-advantage clipping requires adaptive PPO clipping")
         if type(self.ppo_min_policy_epochs) is not int or not 0 <= self.ppo_min_policy_epochs <= self.policy_epochs:
             raise ValueError("minimum policy epochs must be between zero and policy epochs")
-        clip_values = (self.clip_epsilon, self.ppo_clip_minimum, self.ppo_clip_maximum,
-                       self.ppo_clip_advantage_scale)
+        clip_values = (self.clip_epsilon, self.ppo_clip_lower, self.ppo_clip_upper, self.ppo_clip_advantage_scale)
         if (type(self.ppo_adaptive_clip) is not bool or any(
                 type(x) not in (int, float) or not math.isfinite(x) for x in clip_values)
                 or not 0 < self.clip_epsilon < 1
-                or not 0 < self.ppo_clip_minimum <= self.ppo_clip_maximum < 1
+                or not 0 < self.ppo_clip_lower < 1 or self.ppo_clip_upper <= 0
+                or self.ppo_clip_mode not in ("scheduled", "acpo")
                 or not 0 <= self.ppo_clip_advantage_scale <= 1):
-            raise ValueError("invalid bounded PPO clipping settings")
+            raise ValueError("invalid PPO clipping settings")
+        if self.ppo_clip_delta is not None and (
+                type(self.ppo_clip_delta) not in (int, float)
+                or not math.isfinite(self.ppo_clip_delta)
+                or not 0 <= self.ppo_clip_delta <= 1):
+            raise ValueError("PPO clip delta must be a finite number between zero and one")
         schedule = self.ppo_clip_schedule
-        if (not isinstance(schedule, (list, tuple)) or len(schedule) < 2
+        if self.ppo_clip_mode == "acpo":
+            if (self.ppo_clip_minimum is not None or self.ppo_clip_maximum is not None
+                    or schedule is not None or self.ppo_clip_delta is None
+                    or self.ppo_clip_absolute_advantage or self.ppo_unclipped_advantage_threshold):
+                raise ValueError("ACPO clipping requires delta and has no schedule, hard bounds, or advantage exemptions")
+        else:
+            if (any(type(x) not in (int, float) or not math.isfinite(x)
+                    for x in (self.ppo_clip_minimum, self.ppo_clip_maximum))
+                    or not 0 < self.ppo_clip_minimum <= self.ppo_clip_maximum < 1):
+                raise ValueError("invalid bounded PPO clipping settings")
+        if self.ppo_clip_mode == "scheduled" and (not isinstance(schedule, (list, tuple)) or len(schedule) < 2
                 or any(not isinstance(row, (list, tuple)) or len(row) != 3 or any(
                     type(x) not in (int, float) or not math.isfinite(x) for x in row)
                     for row in schedule)):
             raise ValueError("PPO clip schedule must contain finite [progress, lower, upper] rows")
-        if (schedule[0][0] != 0 or schedule[-1][0] != 1
+        if self.ppo_clip_mode == "scheduled" and (schedule[0][0] != 0 or schedule[-1][0] != 1
                 or any(not 0 <= p <= 1 or not self.ppo_clip_minimum <= low <= high <= self.ppo_clip_maximum
                        for p, low, high in schedule)
                 or any(a[0] >= b[0] or a[1] < b[1] or a[2] < b[2]
                        for a, b in zip(schedule, schedule[1:]))):
             raise ValueError("PPO clipping must narrow monotonically from progress 0 to 1 within hard bounds")
-        if self.ppo_adaptive_clip and (self.algorithm not in ("ppo", "mappo") or not self.target_environment_plies):
+        if self.ppo_adaptive_clip and (self.algorithm not in ("ppo", "mappo")
+                or (self.ppo_clip_mode == "scheduled" and not self.target_environment_plies)):
             raise ValueError("adaptive PPO clipping requires an environment-step target and PPO")
         rates = (self.policy_learning_rate, self.minimum_learning_rate,
                  self.maximum_learning_rate, self.lr_increase_factor,
@@ -745,11 +799,15 @@ class TrainingSettings:
                 or isinstance(self.lr_increase_kl_threshold, bool)
                 or not isinstance(self.lr_increase_kl_threshold, (float, int))
                 or not math.isfinite(self.lr_increase_kl_threshold) or self.lr_increase_kl_threshold <= 0
+                or isinstance(self.lr_decrease_kl_threshold, bool)
+                or not isinstance(self.lr_decrease_kl_threshold, (float, int))
+                or not math.isfinite(self.lr_decrease_kl_threshold) or self.lr_decrease_kl_threshold <= 0
                 or (self.lr_epoch_completion and (not self.adaptive_learning_rate
                     or self.lr_increase_on_full_epochs or any(v is not None for v in band)
                     or self.lr_minimum_completed_epochs > self.policy_epochs
                     or self.ppo_kl_probe_interval_steps < 1
-                    or threshold is None or self.lr_increase_kl_threshold >= threshold))):
+                    or threshold is None or self.lr_increase_kl_threshold >= threshold
+                    or self.lr_increase_kl_threshold >= self.lr_decrease_kl_threshold))):
             raise ValueError("invalid epoch-completion learning rate settings")
         if any(value is not None for value in band) and (
                 not self.adaptive_learning_rate or self.lr_increase_on_full_epochs
@@ -757,15 +815,24 @@ class TrainingSettings:
                        or not math.isfinite(v) for v in band)
                 or not 0 < band[0] < band[1]):
             raise ValueError("invalid adaptive learning rate KL band")
-        entropy_values = (self.entropy_coefficient, self.entropy_minimum, self.entropy_maximum,
+        entropy_values = (self.entropy_coefficient, self.source_entropy_coefficient,
+                          self.entropy_minimum, self.entropy_maximum,
                           self.entropy_target_ratio, self.entropy_adaptation_rate, self.entropy_ema_decay)
         if (type(self.adaptive_entropy) is not bool or any(
                 type(x) not in (int, float) or not math.isfinite(x) for x in entropy_values)
-                or self.entropy_coefficient < 0 or not 0 < self.entropy_minimum <= self.entropy_maximum
+                or self.entropy_coefficient < 0 or self.source_entropy_coefficient < 0
+                or not 0 < self.entropy_minimum <= self.entropy_maximum
                 or not 0 < self.entropy_target_ratio <= 1 or not 0 < self.entropy_adaptation_rate <= 1
                 or not 0 <= self.entropy_ema_decay < 1 or type(self.entropy_opening_plies) is not int
                 or self.entropy_opening_plies < 0):
             raise ValueError("invalid adaptive entropy settings")
+        if self.source_entropy_coefficient and self.algorithm not in ("ppo", "mappo"):
+            raise ValueError("source entropy bonus requires PPO or MAPPO")
+        if self.layout_entropy_coefficient is not None and (
+                type(self.layout_entropy_coefficient) not in (int, float)
+                or not math.isfinite(self.layout_entropy_coefficient)
+                or self.layout_entropy_coefficient < 0):
+            raise ValueError("layout entropy coefficient must be finite and nonnegative")
         if self.adaptive_entropy and not self.entropy_minimum <= self.entropy_coefficient <= self.entropy_maximum:
             raise ValueError("adaptive entropy initial coefficient must be within minimum and maximum")
         if self.entropy_opening_maximum is not None:
@@ -823,7 +890,7 @@ class TrainingSettings:
             raise ValueError("futile_attack_ema_decay must be finite and in (0, 1)")
         if self.futile_attack_penalty and (self.algorithm not in ("ppo", "mappo") or self.target_environment_plies is None):
             raise ValueError("futile_attack_penalty requires PPO with a target_environment_plies budget")
-        allowed_algorithms = ("grpo",) if self.mode is TrainingMode.TWO_PLAYER else ("ppo", "mappo")
+        allowed_algorithms = ("grpo", "ppo", "mappo") if self.mode is TrainingMode.TWO_PLAYER else ("ppo", "mappo")
         if self.algorithm not in allowed_algorithms:
             raise ValueError(f"{self.mode.value} requires one of {allowed_algorithms}")
         if self.algorithm == "mappo":
@@ -843,6 +910,8 @@ class TrainingSettings:
             raise ValueError("critic learning rate must be positive")
         if self.model.dead_rules_enabled != self.dead_rules_enabled:
             raise ValueError("model and training dead-rule modes must match")
+        if self.mode is not TrainingMode.TWO_PLAYER and self.model.board_point_capacity != 129:
+            raise ValueError("four-player modes require a 129-point model")
         positive = {
             "total_updates": self.total_updates,
             "base_game_pool_size": self.base_game_pool_size,
@@ -930,8 +999,23 @@ class TrainingSettings:
             raise ValueError("arena_enabled must be a boolean")
         if type(self.historical_enabled) is not bool:
             raise ValueError("historical_enabled must be a boolean")
+        if (self.historical_start_environment_plies is not None and
+                (type(self.historical_start_environment_plies) is not int
+                 or self.historical_start_environment_plies <= 0)):
+            raise ValueError("historical_start_environment_plies must be a positive integer or None")
+        if self.mode is TrainingMode.TWO_PLAYER and ((self.historical_enabled and self.historical_teammate_fraction)
+                                                     or self.arena_historical_teammate_fraction):
+            raise ValueError("two-player games cannot have historical teammates")
         if type(self.historical_tactical_champion) is not bool:
             raise ValueError("historical_tactical_champion must be a boolean")
+        if type(self.historical_tactical_current) is not bool:
+            raise ValueError("historical_tactical_current must be a boolean")
+        if self.historical_tactical_current and (
+                not self.historical_enabled or self.historical_tactical_champion
+                or self.historical_teammate_fraction != 0 or self.historical_stage_mix_fraction != 0
+                or self.mode is TrainingMode.TWO_PLAYER):
+            raise ValueError("current tactical pool member requires enabled four-player history, no frozen teammate, "
+                             "no champion replacement and no stage mixture")
         if self.historical_tactical_champion and (
                 not self.historical_enabled or self.historical_teammate_fraction != 0
                 or self.mode is TrainingMode.TWO_PLAYER):
@@ -975,7 +1059,7 @@ class TrainingSettings:
                 raise ValueError("historical_pinned_mib must be an integer in [0, 1024]")
             if (self.algorithm not in ("ppo", "mappo") or self.target_environment_plies is None
                     or not self.arena_enabled or self.ppo_pipeline_groups < 2):
-                raise ValueError("historical opponents require four-player pipelined PPO, an environment budget and arena")
+                raise ValueError("historical opponents require pipelined PPO/MAPPO, an environment budget and arena")
             if not self.model.ppo_fixed_kv or not self.model.incremental_inference:
                 raise ValueError("historical opponents require bounded shared fixed KV storage")
             for name in ("historical_start_fraction", "historical_training_fraction"):
@@ -995,12 +1079,13 @@ class TrainingSettings:
             for name in ("historical_cohort_games", "historical_eval_games"):
                 if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                     raise ValueError(f"{name} must be a positive integer")
-            if self.historical_eval_games % 4:
-                raise ValueError("historical evaluation requires complete four-game rotations")
+            group_size = 2 if self.mode is TrainingMode.TWO_PLAYER else 4
+            if self.historical_eval_games % group_size:
+                raise ValueError(f"historical evaluation requires complete {group_size}-game rotations")
             total = self.historical_eval_total_games
-            if total is not None and (type(total) is not int or total % 4
-                                      or total < 4 * (1 + len(fractions))):
-                raise ValueError("historical_eval_total_games must cover every opponent with complete four-game rotations")
+            if total is not None and (type(total) is not int or total % group_size
+                                      or total < group_size * (1 + len(fractions))):
+                raise ValueError(f"historical_eval_total_games must cover every opponent with complete {group_size}-game rotations")
             if not 0 < self.historical_learning_rate <= 1:
                 raise ValueError("historical learning rate must be in (0, 1]")
         if self.arena_interval_environment_plies is not None:
@@ -1023,13 +1108,13 @@ class TrainingSettings:
                 raise ValueError(f"{name} must be an integer in [1, 100]")
         if type(self.arena_observational_only) is not bool:
             raise ValueError("arena_observational_only must be a boolean")
-        if self.arena_observational_only and (self.mode is TrainingMode.TWO_PLAYER or self.algorithm not in ("ppo", "mappo")):
-            raise ValueError("observational evaluation requires four-player PPO")
+        if self.arena_observational_only and self.algorithm not in ("ppo", "mappo"):
+            raise ValueError("observational evaluation requires PPO/MAPPO")
         if type(self.arena_champion_only) is not bool:
             raise ValueError("arena_champion_only must be a boolean")
         if self.arena_champion_only:
-            if self.mode is TrainingMode.TWO_PLAYER or self.algorithm not in ("ppo", "mappo"):
-                raise ValueError("champion-only evaluation requires four-player PPO")
+            if self.algorithm not in ("ppo", "mappo"):
+                raise ValueError("champion-only evaluation requires PPO/MAPPO")
             if self.arena_observational_only or self.arena_after_half_historical_only:
                 raise ValueError("champion-only evaluation cannot use observational or historical-only evaluation")
         fraction = self.arena_historical_teammate_fraction

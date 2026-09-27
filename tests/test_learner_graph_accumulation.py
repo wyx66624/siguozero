@@ -88,3 +88,45 @@ def test_critic_padding_routing_distinguishes_full_and_partly_empty_graphs(lengt
     assert parts == 3
     assert (padding <= .125) == prefer_graphs
     assert len(samples) == 12 and all(len(sample.state.records) == length for sample in samples)
+
+
+@pytest.mark.parametrize('histories,uses_graph', [(12, True), (40, False)])
+def test_long_critic_routing_preserves_weighted_gradients(monkeypatch, histories, uses_graph):
+    from contextlib import nullcontext
+    import junqi.training.trainer as module
+
+    trainer = SelfPlayTrainer.__new__(SelfPlayTrainer)
+    trainer.device = SimpleNamespace(type='cuda')
+    trainer.settings = SimpleNamespace(ppo_learner_cuda_graphs=True,
+                                      value_clip_epsilon=.2, value_coefficient=.5)
+    trainer.distributed = SimpleNamespace(enabled=False)
+    model = torch.nn.Linear(2, 1)
+    trainer.critic = trainer.critic_parallel = model
+    trainer.critic_optimizer = torch.optim.SGD(model.parameters(), lr=.1)
+    trainer.critic_grad_scaler = SimpleNamespace(scale=lambda loss: loss)
+    trainer._sequence_training_enabled = lambda: True
+    trainer._autocast = nullcontext
+    trainer._learner_chunks = lambda rows: [rows[:7], rows[7:]]
+    samples = [SimpleNamespace(state=SimpleNamespace(mode='four_dark', records=History(i)),
+        value_state=None, x=torch.tensor([float(i)/histories, float(i % 5)])) for i in range(histories)]
+    def loss(rows):
+        return model(torch.stack([row.x for row in rows])).square().mean()
+    expected_loss = loss(samples)
+    expected_loss.backward()
+    expected = [p.grad.clone() for p in model.parameters()]
+    calls = []
+    def graph(rows, *, critic):
+        calls.append(len(rows))
+        value = loss(rows)
+        value.backward()
+        return {'loss/critic_total': value.detach()}
+    trainer._backward_learner_graphs = graph
+    def packed(_model, rows, **kwargs):
+        value = loss(rows)
+        return SimpleNamespace(loss=value, metrics={'loss/critic_total': value.detach()})
+    monkeypatch.setattr(module, 'critic_ppo_loss', packed)
+    metrics = trainer._backward_critic_epoch(samples, defer_metrics=True)
+    assert bool(calls) is uses_graph
+    assert float(metrics['loss/critic_total']) == pytest.approx(float(expected_loss.detach()))
+    for parameter, reference in zip(model.parameters(), expected, strict=True):
+        torch.testing.assert_close(parameter.grad, reference)

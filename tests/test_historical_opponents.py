@@ -218,6 +218,44 @@ class HistoricalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "role-schedule migration"):
             other.load_state_dict(legacy)
 
+    def test_unused_mix_change_preserves_state_and_applies_at_activation(self):
+        self.league.settings = replace(self.settings, historical_training_fraction=.5)
+        self.archive()
+        saved = self.league.state_dict()
+        other = HistoricalOpponents(self.settings, self.root, self.context)
+        self.addCleanup(other.close)
+        other.load_state_dict(saved)
+        expected = copy.deepcopy(saved)
+        expected["mix_contract"] = other.mix_contract()
+        self.assertEqual(other.state_dict(), expected)
+        self.assertEqual(saved["mix_contract"]["opponent_fraction"], .5)
+        other.progress = other.threshold - 1
+        self.assertEqual(other.assignment(), (None, None, 0))
+        self.assertEqual(other.started, 0)
+        other.update_progress(self.policy, self.layout, environment_plies=other.threshold, update=50)
+        other.begin_rollout(self.pool, FrozenPolicyActor(self.policy, max_batch_size=8), 50)
+        assignments = [other.assignment() for _ in range(20)]
+        self.assertEqual(sum(opponent is None for opponent, _, _ in assignments), 16)
+        self.assertEqual(sum(opponent is not None for opponent, _, _ in assignments), 4)
+        self.assertTrue(all(teammate is None for _, teammate, _ in assignments))
+
+    def test_mix_change_rejects_activated_or_used_scheduler(self):
+        self.league.settings = replace(self.settings, historical_training_fraction=.5)
+        self.archive()
+        saved = self.league.state_dict()
+        changes = ({"progress": self.league.threshold}, {"started": 1}, {"completed": 1},
+                   {"active_id": "existing"}, {"pending_cohort": {"id": "pending"}},
+                   {"cohort_started": 1}, {"quality_update_games": 1},
+                   {"historical_started": 1}, {"teammate_plies": 1},
+                   {"role_credits": {"historical_opponents": .5}},
+                   {"scenario_started": {"self_play": 1}}, {"mix_contract": None})
+        for change in changes:
+            with self.subTest(change=change):
+                other = HistoricalOpponents(self.settings, self.root, self.context)
+                self.addCleanup(other.close)
+                with self.assertRaisesRegex(ValueError, "role fractions changed"):
+                    other.load_state_dict(copy.deepcopy(saved) | change)
+
     def test_teammate_results_do_not_contaminate_opponent_difficulty(self):
         self.activate_independent_roles()
         identifier = self.league.active_id

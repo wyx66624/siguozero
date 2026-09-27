@@ -66,18 +66,19 @@ def forced_tactical_actions(state):
 class TacticalOpponentActor(FrozenPolicyActor):
     """Restrict triggered decisions to rule actions; preserve ordinary sampling.
 
-    Same-priority alternatives retain the champion's masked source/destination
+    Same-priority alternatives retain the base model's masked source/destination
     policy. Returned log-probabilities describe this restricted distribution.
     These actions must remain learnable=False in PPO.
     """
-    def __init__(self, policy, *, rule_counts=None, **kwargs):
+    def __init__(self, policy, *, rule_counts=None, rules=forced_tactical_actions, **kwargs):
         super().__init__(policy, **kwargs)
         self.rule_counts = rule_counts if rule_counts is not None else Counter()
+        self.rules = rules
 
     def sample(self, states, *, count=1, **kwargs):
         selected, names = [], []
         for state in states:
-            name, candidates = forced_tactical_actions(state)
+            name, candidates = self.rules(state)
             selected.append(replace(state, legal_actions=candidates) if name else state)
             names.append(name or "model_fallback")
         result = super().sample(selected, count=count, **kwargs)
@@ -112,7 +113,7 @@ def committed_champion(run_directory, context):
 
 
 def pack_state_dict(state):
-    """Prepare ordinary champion weights for the existing single-replica loader."""
+    """Prepare model weights for the existing single-replica loader."""
     groups = {}
     for name, value in state.items():
         groups.setdefault(str(value.dtype), []).append((name, value))

@@ -2,6 +2,12 @@
 
 面向四国军棋与二人军棋神经网络训练的规则、棋盘拓扑和玩家主视角编码基础库。
 
+当前 expand 配置的双人和四人模式共用 **ACPO + MAPPO**、128 维行动分支、384 维棋盘分支及
+512 维 SwiGLU/Transformer。双人使用 60 点棋盘，只保留胜 +1、负 -1、和 -0.15 的终局奖励，
+每 2500 万环境步保存版本，5 亿步开始使用历史对手，没有历史队友。
+启动与完整参数见[双人 ACPO + MAPPO](docs/two_player_mappo_20260926_zh.md)，配套界面见
+[双人专用可视化](docs/two_player_console_zh.md)。下文 revision 记录为旧配置历史。
+
 四国模式（四暗、双明）当前采用 **PPO + 独立 Critic**，用 GAE 取代每步 8 条
 蒙特卡洛终局续局。revision 20 已将棋盘编码改为**整盘向量经过一个线性层得到 256 维**，
 移除逐点 Embedding 和棋盘 Transformer，详见[整盘编码与验证](docs/whole_board_linear_zh.md)。
@@ -11,7 +17,7 @@ revision 24 将和棋训练奖励改为 **-0.15**，并增加第六个动作输�
 **距 70 步无吃子和棋的剩余步数**。四国使用 `Linear(6,128)`，PPO 分别传播队伍胜负
 与共同和棋惩罚，格式 6/7 断点可保留进度迁移到格式 8。详见[负奖励、步骤倒计时与迁移](docs/draw_penalty_countdown_zh.md)。
 revision 25 增加**每人每局四次主动跳过**：动作 `0` / `(0,0)`，棋盘输入增加四个剩余次数，格式 9 从旧完整断点保留进度续训。详见[跳过动作与续训迁移](docs/pass_action_zh.md)。
-参数和训练流程见[四国 PPO](docs/four_player_ppo_zh.md)。二人模式继续使用 Game-GRPO。
+旧参数和训练流程见[四国 PPO](docs/four_player_ppo_zh.md)。旧 `bootstrap.yaml` 的二人模式仍可显式选择 Game-GRPO。
 revision 22 将四暗、双明的棋盘和动作投影各缩为 **128 维**，拼接后 **256 维**，
 main 保留 32 层，FFN 改为 **1024**；Policy 为 **36,324,226** 参数。
 缩小模型阶段的参数、并行配置和历史硬件情景见[128＋128 并行训练核算](docs/compact128_parallel_training_eta_zh.md)。

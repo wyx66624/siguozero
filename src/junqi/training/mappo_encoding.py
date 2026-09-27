@@ -38,17 +38,22 @@ def centralized_observation_rows(game, mode, *, public_rows=None):
         remaining[piece.owner][piece.kind] += 1
     casualties = [game._casualty_bits(inventory - counts) for counts in remaining]
     mask_begin = points + (75 if game.config.dead_rules_enabled else 0)
+    pieces = tuple(game._pieces.items())
+    owners = np.asarray([piece.owner for _, piece in pieces], dtype=np.intp)
+    codes = np.asarray([OWN_PIECE_CODES[piece.kind] for _, piece in pieces], dtype=np.int16)
+    masks = np.asarray([1 << game._critic_inventory_slots[point] for point, _ in pieces], dtype=np.int32)
+    low_masks, high_masks = masks & 8191, masks >> 13
     for viewer, row in enumerate(rows):
         order = game._relative_player_order(viewer)
         relative = {owner: index for index, owner in enumerate(order)}
         board = game._boards[viewer]
-        for point, piece in game._pieces.items():
-            owner = relative[piece.owner]
-            block = (2 if owner else 0) if mode is TrainingMode.TWO_PLAYER else owner
-            index = board.encode(point)
-            row[index] = OWN_PIECE_CODES[piece.kind] + EXACT_PIECE_CODE_STRIDE * block
-            mask = 1 << game._critic_inventory_slots[point]
-            row[mask_begin + index], row[mask_begin + points + index] = mask & 8191, mask >> 13
+        relative_owners = np.asarray([relative[owner] for owner in range(game.config.player_count)])[owners]
+        blocks = relative_owners * 2 if mode is TrainingMode.TWO_PLAYER else relative_owners
+        indices = np.fromiter((board.encode(point) for point, _ in pieces),
+                              dtype=np.intp, count=len(pieces))
+        row[indices] = codes + EXACT_PIECE_CODE_STRIDE * blocks
+        row[mask_begin + indices] = low_masks
+        row[mask_begin + points + indices] = high_masks
         if game.config.dead_rules_enabled:
             # Preserve the mode's canonical casualty slots through replay and
             # serialization. The full board already identifies every survivor.

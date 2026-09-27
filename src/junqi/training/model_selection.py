@@ -101,11 +101,12 @@ class ModelSelection:
             raise ValueError("finish the pending evaluation before changing its teammate protocol")
         self._repair_views()
         slots = len(self.state.get("evaluation_seed_milestones", self.milestones))
+        group_size = 2 if self.settings.mode.value == "two_player" else 4
         groups = max(contract["games"], contract.get("historical_eval_total_games", 0),
-                     self.settings.historical_eval_games) // 4
+                     self.settings.historical_eval_games) // group_size
         old_base = self.state.get("schedule_seed_base", contract["seed"])
-        new_base = old_base + (slots + 1) * 6 * groups
-        if new_base + (slots + 1) * 6 * groups + 8 * 1_000_003 >= 2**63:
+        new_base = old_base + (slots + 1) * (2 + group_size) * groups
+        if new_base + (slots + 1) * (2 + group_size) * groups + 8 * 1_000_003 >= 2**63:
             raise ValueError("observational evaluation seed range exceeds int64")
         self.state.setdefault("round_alpha", self._round_alpha())
         self.state.setdefault("observational_evaluation_migrations", []).append(dict(
@@ -132,11 +133,12 @@ class ModelSelection:
             raise ValueError("finish the pending evaluation before changing to champion-only evaluation")
         self._repair_views()
         slots = len(self.state.get("evaluation_seed_milestones", self.milestones))
+        group_size = 2 if self.settings.mode.value == "two_player" else 4
         groups = max(contract["games"], contract.get("historical_eval_total_games", 0),
-                     self.settings.historical_eval_games) // 4
+                     self.settings.historical_eval_games) // group_size
         old_base = self.state.get("schedule_seed_base", contract["seed"])
-        new_base = old_base + (slots + 1) * 6 * groups
-        if new_base + (slots + 1) * 6 * groups + 8 * 1_000_003 >= 2**63:
+        new_base = old_base + (slots + 1) * (2 + group_size) * groups
+        if new_base + (slots + 1) * (2 + group_size) * groups + 8 * 1_000_003 >= 2**63:
             raise ValueError("champion evaluation seed range exceeds int64")
         migration = dict(previous_contract=contract, next_contract=desired, update=update,
                          environment_plies=cumulative.get("environment_plies", 0),
@@ -206,10 +208,11 @@ class ModelSelection:
             return [self.settings.historical_eval_games] * len(panel)
         if not panel:
             return []
-        groups, remainder = divmod(total // 4, len(panel))
-        if groups < 1 or total % 4:
-            raise ValueError("historical panel budget cannot cover complete four-game rotations")
-        return [4 * (groups + (index < remainder)) for index in range(len(panel))]
+        group_size = 2 if self.settings.mode.value == "two_player" else 4
+        groups, remainder = divmod(total // group_size, len(panel))
+        if groups < 1 or total % group_size:
+            raise ValueError(f"historical panel budget cannot cover complete {group_size}-game rotations")
+        return [group_size * (groups + (index < remainder)) for index in range(len(panel))]
 
     def historical_only(self, cumulative: Mapping[str, int]) -> bool:
         target = self.settings.target_environment_plies
@@ -805,7 +808,8 @@ class ModelSelection:
         for index, entry in enumerate(panel):
             path = self.directory / f"historical_{tag}_{entry['id']}.json"
             games = game_counts[index]
-            settings = replace(match, pairs=games // 4,
+            group_size = 2 if self.settings.mode.value == "two_player" else 4
+            settings = replace(match, pairs=games // group_size,
                                seed=match.seed + (index + 1) * 1_000_003)
             identity = {"candidate_sha256": candidate_hash, "opponent_sha256": entry["sha256"],
                         "contract": contract, "settings": asdict(settings), "alpha": alpha, "arena_version": ARENA_VERSION}

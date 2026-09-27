@@ -100,6 +100,7 @@ def _categorical_from_uniforms(probabilities: Tensor, uniforms: Tensor) -> Tenso
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
     board_dim: int = 256
+    board_point_capacity: int = MAX_BOARD_POINTS
     action_dim: int | None = None
     board_encoder_type: str = INVENTORY_ENCODER_TYPE
     action_encoder_type: str = ACTION_ENCODER_TYPE
@@ -145,6 +146,8 @@ class ModelConfig:
             raise ValueError("inventory encoding requires deterministic dead rules")
         if self.board_dim <= 0 or self.board_chunk_size <= 0:
             raise ValueError("board dimension and chunk size must be positive")
+        if type(self.board_point_capacity) is not int or self.board_point_capacity not in (60, MAX_BOARD_POINTS):
+            raise ValueError("board_point_capacity must be 60 or 129")
         if self.action_dim is not None and (type(self.action_dim) is not int or self.action_dim <= 0):
             raise ValueError("action_dim must be a positive integer or None")
         if self.action_embedding_dim <= 0 or self.temporal_dim != self.action_embedding_dim + self.board_dim:
@@ -431,7 +434,7 @@ class WholeBoardEncoder(nn.Module):
     def __init__(self, config: ModelConfig) -> None:
         super().__init__()
         self.config = config
-        self.board_feature_dim = MAX_BOARD_POINTS * 26
+        self.board_feature_dim = config.board_point_capacity * 26
         self.mode_feature_dim = len(MODE_SPECS)
         candidate_only = config.board_encoder_type == INVENTORY_ONLY_ENCODER_TYPE
         self.casualty_feature_dim = MAX_CASUALTY_BITS if config.dead_rules_enabled and not candidate_only else 0
@@ -440,7 +443,7 @@ class WholeBoardEncoder(nn.Module):
             self.board_feature_dim + self.mode_feature_dim + self.casualty_feature_dim + self.pass_feature_dim
         )
         self.projection = nn.Linear(self.input_dim, config.board_dim)
-        nn.init.normal_(self.projection.weight, std=(MAX_BOARD_POINTS * 12) ** -0.5)
+        nn.init.normal_(self.projection.weight, std=(config.board_point_capacity * 12) ** -0.5)
         nn.init.zeros_(self.projection.bias)
 
     def encode_vector(
@@ -457,7 +460,7 @@ class WholeBoardEncoder(nn.Module):
             raise ValueError("board_codes must have shape [batch, points]")
         batch, points = board_codes.shape
         if (
-            batch == 0 or not 0 < points <= MAX_BOARD_POINTS
+            batch == 0 or not 0 < points <= self.config.board_point_capacity
             or point_mask.shape != board_codes.shape
         ):
             raise ValueError("invalid board point tensor shape")
@@ -708,12 +711,12 @@ class GamePolicyTransformer(nn.Module):
         self.source_query = nn.Sequential(
             nn.Linear(temporal_dim, head_dim),
             nn.SiLU(),
-            nn.Linear(head_dim, MAX_BOARD_POINTS),
+            nn.Linear(head_dim, self.config.board_point_capacity),
         )
         self.destination_query = nn.Sequential(
-            nn.Linear(temporal_dim + MAX_BOARD_POINTS, head_dim),
+            nn.Linear(temporal_dim + self.config.board_point_capacity, head_dim),
             nn.SiLU(),
-            nn.Linear(head_dim, MAX_BOARD_POINTS),
+            nn.Linear(head_dim, self.config.board_point_capacity),
         )
         # The cache is explicitly enabled only for a frozen rollout actor and
         # cleared before learner mode.  It stores detached board-global tokens,
@@ -1917,13 +1920,15 @@ class GamePolicyTransformer(nn.Module):
         *,
         pack_sequences: bool = False,
         ppo_actions: Sequence[tuple[int, int]] | None = None,
-    ) -> list[Tensor] | tuple[Tensor, Tensor]:
+        include_source_entropy: bool = False,
+    ) -> list[Tensor] | tuple[Tensor, ...]:
         """DDP-compatible entry point for policy likelihood training."""
 
         if any(state.centralized for state in states):
             raise ValueError("actor training cannot consume centralized critic observations")
         if ppo_actions is not None:
-            return self.ppo_statistics(states, ppo_actions, pack_sequences=pack_sequences)
+            return self.ppo_statistics(states, ppo_actions, pack_sequences=pack_sequences,
+                                       include_source_entropy=include_source_entropy)
         return self.log_probs_for_action_groups(
             states, actions_by_state, temperature=temperature, pack_sequences=pack_sequences
         )
@@ -1992,7 +1997,7 @@ class GamePolicyTransformer(nn.Module):
         )
 
     def _destination_logits(self, contexts: Tensor, sources: Tensor, point_count: int) -> Tensor:
-        source_codes = F.one_hot(sources, num_classes=MAX_BOARD_POINTS).to(contexts.dtype)
+        source_codes = F.one_hot(sources, num_classes=self.config.board_point_capacity).to(contexts.dtype)
         return self.destination_query(torch.cat((contexts, source_codes), dim=-1))[:, :point_count]
 
     def _destination_log_probs(
@@ -2022,7 +2027,8 @@ class GamePolicyTransformer(nn.Module):
         return F.log_softmax(logits, dim=-1)
 
     def _all_legal_log_probs(self, features: PolicyFeatures, states: Sequence[PolicyState],
-                             temperature: float = 1.0) -> tuple[Tensor, Tensor, list[int]]:
+                             temperature: float = 1.0, *, include_source_entropy: bool = False
+                             ) -> tuple[Tensor, Tensor, list[int]] | tuple[Tensor, Tensor, list[int], Tensor]:
         """Evaluate all legal moves as one flat tensor with no device-to-host queries."""
         if temperature <= 0:
             raise ValueError("temperature must be positive")
@@ -2050,17 +2056,25 @@ class GamePolicyTransformer(nn.Module):
         destination_logs = F.log_softmax(
             logits.masked_fill(~destination_masks.view(len(unique), points), float("-inf")), dim=-1,
         )
-        return source_logs[owner, source] + destination_logs[destination_row, target], owner, lengths
+        result = (source_logs[owner, source] + destination_logs[destination_row, target], owner, lengths)
+        if include_source_entropy:
+            # One exact marginal over legal sources, reusing the same forward.
+            # Mask before multiplication to avoid 0 * -inf and NaN gradients.
+            logs = source_logs.float().masked_fill(~source_masks.view(len(states), points), 0.)
+            return (*result, -(logs.exp() * logs).sum(-1))
+        return result
 
     def ppo_statistics(self, states: Sequence[PolicyState], actions: Sequence[tuple[int, int]],
-                       *, pack_sequences: bool = False) -> tuple[Tensor, Tensor]:
+                       *, pack_sequences: bool = False, include_source_entropy: bool = False
+                       ) -> tuple[Tensor, ...]:
         if any(state.centralized for state in states):
             raise ValueError("actor statistics cannot consume centralized critic observations")
         if len(states) != len(actions):
             raise ValueError("PPO actions must match the state batch")
         features = (self._encode_full(states, pack_prefixes=True)
                     if pack_sequences else self.encode(states))
-        joint, owners, lengths = self._all_legal_log_probs(features, states)
+        statistics = self._all_legal_log_probs(features, states, include_source_entropy=include_source_entropy)
+        joint, owners, lengths = statistics[:3]
         offsets = np.cumsum([0, *lengths[:-1]])
         selected = [int(offset) + state.legal_actions.index(action)
                     for offset, state, action in zip(offsets, states, actions, strict=True)]
@@ -2070,7 +2084,7 @@ class GamePolicyTransformer(nn.Module):
         # FP32 reductions keep exact joint entropy, including every legal move.
         logs = joint.float()
         entropy = torch.zeros(len(states), device=self.device).scatter_add_(0, owners, -logs.exp() * logs)
-        return current, entropy
+        return (current, entropy, statistics[3]) if include_source_entropy else (current, entropy)
 
     def log_probs_for_action_groups(
         self,

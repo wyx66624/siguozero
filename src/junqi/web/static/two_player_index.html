@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>双人军棋 · 训练监控</title><link rel="stylesheet" href="/style.css"><script src="/dashboard.js" defer></script></head>
+<body data-console-mode="two_player"><header><a class="brand" href="/">双人军棋 <span>SiguoZero</span></a><nav><a class="active" href="/">训练监控</a><a href="/play">与模型下棋 ↗</a></nav><span class="local">● 双人专用控制台</span></header>
+<main><div class="page-heading"><div><p class="eyebrow">TWO-PLAYER JUNQI</p><h1>双人军棋，每一步都看得见。</h1><p class="muted">60 点棋盘 · ACPO + MAPPO · 训练进度、KL、学习率与对局统计</p></div><div class="refresh"><button id="refresh">立即刷新</button><small id="updated">正在连接服务…</small></div></div>
+<div id="connection" class="error" hidden></div><section class="hardware" id="hardware" aria-label="硬件状态"></section>
+<div class="section-title"><h2>双人训练任务</h2><span class="muted">环境步统计 · 每 15 秒自动刷新</span></div><div id="runs"><div class="empty">正在读取双人训练记录…</div></div>
+<section class="callout"><div><span class="eyebrow">HUMAN × MODEL</span><h2>在双人棋盘上与模型过招</h2><p>南北两席 · 每局固定模型版本 · 支持明棋复盘与棋谱导出</p></div><a class="button" href="/play">进入双人对弈室 →</a></section>
+<footer>本页只读取双人训练记录，不会启动训练。尚未生成检查点时，对弈入口等待模型就绪。耗时预测来自实际完整周期吞吐，棋力以独立的两局换边评测为准。</footer></main></body></html>

@@ -88,6 +88,12 @@ class Worker:
 class Application:
     def __init__(self, config, root):
         self.root = Path(root).resolve()
+        self.console_mode = config.get("console_mode")
+        if self.console_mode not in (None, "two_player"):
+            raise ValueError("unsupported dedicated console mode")
+        if self.console_mode and (not config.get("runs") or any(
+                spec["mode"] != self.console_mode for spec in config["runs"])):
+            raise ValueError("dedicated console must contain only matching runs")
         self.monitor = Monitor(config, self.root)
         self.threads = int(config.get("cpu_threads", 2))
         self.max_games = int(config.get("max_games", 2))
@@ -138,7 +144,7 @@ class Application:
         with self.lock:
             if len(self.workers) >= self.max_games:
                 raise ValueError("已达到 CPU 棋局上限，请先结束旧棋局")
-            worker = Worker(self.root, self.threads, self.root / "output/local_console")
+            worker = Worker(self.root, self.threads, self.monitor.output_directory)
             self.workers[worker.id] = worker
         try:
             return worker.request({"op": "new", "checkpoint": str(entry["_path"]),
@@ -218,6 +224,8 @@ class Handler(BaseHTTPRequestHandler):
             if not name:
                 self._respond(404, {"error": "页面不存在"})
                 return
+            if app.console_mode == "two_player" and name in ("index.html", "play.html"):
+                name = "two_player_" + name
             file = Path(__file__).parent / "static" / name
             self._respond(200, file.read_bytes(), (mimetypes.guess_type(name)[0] or "text/plain") + "; charset=utf-8")
 
@@ -245,13 +253,13 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(400, {"error": str(error)})
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/local_console.json")
     parser.add_argument("--root", default=".")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-service-metadata", action="store_true", help="avoid changing launcher metadata for an isolated test server")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
     app = Application(config, args.root)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)

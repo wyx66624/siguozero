@@ -1,0 +1,38 @@
+{
+  "console_mode": "two_player",
+  "output_directory": "output/two_player_console",
+  "cpu_threads": 2,
+  "max_games": 2,
+  "target_days": 30,
+  "runs": [
+    {
+      "id": "two-player-expand",
+      "name": "双人军棋 · ACPO + MAPPO · 30亿步",
+      "mode": "two_player",
+      "path": "runs_expand_mappo/two_player/with_dead_rules",
+      "planned_settings": {
+        "algorithm": "mappo",
+        "step_budget_counter": "environment_plies",
+        "target_environment_plies": 3000000000,
+        "checkpoint_policy": "periodic",
+        "checkpoint_interval_environment_plies": 25000000,
+        "ppo_clip_mode": "acpo",
+        "draw_reward": -0.15,
+        "flag_capture_reward": 0.0,
+        "known_nonflag_hq_penalty": 0.0,
+        "bomb_commander_reward": 0.0,
+        "bomb_army_commander_reward": 0.0,
+        "bomb_division_commander_reward": 0.0,
+        "futile_attack_penalty": 0.0,
+        "historical_enabled": true,
+        "historical_start_environment_plies": 500000000,
+        "historical_training_fraction": 0.2,
+        "historical_teammate_fraction": 0.0,
+        "historical_sampling": "strength",
+        "arena_champion_only": true,
+        "arena_games": 500,
+        "arena_historical_teammate_fraction": 0.0
+      }
+    }
+  ]
+}

@@ -362,8 +362,6 @@ class BaseGamePool:
         self.mode = normalize_mode(mode)
         if type(centralized_critic) is not bool:
             raise ValueError("centralized_critic must be a boolean")
-        if centralized_critic and self.mode is TrainingMode.TWO_PLAYER:
-            raise ValueError("MAPPO pool is restricted to four-player modes")
         self.centralized_critic = centralized_critic
         self.pool_size = pool_size
         self.max_transitions = max_transitions
@@ -409,7 +407,8 @@ class BaseGamePool:
         del self._layout_queue[:needed]
         if frozen_seats:
             current, frozen = iter(samples), iter(self.historical.old_layouts(len(frozen_seats)))
-            samples = tuple(next(frozen) if seat in frozen_seats else next(current) for seat in range(4))
+            samples = tuple(next(frozen) if seat in frozen_seats else next(current)
+                            for seat in range(spec.player_count))
         game = new_game(
             self.mode,
             setups=[sample.setup for sample in samples],
@@ -605,8 +604,9 @@ class BaseGamePool:
         expected_players = mode_spec(self.mode).player_count
         if state.get("opponent_id") is not None or state.get("teammate_id") is not None:
             seat = state.get("learner_seat")
-            if (expected_players != 4 or state.get("learner_team") not in (0, 1)
-                    or (seat is not None and (type(seat) is not int or not 0 <= seat < 4
+            if (expected_players not in (2, 4) or state.get("learner_team") not in (0, 1)
+                    or (expected_players == 2 and state.get("teammate_id") is not None)
+                    or (seat is not None and (type(seat) is not int or not 0 <= seat < expected_players
                                              or seat % 2 != state["learner_team"]))
                     or (state.get("teammate_id") is not None and seat is None)
                     or (state.get("opponent_id") and state.get("teammate_id")

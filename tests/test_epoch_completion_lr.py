@@ -13,10 +13,11 @@ from junqi.training.trainer import SelfPlayTrainer
 from test_ppo import training_settings
 
 
-@pytest.mark.parametrize('threshold', [.08, .09])
+@pytest.mark.parametrize('threshold', [.05, .08, .09])
 @pytest.mark.parametrize('epochs,kl,expected', [
-    (1., .15, .95), (1.5, .101, .95), (1.999, .08, .95),
-    (2., .101, 1.), (2.5, .11, 1.), (3., 'equal', 1.),
+    (1., .15, .95), (1.5, .101, .95), (1.999, .08, 1.),
+    (1.5, .1, 1.), (2., .1, 1.), (2., .100001, .95),
+    (2., .101, .95), (2.000001, .101, 1.), (2.5, .11, 1.), (3., 'equal', 1.),
     (3., 'above', 1.), (3., 'below', 1.05), (3., .04, 1.05)])
 def test_immediate_decisions_and_strict_boundaries(epochs, kl, expected, threshold):
     if isinstance(kl, str):
@@ -35,7 +36,7 @@ def test_immediate_decisions_and_strict_boundaries(epochs, kl, expected, thresho
 @pytest.mark.parametrize('probes,expected_samples,expected_calls', [
     ([.11], 12, 1),                           # First pass always complete.
     ([.08, .101], 16, 2),                    # Stop within epoch 2.
-    ([.08, .09, .1, .101], 24, 4),           # Epoch 2 completes: do not lower LR.
+    ([.08, .09, .1, .101], 24, 4),           # Stop exactly at the end of epoch 2.
     ([.08, .08, .08, .08, .101], 28, 5),    # Stop within epoch 3.
     ([.1] * 7, 36, 7),                      # Equality does not stop.
 ])
@@ -75,7 +76,8 @@ def test_new_config_and_legacy_switch_off():
     assert s.maximum_learning_rate == 1e-4
     tiny = TrainingSettings.from_yaml('configs/expand_mappo_training.yaml', 'four_dark', tiny=True)
     assert tiny.policy_epochs == 1 and not tiny.lr_epoch_completion
-    assert s.lr_minimum_completed_epochs == 2 and s.lr_increase_kl_threshold == .08
+    assert s.lr_minimum_completed_epochs == 2 and s.lr_increase_kl_threshold == .05
+    assert s.lr_decrease_kl_threshold == .1
     assert s.ppo_kl_probe_interval_steps == 16 and s.early_stop_kl_threshold == .1
     assert s.lr_kl_band_lower is s.lr_kl_band_upper is None
     disabled = TrainingSettings.from_yaml('configs/expand_mappo_training.yaml', 'four_dark',
@@ -110,18 +112,55 @@ def test_fresh_initial_rate_and_resume_keep_saved_feedback_rate(tmp_path, algori
         trainer.logger.close()
     # A later config edit must not reset an existing adaptive schedule on resume.
     resumed = SelfPlayTrainer(replace(settings, policy_learning_rate=2e-5,
-        critic_learning_rate=2e-5, lr_increase_kl_threshold=.08), run_directory=tmp_path)
+        critic_learning_rate=2e-5, lr_increase_kl_threshold=.05), run_directory=tmp_path)
     try:
         assert resumed._set_policy_lr(1) == pytest.approx(1.05e-5)
         assert resumed.critic_optimizer.param_groups[0]['lr'] == pytest.approx(1.05e-5)
-        assert resumed.lr_controller.increase_kl_threshold == .08
-        # A restored .09 checkpoint must use the new .08 threshold, without
-        # resetting its saved next LR or increasing it for KL in [.08, .09).
+        assert resumed.lr_controller.increase_kl_threshold == .05
+        assert resumed.lr_controller.decrease_kl_threshold == .1
+        # Retuning a restored checkpoint preserves its next LR and applies the
+        # new strict rise threshold, including KL inside the former rise range.
         next_rate, direction = resumed.lr_controller.observe(scheduled=1e-4,
-            kl=.085, early_stopped=False, completed_epochs=3, full_epochs_completed=True)
+            kl=.06, early_stopped=False, completed_epochs=3, full_epochs_completed=True)
         assert next_rate == pytest.approx(1.05e-5) and direction == 0
     finally:
         resumed.logger.close()
+
+
+@pytest.mark.parametrize('epochs,kl,expected,reason', [
+    (1.5, .1, 1., 'hold'),
+    (2., .100001, .95, 'early_high_kl'),
+    (2., .1, 1., 'hold'),
+    (2.5, .11, 1., 'hold'),
+    (3., .05, 1., 'hold'),
+    (3., .049999, 1.05, 'completed_low_kl'),
+])
+def test_trainer_reports_strict_epoch_kl_feedback(tmp_path, epochs, kl, expected, reason):
+    settings = training_settings(lr_epoch_completion=True, policy_epochs=3,
+        lr_increase_on_full_epochs=False, lr_kl_band_lower=None, lr_kl_band_upper=None,
+        lr_increase_kl_threshold=.05, lr_decrease_kl_threshold=.1,
+        lr_increase_factor=1.05, lr_decrease_factor=.95, maximum_learning_rate=1e-4,
+        early_stop_kl_threshold=.1, ppo_kl_probe_interval_steps=16)
+    trainer = SelfPlayTrainer(settings, run_directory=tmp_path)
+    trainer.lr_controller.scale = .05
+    try:
+        result = trainer._finish_learning_rate([], {
+            'optimizer/policy_steps': 1., 'optimizer/policy_epochs': epochs,
+            'optimizer/policy_first_pass_coverage': 1.,
+            'optimizer/policy_stop_kl': float(kl > .1),
+            'policy/final_probe_samples': 8., 'policy/final_kl': kl})
+        assert result['optimizer/policy_lr_next'] == pytest.approx(5e-6 * expected)
+        assert result['optimizer/lr_reason'] == reason
+        assert result['optimizer/lr_increase_kl_threshold'] == .05
+        assert result['optimizer/lr_decrease_kl_threshold'] == .1
+    finally:
+        trainer.logger.close()
+
+
+@pytest.mark.parametrize('threshold', [0., -.1, float('inf'), float('nan'), True, '0.1'])
+def test_invalid_decrease_threshold_is_rejected(threshold):
+    with pytest.raises(ValueError, match='epoch-completion'):
+        replace(training_settings(), lr_decrease_kl_threshold=threshold).validate()
 
 
 def test_partial_final_update_still_uses_epoch_endpoint_guard(tmp_path):

@@ -77,6 +77,12 @@ test('epoch completion explains partial coverage and uses final probe KL', () =>
   'policy/final_probe_samples':8192,'policy/final_kl':.104,'policy/approx_kl_old':.04};
  const html=context.renderLearningRate(m);
  for(const value of ['第二个 epoch 未完成','下降 5%','1.25 / 3','每 16 次','8,192','最终 KL < 0.09','第一遍完整训练'])assert.ok(html.includes(value),value);
+ const current={...m,'optimizer/lr_reason':'early_high_kl',
+  'optimizer/lr_increase_kl_threshold':.05,'optimizer/lr_decrease_kl_threshold':.1,
+  'optimizer/lr_minimum_completed_epochs':2,'optimizer/policy_epochs':2};
+ const updated=context.renderLearningRate(current);
+ for(const value of ['前 2 个 epoch 内（含遍末）KL > 0.1','下降 5%','最终 KL < 0.05','每 16 次','第一遍完整训练'])assert.ok(updated.includes(value),value);
+ assert.ok(!updated.includes('第二遍未完整结束'));
  assert.ok(!html.includes('稳定轮次 / 要求'));
  assert.ok(context.renderKlStat(m).includes('0.104'));
  assert.ok(!context.renderKlStat(m).includes('0.04'));

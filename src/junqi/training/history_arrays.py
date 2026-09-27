@@ -116,6 +116,14 @@ class HistoryArrayView(Sequence[StateTokenRecord]):
             chunk.setflags(write=False)
         self._length = sum(len(chunk) for chunk in chunks)
 
+    @classmethod
+    def _from_readonly_chunks(cls, mode, dead_rules, identity, window_start, chunks, length):
+        """Reuse validated immutable blocks without rescanning every prefix."""
+        result = cls.__new__(cls)
+        result.mode, result.dead_rules, result.identity = mode, dead_rules, identity
+        result.window_start, result.chunks, result._length = window_start, chunks, length
+        return result
+
     @property
     def cache_key(self) -> tuple[tuple[int, int], int, int]:
         return self.identity, self.window_start, self._length
@@ -143,6 +151,7 @@ class HistoryArrayView(Sequence[StateTokenRecord]):
         if isinstance(index, slice):
             start, stop, step = index.indices(len(self))
             if start == 0 and step == 1 and stop > 0:
+                length = stop
                 chunks = []
                 for chunk in self.chunks:
                     take = min(stop, len(chunk))
@@ -150,8 +159,9 @@ class HistoryArrayView(Sequence[StateTokenRecord]):
                     stop -= take
                     if not stop:
                         break
-                return HistoryArrayView(self.mode, self.dead_rules, self.identity,
-                                        self.window_start, tuple(chunks))
+                return HistoryArrayView._from_readonly_chunks(
+                    self.mode, self.dead_rules, self.identity,
+                    self.window_start, tuple(chunks), length)
             return tuple(self[position] for position in range(start, stop, step))
         index = int(index)
         if index < 0:
@@ -201,7 +211,9 @@ class ArrayHistory:
         self.mode, self.identity, self.max_transitions = mode, identity, max_transitions
         self.dead_rules = records[0].known_casualty_bits is not None
         self.initial = record_array(records[0], mode, self.dead_rules)[None, :]
+        self.initial.setflags(write=False)
         self.blocks: deque[tuple[int, np.ndarray]] = deque()
+        self._write_block = None
         self.end = 0
         for record in records[1:]:
             self.append(record)
@@ -215,8 +227,11 @@ class ArrayHistory:
             raise ValueError('invalid packed history observation row')
         position = self.end % BLOCK_ROWS
         if position == 0:
-            self.blocks.append((self.end + 1, np.empty((BLOCK_ROWS, self.initial.shape[1]), dtype=np.int16)))
-        self.blocks[-1][1][position] = row
+            self._write_block = np.empty((BLOCK_ROWS, self.initial.shape[1]), dtype=np.int16)
+            readonly = self._write_block.view()
+            readonly.setflags(write=False)
+            self.blocks.append((self.end + 1, readonly))
+        self._write_block[position] = row
         self.end += 1
         start = max(1, self.end - self.max_transitions + 1)
         while self.blocks and self.blocks[0][0] + BLOCK_ROWS <= start:
@@ -229,4 +244,8 @@ class ArrayHistory:
             left, right = max(start, first), min(self.end + 1, first + BLOCK_ROWS)
             if left < right:
                 chunks.append(block[left - first:right - first])
-        return HistoryArrayView(self.mode, self.dead_rules, self.identity, start, tuple(chunks))
+        # Slices inherit each block's read-only flag. Only the private writer
+        # appends unpublished rows, so older snapshots remain immutable.
+        return HistoryArrayView._from_readonly_chunks(
+            self.mode, self.dead_rules, self.identity, start, tuple(chunks),
+            1 + min(self.end, self.max_transitions))

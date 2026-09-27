@@ -1,4 +1,4 @@
-"""Resumable four-player PPO/MAPPO and two-player terminal-rollout GRPO training."""
+"""Resumable two/four-player PPO/MAPPO and legacy terminal-rollout GRPO training."""
 
 from __future__ import annotations
 
@@ -45,6 +45,7 @@ from .learning_rate import BoundedLearningRate, diagnostic_sequences
 from .clipping import scheduled_policy_clip
 from .metrics import MetricLogger
 from .model_selection import ModelSelection
+from .modes import mode_spec
 from .inference_snapshot import export_inference_snapshot
 from .models import (
     GamePolicyTransformer,
@@ -229,6 +230,7 @@ class SelfPlayTrainer:
             epoch_completion=settings.lr_epoch_completion,
             minimum_completed_epochs=settings.lr_minimum_completed_epochs,
             increase_kl_threshold=settings.lr_increase_kl_threshold,
+            decrease_kl_threshold=settings.lr_decrease_kl_threshold,
         ) if settings.adaptive_learning_rate else None)
         if settings.lr_epoch_completion or settings.lr_increase_on_full_epochs or settings.lr_kl_band_lower is not None:
             # Fresh runs honor the configured initial rate independently of the
@@ -692,6 +694,12 @@ class SelfPlayTrainer:
             self.policy_lr_scale = self.lr_controller.scale
         for phase, controller in self.entropy_controllers.items():
             controller.load_state_dict(trainer_state.get("adaptive_entropy", {}).get(phase))
+        saved_source_coefficient = payload.get("config", {}).get("source_entropy_coefficient", 0.0)
+        if saved_source_coefficient != self.settings.source_entropy_coefficient:
+            self.logger.event(
+                f"source entropy bonus changed on resume: {saved_source_coefficient:g} -> "
+                f"{self.settings.source_entropy_coefficient:g}; raw H(source), added to joint entropy bonus"
+            )
         self._saved_model_selection = dict(trainer_state.get("model_selection", {}))
         restored_microbatch = int(
             trainer_state.get(
@@ -1018,6 +1026,7 @@ class SelfPlayTrainer:
                             self.policy_parallel, chunk,
                             clip_epsilon=self.settings.clip_epsilon,
                             entropy_coefficient=self.entropy_controllers["other"].coefficient,
+                            source_entropy_coefficient=self.settings.source_entropy_coefficient,
                             policy_clip=self._policy_clip(),
                             sequence_training=self._sequence_training_enabled(),
                             defer_metrics=True,
@@ -1128,6 +1137,7 @@ class SelfPlayTrainer:
             ready = graph.stage(model, samples,
                 clip=self.settings.value_clip_epsilon if critic else self.settings.clip_epsilon,
                 coefficient=self.settings.value_coefficient if critic else self.entropy_controllers['other'].coefficient,
+                source_coefficient=0.0 if critic else self.settings.source_entropy_coefficient,
                 opening_coefficient=(self.entropy_controllers['opening'].coefficient
                                      if not critic else None),
                 opening_plies=self.entropy_opening_plies, action_metadata=action_metadata,
@@ -1253,6 +1263,7 @@ class SelfPlayTrainer:
             metrics = self._update_policy_batch(groups)
         ratios = phase_entropy_ratios(metrics)
         metrics.update({"policy/adaptive_entropy_enabled": float(self.settings.adaptive_entropy),
+                        "policy/source_entropy_coefficient": self.settings.source_entropy_coefficient,
                         "policy/entropy_target_ratio": targets["other"],
                         "policy/opening_entropy_target_ratio": targets["opening"],
                         "policy/other_entropy_target_ratio": targets["other"],
@@ -1384,6 +1395,7 @@ class SelfPlayTrainer:
             "optimizer/lr_epoch_completion": float(epoch_completion),
             "optimizer/lr_minimum_completed_epochs": self.settings.lr_minimum_completed_epochs,
             "optimizer/lr_increase_kl_threshold": self.settings.lr_increase_kl_threshold,
+            "optimizer/lr_decrease_kl_threshold": self.settings.lr_decrease_kl_threshold,
             "policy/kl_probe_interval_steps": self.settings.ppo_kl_probe_interval_steps,
             "optimizer/lr_increase_factor": self.settings.lr_increase_factor,
             "optimizer/lr_decrease_factor": self.settings.lr_decrease_factor,
@@ -1658,7 +1670,7 @@ class SelfPlayTrainer:
         })
         self.ppo_rollout_metrics.update(pass_totals)
         if self.settings.algorithm == "mappo" and self.settings.mappo_advantage_mode == "player_decisions":
-            for player in range(4):
+            for player in range(mode_spec(self.settings.mode).player_count):
                 advantages = [s.advantage for s in samples if s.learnable and s.value_player == player]
                 moments = self.distributed.sum_metrics({"count": len(advantages),
                     "sum": math.fsum(advantages), "square_sum": math.fsum(a*a for a in advantages)})
@@ -1714,18 +1726,21 @@ class SelfPlayTrainer:
         padding, parts = (self._critic_graph_padding_fraction(value_samples)
                    if self.settings.ppo_learner_cuda_graphs and self.device.type == 'cuda'
                    and self._sequence_training_enabled() else (0., 0))
-        # Above this padding cost, measured medium/long histories run faster
-        # together through variable-length attention. Every value label and
-        # complete history still contributes to the same Adam batch.
+        # Many short graph replays also lose to one variable-length batch even
+        # when padding is low. Keep graphs for at most four bounded parts;
+        # every value label and complete history still contributes to one Adam
+        # batch, with unchanged sample weights and optimizer step counts.
         captured = (self._backward_learner_graphs(value_samples, critic=True)
-                    if parts <= 1 or padding <= .125 else None)
+                    if parts <= 1 or (parts <= 4 and padding <= .125) else None)
         if captured is not None:
             captured['optimizer/critic_learner_graph_fraction'] = 1.0
             captured['optimizer/critic_graph_planned_padding_fraction'] = padding
+            captured['optimizer/critic_graph_planned_subbatches'] = float(parts)
             return captured if defer_metrics else self._materialize_metrics(captured)
         metrics: dict[str, float] = {}
         metrics['optimizer/critic_learner_graph_fraction'] = 0.0
         metrics['optimizer/critic_graph_planned_padding_fraction'] = padding
+        metrics['optimizer/critic_graph_planned_subbatches'] = float(parts)
         chunks = self._learner_chunks(value_samples)
         for index, chunk in enumerate(chunks):
             synchronization = (
@@ -1827,6 +1842,9 @@ class SelfPlayTrainer:
                     ("draw_rule_migration", "draw_objective_migration", "pass_rule_migration", "no_move_rule_migration")), default=0)
 
     def _update_layout(self) -> dict[str, float]:
+        entropy_coefficient = (self.settings.entropy_coefficient
+                               if self.settings.layout_entropy_coefficient is None
+                               else self.settings.layout_entropy_coefficient)
         self.layout_buffer.advance(self.update + 1, minimum_version=self._layout_minimum_version())
         if len(self.layout_buffer) < 2:
             return {"layout/update_skipped_buffer_size": float(len(self.layout_buffer)),
@@ -1842,7 +1860,7 @@ class SelfPlayTrainer:
             with self._autocast():
                 output = layout_grpo_loss(self.layout, self.reference_layout, (),
                     clip_epsilon=self.settings.clip_epsilon, kl_coefficient=self.settings.kl_coefficient,
-                    entropy_coefficient=self.settings.entropy_coefficient,
+                    entropy_coefficient=entropy_coefficient,
                     advantage_epsilon=self.settings.advantage_epsilon,
                     prepared=batch.slice(start, stop), tensor_metrics=True)
             self.layout_grad_scaler.scale(output.loss * weight).backward()
@@ -1861,6 +1879,7 @@ class SelfPlayTrainer:
         metrics.update(self.layout_buffer.metrics(outcomes))
         metrics["optimizer/layout_steps"] = 1.
         metrics["optimizer/layout_samples"] = len(outcomes)
+        metrics["layout/entropy_coefficient"] = entropy_coefficient
         return metrics
 
     def _local_rank_state(self) -> dict[str, Any]:
@@ -2340,7 +2359,17 @@ class SelfPlayTrainer:
                 if self.critic is not None:
                     self.phase = "critic_backward"
                     critic_started = time.perf_counter()
+                    # Long Actor batches can leave most VRAM in unused eager
+                    # allocator blocks. Release them before the separate
+                    # Critic phase; live model and captured graph storage stays
+                    # intact, while WDDM has room for the new packed work.
+                    reserved_before = (torch.cuda.memory_reserved(self.device)
+                                       if self.device.type == 'cuda' else 0)
+                    empty_cache(self.device)
+                    released_cache = (max(0, reserved_before - torch.cuda.memory_reserved(self.device))
+                                      if self.device.type == 'cuda' else 0)
                     critic_metrics = self._update_critic(groups)
+                    critic_metrics['optimizer/critic_entry_cache_released_gib'] = released_cache / 2**30
                     critic_backward_seconds = self.distributed.reduce_float(
                         time.perf_counter() - critic_started, operation="max"
                     )

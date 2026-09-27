@@ -21,7 +21,9 @@ POLICY_NAMES = ('loss/policy_ppo', 'loss/policy_total', 'policy/approx_kl_old', 
     'policy/clip_fraction', 'policy/importance_ratio_mean', 'policy/nonzero_advantage_fraction',
     'loss/policy_entropy', 'policy/opening_entropy_ratio_mass', 'policy/opening_entropy_mass',
     'policy/opening_entropy_fraction', 'policy/other_entropy_ratio_mass',
-    'policy/other_entropy_mass', 'policy/other_entropy_fraction', 'policy/clip_upper_mean',
+    'policy/other_entropy_mass', 'policy/other_entropy_fraction',
+    'loss/policy_joint_entropy', 'loss/policy_source_entropy',
+    'policy/source_entropy', 'policy/conditional_destination_entropy', 'policy/clip_upper_mean',
     'policy/clip_lower_mean', 'policy/unclipped_advantage_fraction')
 CRITIC_NAMES = ('loss/critic_total', 'critic/value_mse', 'critic/value_mean', 'critic/target_mean',
     'critic/draw_value_mse', 'critic/draw_value_mean', 'critic/draw_target_mean')
@@ -81,7 +83,7 @@ class PackedLearnerGraph:
         return self.host[name].numpy()
 
     def stage(self, model, samples, *, clip, coefficient, opening_coefficient, opening_plies,
-              action_metadata=None, policy_clip=None):
+              action_metadata=None, policy_clip=None, source_coefficient=0.0):
         n = len(samples)
         if not 0 < n <= self.SAMPLES or model.config.max_sequence_tokens < self.TOKENS // self.SEQUENCES:
             return False
@@ -171,10 +173,12 @@ class PackedLearnerGraph:
             offsets=np.cumsum([0,*legal_lengths[:-1]])
             selected[:n]=[int(o)+s.state.legal_actions.index(s.action) for o,s in zip(offsets,samples,strict=True)]
         bounds = policy_clip if not self.critic and policy_clip is not None else PolicyClip.fixed(clip)
-        hyper = self._buffer('hyper', (10,), torch.float32)
+        hyper = self._buffer('hyper', (11,), torch.float32)
         hyper[:] = (bounds.lower, coefficient, coefficient if opening_coefficient is None else opening_coefficient,
-                     float(opening_coefficient is not None), bounds.upper, bounds.bonus, bounds.minimum, bounds.maximum,
-                     float(bounds.absolute_advantage), bounds.unclipped_advantage_threshold)
+                     float(opening_coefficient is not None), bounds.upper, bounds.bonus,
+                     -float('inf') if bounds.minimum is None else bounds.minimum,
+                     float('inf') if bounds.maximum is None else bounds.maximum,
+                     float(bounds.absolute_advantage), bounds.unclipped_advantage_threshold, source_coefficient)
         for name, host in self.host.items():self.device[name].copy_(host,non_blocking=True)
         if model.device.type == 'cuda':
             if self._staging_consumed is None:
@@ -189,7 +193,8 @@ class PackedLearnerGraph:
         contexts=self.callable(d['raw'],d['positions'],d['cu'],d['queries'],model.config.max_sequence_tokens,self.mode)
         meta=d['targets'];valid=meta[:,4];denominator=valid.sum().clamp_min(1)
         mean=lambda values:(values*valid).sum()/denominator
-        clip,coefficient,opening_coefficient,adaptive,upper_base,bonus,minimum,maximum,absolute,unclipped=d['hyper'].unbind()
+        (clip,coefficient,opening_coefficient,adaptive,upper_base,bonus,minimum,maximum,
+         absolute,unclipped,source_coefficient)=d['hyper'].unbind()
         if self.critic:
             outcome=model.value_head(contexts).squeeze(-1).float()
             has_components=hasattr(model, 'draw_value_head')
@@ -217,20 +222,25 @@ class PackedLearnerGraph:
             joint=torch.where(d['valid'],joint,0.).float()
             current=joint.index_select(0,d['selected'])
             entropy=torch.zeros(self.SAMPLES,device=contexts.device).scatter_add_(0,d['owner'],-joint.exp()*joint)
+            marginal_logs=source_logs.float().masked_fill(~d['source_mask'],0.)
+            source_entropy=-(marginal_logs.exp()*marginal_logs).sum(-1)
             old,advantage,max_entropy,opening=meta[:,:4].unbind(-1)
             log_ratio=(current-old).clamp(-20.,20.);ratio=log_ratio.exp()
             lower,upper=advantage_clip_bounds(advantage,clip,upper_base,bonus,minimum,maximum,absolute)
             objective,outside=clipped_surrogate(ratio,advantage,lower,upper,unclipped)
             policy_loss=-mean(objective)
             weights=coefficient+(opening_coefficient-coefficient)*opening
-            bonus=mean(weights*entropy);loss=policy_loss-bonus
+            joint_bonus=mean(weights*entropy)
+            source_bonus=source_coefficient*mean(source_entropy)
+            bonus=joint_bonus+source_bonus;loss=policy_loss-bonus
             eligible=(max_entropy>0).float()
             normalized=entropy/torch.where(max_entropy>0,max_entropy,torch.ones_like(max_entropy))*eligible
             opening_mask=opening*eligible;other_mask=(1-opening)*eligible
             metrics=torch.stack((policy_loss,loss,mean(ratio-1-log_ratio),mean(entropy),
                 mean(outside),mean(ratio),mean((advantage!=0).float()),-bonus,
                 mean(normalized*opening_mask),mean(entropy*opening_mask),mean(opening_mask),
-                mean(normalized*other_mask),mean(entropy*other_mask),mean(other_mask),mean(upper),mean(lower),
+                mean(normalized*other_mask),mean(entropy*other_mask),mean(other_mask),
+                -joint_bonus,-source_bonus,mean(source_entropy),mean(entropy-source_entropy),mean(upper),mean(lower),
                 mean(unclipped_advantage_mask(advantage,unclipped).float()))).detach()
         return loss,metrics
 

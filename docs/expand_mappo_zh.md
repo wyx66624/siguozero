@@ -1,9 +1,10 @@
 # expand：25 槽库存编码、384 + 128 维输入与集中式单值 Critic
 
-本分支新增配置 `configs/expand_mappo_training.yaml`，用于四暗与双明的扩展模型。
+本分支配置 `configs/expand_mappo_training.yaml` 用于双人、四暗与双明的扩展模型。
 四国模式现使用棋盘 384 维、动作 128 维的新输入，保留 expand 原有的 512 维主干、
 16 层 Actor/Critic、布阵网络、奖励和训练日程。所有配置的棋盘与 Actor 历史现统一使用多热库存编码；
-`local_4090_training.yaml` 与二人模式保留各自的模型宽度、深度和训练算法。
+`local_4090_training.yaml` 保留原配置。2026-09-26 起，双人也采用相同的扩展编码与 ACPO + MAPPO，
+棋盘与动作头适配 60 点，独立终局奖励和历史对手门槛见[双人配置](two_player_mappo_20260926_zh.md)。
 实现阶段在独立的 `siguozero-expand` 工作目录完成 CPU 回归；后续 CUDA 验证、训练配置与监控服务
 见 [expand 训练启动记录](expand_training_launch_20260918_zh.md)。
 

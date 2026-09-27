@@ -1,4 +1,4 @@
-# Expanded four-player MAPPO: private actor, full-information scalar critic.
+# Expanded two/four-player MAPPO: private actor, full-information scalar critic.
 # Single RTX 4090 training profile; measured launch evidence is kept under output/diagnostics.
 # Start a new run with --model-scale main; do not resume the 256-wide PPO run.
 # Four-player input contract is now v17; v16 checkpoints need an explicit migration or a new run.
@@ -114,14 +114,14 @@ board_piece_codes:
     flag_capture_or_elimination_sets_all_25: true
     include_probabilistic_or_nonunique_inference: false
 models:
-  # Legacy/two-player base profile; four_player below overrides these input dimensions.
+  # Legacy base profile; the board-specific profiles below override these dimensions.
   common:
     player_parameter_sharing: single_policy_and_layout_instance_all_seats
     action_embedding_dim: 256
     board_embedding_dim: 256
     transition_token_dim: 512
     dropout: 0.0
-  four_player:
+  four_player: &expanded_policy
     action_embedding_dim: 128
     # 4 coordinates + previous actor + draw countdown + 4 alive + 4 pass counts.
     # No separate countdown/alive/revealed-flag embedding in this profile.
@@ -140,6 +140,11 @@ models:
     temporal_layers: 16
     attention_heads: 8  # 512 / 8 = 64 dimensions per head.
     temporal_ffn_dim: 1024
+  two_player:
+    <<: *expanded_policy
+    board_point_capacity: 60
+    # Same inventory candidates/owner and mode encoding on the two-player board.
+    board_input_dim: 1563  # 60 * 26 + 3
   layout:
     architecture: piece_conditioned_autoregressive_pointer_decoder
     d_model: 256
@@ -195,7 +200,7 @@ models:
     greedy_argmax: false
     final_player_setup_validation: true
   policy:
-    # Legacy/two-player base contract. The four_player profile above overrides it.
+    # Legacy base contract. The board-specific profiles above override it.
     architecture: board_encoder_plus_causal_transition_transformer
     action_encoder:
       architecture: coordinates_player_linear
@@ -274,6 +279,16 @@ rollout:
   environment_steps_per_update: variable_until_all_branches_terminal
 ppo:
   algorithm: mappo
+  mode_overrides:
+    two_player:
+      algorithm: mappo
+      # Two-player training uses terminal outcomes only: +1 / -1 / -0.15.
+      flag_capture_reward: 0.0
+      known_nonflag_hq_penalty: 0.0
+      bomb_commander_reward: 0.0
+      bomb_army_commander_reward: 0.0
+      bomb_division_commander_reward: 0.0
+      futile_attack_penalty: 0.0
   critic_layers: 16
   discount: 1.0
   gae_lambda: 0.95
@@ -307,7 +322,7 @@ ppo:
   # 98304 / 1024 = 96 minibatches per epoch for both models (user limit: 384).
   # Keep the Actor batch at 1024; optimize execution before increasing it again.
   optimizer_minibatch_samples: 1024
-  environment_workers: 16
+  environment_workers: 24
   learner_microbatch_by_model_scale:
     main: 32
   causal_sdpa: true
@@ -336,21 +351,13 @@ ppo:
   cuda_memory_fraction: 0.90
   adaptive_clip:
     enabled: true
+    mode: acpo
     # ACPO eqs. 4-6: signed advantages smoothly modulate only the upper bound.
-    # Every sample retains the clipped surrogate, including |advantage| >= 2.
-    absolute_advantage: false
-    unclipped_advantage_threshold: 0.0
-    minimum: 0.10
-    maximum: 0.45
-    advantage_scale: 0.5
-    # [fraction of environment-step budget, lower epsilon, upper baseline]
-    # Linear interpolation; upper epsilon adds up to 50% for high advantage.
-    schedule:
-      - [0.0, 0.25, 0.30]
-      - [0.3333333333333333, 0.20, 0.25]
-      - [0.50, 0.18, 0.20]
-      - [0.75, 0.15, 0.15]
-      - [1.0, 0.10, 0.10]
+    # Fixed baselines confirmed by the user; their numeric values are not in the paper.
+    lower: 0.20
+    upper: 0.20
+    # ACPO Table 3: fixed additive delta, independent of the upper baseline.
+    delta: 0.05
 grpo:
   strategy_grouping: sampled_root_candidate_slots
   root_candidate_count: 4
@@ -398,11 +405,13 @@ learner:
     minimum: 1.0e-06
     maximum: 1.0e-04
     # Keep the first pass complete; control LR by coverage of later epochs.
-    # Fewer than two complete epochs: -5%; all three and final KL < .08: +5%.
+    # KL > .10 within the first two epochs (inclusive): -5%.
+    # All three epochs complete and final KL < .05: +5%.
     increase_on_full_epochs: false
     epoch_completion: true
     minimum_completed_epochs: 2
-    increase_kl_threshold: 0.08
+    increase_kl_threshold: 0.05
+    decrease_kl_threshold: 0.10
     increase_factor: 1.05
     decrease_factor: 0.95
     stable_updates: 1
@@ -421,18 +430,24 @@ learner:
     ema_decay: 0.9
     opening_plies: 16  # separate opening and later-play entropy controllers
     mode_overrides:
-      four_dark:
-        # PPO paper, Table 5 (Atari): fixed raw-entropy bonus c2=0.01.
-        # The same coefficient applies to opening and later play, including resume.
-        initial: 0.01
+      four_dark: &expanded_entropy
+        # Raw entropy bonus: 0.005 H(joint) + 0.005 H(source)
+        # = 0.01 H(source) + 0.005 E_source[H(destination | source)].
+        # Fixed in both phases, including resume; no entropy normalization.
+        initial: 0.005
+        source_coefficient: 0.005
+        # Keep deployment exploration unchanged when movement entropy changes.
+        layout_coefficient: 0.01
         adaptive_to_target_entropy: false
-        minimum: 0.01
-        maximum: 0.01
-        opening_maximum: 0.01
+        minimum: 0.005
+        maximum: 0.005
+        opening_maximum: 0.005
         # Inactive legacy targets; normalized entropy remains a diagnostic only.
         target_ratio: 0.50
         opening_target_ratio: 0.50
         target_schedule: []
+      two_player:
+        <<: *expanded_entropy
   kl:
     initial_coefficient: 0.02
     target_per_action: 0.02
@@ -453,7 +468,7 @@ model_selection:
   start_percent: 30
   interval_percent: 5
   games: 1000
-  four_player:
+  four_player: &expanded_selection
     interval_environment_plies: 50000000
     after_half_interval_environment_plies: 50000000
     after_half_historical_only: false
@@ -463,7 +478,10 @@ model_selection:
     historical_teammate_fraction: 0.5
     games: 500
     checkpoint_policy: periodic
-    checkpoint_interval_environment_plies: 10000000
+    checkpoint_interval_environment_plies: 25000000
+  two_player:
+    <<: *expanded_selection
+    historical_teammate_fraction: 0.0
   max_plies: null
   seed: 20260910
   temporal_cache_entries: 8
@@ -545,8 +563,12 @@ historical_opponents:
   # When enabled, replaces the sampled historical opponent, using the same
   # start_fraction/training_fraction. Learner and teammate remain unmodified.
   tactical_champion: false
+  # One additional adaptive pool identity, refreshed from the learner each rollout.
+  # Shares the normal loss-rate prior/EMA/softmax with ordinary historical versions.
+  tactical_current: true
   start_fraction: 0.3333333333333333  # 1B of the 3B environment-step budget.
-  training_fraction: 0.5
+  # After activation: 80% current self-play, 20% historical pool (including tactical).
+  training_fraction: 0.2
   teammate_fraction: 0.0
   snapshot_fractions: [0.016666666666666666, 0.03333333333333333, 0.05]
   # Every saved version from 50M remains eligible; cache limits never prune it.
@@ -563,6 +585,15 @@ historical_opponents:
   eval_total_games: 500  # Total across the frozen panel, allocated in four-game rotations.
   uniform_fraction: 0.0
   learning_rate: 0.01
+  mode_overrides:
+    two_player:
+      # Only frozen historical opponents; no teammates or tactical pool member.
+      tactical_current: false
+      tactical_champion: false
+      start_fraction: 0.16666666666666666  # 500M of the shared 3B step budget.
+      start_environment_plies: 500000000  # Fixed threshold even if the budget changes.
+      teammate_fraction: 0.0
+      checkpoint_start_fraction: 0.008333333333333333  # Include every 25M version.
 
 compute_budget:
   random_baseline:

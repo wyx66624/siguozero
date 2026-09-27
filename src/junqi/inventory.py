@@ -365,6 +365,34 @@ class InventoryKnowledge:
         return _cached_slot_mask(domain, tuple(game._known_casualties[viewer][owner].items()),
                                  self.used_slots[viewer][owner], self.live_slots[viewer][owner])
 
+    def masks(self, game, viewer):
+        """Encode one current public view, sharing immutable owner evidence.
+
+        This cache lasts only for this call. Moves, deaths and restored public
+        evidence are therefore reflected immediately, without invalidation or
+        any persistent checkpoint state. Confirmed physical-copy IDs remain
+        point-specific even when several pieces have the same known rank.
+        """
+        known = self.known_slots[viewer]
+        owners = [
+            (tuple(casualties.items()), self.used_slots[viewer][owner],
+             self.live_slots[viewer][owner])
+            for owner, casualties in enumerate(game._known_casualties[viewer])
+        ]
+        shared = {}
+        result = {}
+        for point, domain in self.live[viewer].items():
+            if len(domain) == 1:
+                result[point] = 1 << known[point]
+                continue
+            owner = game._pieces[point].owner
+            key = (owner, domain)
+            mask = shared.get(key)
+            if mask is None:
+                mask = shared[key] = _cached_slot_mask(domain, *owners[owner])
+            result[point] = mask
+        return result
+
     def _share_allied_domains(self):
         changed = False
         for a, b in ((0, 2), (1, 3)):

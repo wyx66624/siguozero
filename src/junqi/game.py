@@ -1029,10 +1029,14 @@ class JunqiGame:
             remembered[point] = known_kind
 
     def _known_live_counts(
-        self, viewer: int
+        self, viewer: int, owners: set[int] | None = None
     ) -> list[Counter[PieceType]]:
         counts = [Counter() for _ in range(self.config.player_count)]
+        if owners is not None and not owners:
+            return counts
         for point, piece in self._pieces.items():
+            if owners is not None and piece.owner not in owners:
+                continue
             known = self._known_piece_kind(viewer, point, piece)
             if known is not None:
                 counts[piece.owner][known] += 1
@@ -1453,8 +1457,8 @@ class JunqiGame:
             return False
         return board.point(target).kind is not PointKind.CAMP
 
+    @staticmethod
     def _railway_reachable_targets(
-        self,
         board: Board,
         start: int,
         occupied: frozenset[int],
@@ -1879,7 +1883,15 @@ class JunqiGame:
                 for viewer in range(self.config.player_count)
             )
             known_live_counts = tuple(
-                self._known_live_counts(viewer)
+                # Candidate pruning reads counts only for an unknown attacker's
+                # or defender's owner. Exact identities and engineer proofs do
+                # not use these counts; unrelated armies need no board scan.
+                self._known_live_counts(viewer, {
+                    piece.owner for piece, known, proved in (
+                        (attacker, known_attackers[viewer], proves_engineer),
+                        (defender, known_defenders[viewer], False),
+                    ) if piece is not None and known is None and not proved
+                })
                 for viewer in range(self.config.player_count)
             )
             public_attacker_candidates = self._piece_candidates[start_point]

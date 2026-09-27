@@ -30,13 +30,14 @@ def config():
 def test_production_steps_mix_and_kl_contract():
     settings = config()
     assert settings.target_environment_plies == 3_000_000_000
-    assert settings.checkpoint_interval_environment_plies == 10_000_000
+    assert settings.checkpoint_interval_environment_plies == 25_000_000
     assert settings.arena_interval_environment_plies == 50_000_000
     assert settings.arena_after_half_interval_environment_plies == 50_000_000
     assert settings.arena_champion_only
     assert settings.lr_epoch_completion
     assert settings.lr_kl_band_lower is settings.lr_kl_band_upper is None
-    assert settings.lr_minimum_completed_epochs == 2 and settings.lr_increase_kl_threshold == .08
+    assert settings.lr_minimum_completed_epochs == 2 and settings.lr_increase_kl_threshold == .05
+    assert settings.lr_decrease_kl_threshold == .10
     assert settings.ppo_kl_probe_interval_steps == 16
     assert settings.early_stop_kl_threshold == .10
     assert settings.policy_epochs == settings.critic_epochs == 3
@@ -47,7 +48,7 @@ def test_production_steps_mix_and_kl_contract():
     assert settings.minimum_learning_rate == 1e-6 and settings.maximum_learning_rate == 1e-4
     assert math.ceil(settings.historical_start_fraction * settings.target_environment_plies) == 1_000_000_000
     assert math.ceil(settings.historical_checkpoint_start_fraction * settings.target_environment_plies) == 50_000_000
-    assert settings.historical_training_fraction == .5 and settings.historical_teammate_fraction == 0
+    assert settings.historical_training_fraction == .2 and settings.historical_teammate_fraction == 0
     assert settings.historical_sampling == 'strength'
     assert settings.historical_initial_loss_rate == .5
 
@@ -179,7 +180,7 @@ def test_production_acpo_bounds_are_signed_smooth_and_clip_extreme_advantages(en
     lower, upper = advantage_clip_bounds(advantage, bounds.lower, bounds.upper, bounds.bonus,
                                          bounds.minimum, bounds.maximum, bounds.absolute_advantage)
     expected = torch.tensor([bounds.upper + bounds.bonus * .5 * (1 + math.erf(a / math.sqrt(2)))
-                             for a in advantage.detach().tolist()]).clamp(bounds.minimum, bounds.maximum)
+                             for a in advantage.detach().tolist()])
     torch.testing.assert_close(upper, expected)
     torch.testing.assert_close(lower, torch.full_like(lower, bounds.lower))
     assert not lower.requires_grad and not upper.requires_grad

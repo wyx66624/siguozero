@@ -14,7 +14,7 @@ from .trainer import SelfPlayTrainer
 
 def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train four-player PPO/MAPPO with a critic, or two-player K=4/M=2 GRPO"
+        description="Train two/four-player PPO/MAPPO, or legacy two-player K=4/M=2 GRPO"
     )
     parser.add_argument(
         "--mode",
@@ -22,7 +22,8 @@ def build_parser(default_mode: TrainingMode | None = None) -> argparse.ArgumentP
         default=None if default_mode is None else default_mode.value,
         required=default_mode is None,
     )
-    parser.add_argument("--config", default="configs/bootstrap.yaml")
+    parser.add_argument("--config", default=None,
+                        help="defaults to expanded ACPO/MAPPO for two_player, bootstrap.yaml for other modes")
     parser.add_argument(
         "--run-directory",
         "--run-dir",
@@ -217,6 +218,9 @@ def main(
 ) -> None:
     parser = build_parser(default_mode)
     args = parser.parse_args(argv)
+    if args.config is None:
+        args.config = ("configs/expand_mappo_training.yaml" if args.mode == TrainingMode.TWO_PLAYER.value
+                       else "configs/bootstrap.yaml")
     overrides = {}
     if args.device is not None:
         overrides["device"] = args.device

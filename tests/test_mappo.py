@@ -75,10 +75,13 @@ class MAPPOTests(unittest.TestCase):
         self.assertEqual(checkpoint_format_for_model(legacy.model), 15)
         self.assertFalse(legacy.model.joint_action_context)
         two = TrainingSettings.from_yaml(CONFIG, TrainingMode.TWO_PLAYER, model_scale="main")
-        self.assertEqual(two.algorithm, "grpo")
-        self.assertEqual(two.model.token_fusion_hidden_dim, 0)
-        self.assertIsNone(two.critic_layers)
-        self.assertFalse(two.model.joint_action_context)
+        self.assertEqual(two.algorithm, "mappo")
+        self.assertEqual(two.model.token_fusion_hidden_dim, 512)
+        self.assertEqual(two.critic_layers, 16)
+        self.assertTrue(two.model.joint_action_context)
+        self.assertEqual(two.model.board_point_capacity, 60)
+        legacy_two = TrainingSettings.from_yaml(ROOT / "configs/bootstrap.yaml", TrainingMode.TWO_PLAYER)
+        self.assertEqual(legacy_two.algorithm, "grpo")
 
     def test_critic_has_one_head_and_independent_matching_backbone(self):
         config = tiny_config()

@@ -82,3 +82,22 @@ test('rolling normalized entropy shows percent, coverage and phase EMA without r
   assert.ok(context.renderEntropyAverageStat({moving_average:0}).includes('0%'));
   assert.ok(context.renderEntropyAverageStat({moving_average:null}).includes('等待记录'));
 });
+
+test('source entropy card and trend identify post-update tactical sampling and its own normalization', () => {
+  const entropy = {window_updates:20, covered_updates:19, available_updates:20,
+    start_update:4559, end_update:4578, latest_ratio:.3826, moving_average:.3979,
+    eligible_samples:1728, probe_samples:1920,
+    history:[{update:4577,moving_average:.40},{update:4578,moving_average:.3979}]};
+  const html = context.renderExploration({'policy/adaptive_entropy_enabled':0},null,entropy);
+  for (const text of ['选子归一化熵','39.79%','38.26%','1,728 / 1,920','19 / 20',
+    '战术分层探针','更新后','合法起点类别数','按环境步数计算移动平均','归一化选子熵趋势','缺失记录不补零']) {
+    assert.ok(html.includes(text),text);
+  }
+  assert.ok(!html.includes('NaN') && !html.includes('Infinity'));
+});
+
+test('source entropy missing records stay unknown and real zero stays visible', () => {
+  assert.ok(context.renderSourceEntropyAverageStat({moving_average:0}).includes('0%'));
+  assert.ok(context.renderSourceEntropyAverageStat({moving_average:null}).includes('等待记录'));
+  assert.ok(context.renderSourceExploration(null).includes('等待选子熵统计'));
+});

@@ -85,7 +85,7 @@ test('full-information replay does not label referee flags as public deductions'
   assert.ok(!texts.includes('推断旗')&&!texts.includes('已知旗'));
 });
 
-async function mount({initial=state(97), advances=[], moved, review, savedReview, restored=true, created,
+async function mount({initial=state(97), advances=[], moved, review, savedReview, restored=true, created, consoleMode='',
     catalog, runs=[]} = {}) {
   const elements = new Map(), timers = new Map(), calls = [], paints = [];
   let now=0, timerId=0;
@@ -104,7 +104,7 @@ async function mount({initial=state(97), advances=[], moved, review, savedReview
   const saved=new Map(savedReview?[['junqi-last-review',JSON.stringify(savedReview)]]:[]);
   const setTimer=(callback,delay=0)=>{const id=++timerId;timers.set(id,{callback,time:now+delay});return id;};
   const context=vm.createContext({
-    document:{getElementById:element,createElement:()=>new Element(),createElementNS:()=>new Element(),querySelector:()=>element('legend')},
+    document:{body:{dataset:{consoleMode}},getElementById:element,createElement:()=>new Element(),createElementNS:()=>new Element(),querySelector:()=>element('legend')},
     sessionStorage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)},
     localStorage:{getItem:key=>saved.get(key)??null,setItem:(key,value)=>saved.set(key,value)},
     setTimeout:setTimer,clearTimeout:id=>timers.delete(id),requestAnimationFrame:callback=>setTimer(callback),
@@ -121,7 +121,7 @@ async function mount({initial=state(97), advances=[], moved, review, savedReview
   });
   vm.runInContext(source,context);
   await settle();
-  return {element,calls,paints,timers,saved,inspect:()=>JSON.parse(vm.runInContext('JSON.stringify(state)',context)),
+  return {element,calls,paints,timers,saved,storage,inspect:()=>JSON.parse(vm.runInContext('JSON.stringify(state)',context)),
     async click(id) {assert.equal(element(id).disabled,false,`${id} is disabled`);element(id).listeners.click();await settle();},
     async tick() {
       assert.ok(timers.size,'no pending display or spectator timer');
@@ -340,4 +340,22 @@ test('starting a new game archives the old game before closing and keeps its rep
   await ui.click('review-exit');
   assert.equal(ui.inspect().session_id,'new-game');
   assert.equal(ui.inspect().your_turn,true);
+});
+
+test('dedicated two-player room filters models and keeps four-player sessions and replays separate',async()=>{
+  const initial=state(0,{model:{mode:'two_player',update:7,eliminate_no_moves:true},
+    your_turn:true,current_player:0,active_players:[true,true],passes_remaining:[4,4],legal_actions:[[0,0],[0,1]]});
+  const ui=await mount({consoleMode:'two_player',initial,savedReview:reviewFixture(),
+    created:{...initial,session_id:'two-game'},catalog:[
+      {id:'four',available:true,mode:'four_dark'}, {id:'two',available:true,mode:'two_player'}]});
+  assert.deepEqual(ui.calls,[]); // An old generic session must never be restored here.
+  assert.equal(ui.element('model').children.length,1);
+  assert.equal(ui.element('model').value,'two');
+  assert.equal(ui.element('seat').children.length,2);
+  assert.equal(ui.element('review-open').disabled,true);
+  await ui.click('new');
+  assert.equal(ui.storage.get('junqi-two_player-session'),'two-game');
+  assert.equal(ui.storage.get('junqi-session'),'game');
+  assert.ok(ui.saved.has('junqi-last-review'));
+  assert.ok(!ui.element('legend').innerHTML.includes('队友'));
 });

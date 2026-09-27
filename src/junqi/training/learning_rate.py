@@ -21,6 +21,7 @@ class BoundedLearningRate:
     epoch_completion: bool = False
     minimum_completed_epochs: int = 2
     increase_kl_threshold: float = .09
+    decrease_kl_threshold: float = .10
     scale: float = 1.0
     kl_ema: float | None = None
     stable_count: int = 0
@@ -63,9 +64,10 @@ class BoundedLearningRate:
             self.stable_count = self.stable_direction = self.cooldown = 0
             if completed_epochs is None or completed_epochs <= 0:
                 self.reason = "no_samples"
-            elif completed_epochs < self.minimum_completed_epochs:
+            elif (completed_epochs <= self.minimum_completed_epochs
+                  and kl > self.decrease_kl_threshold):
                 self.scale *= self.decrease_factor
-                self.reason = "incomplete_required_epochs"
+                self.reason = "early_high_kl"
             elif full_epochs_completed and kl < self.increase_kl_threshold and allow_increase:
                 self.scale *= self.increase_factor
                 self.reason = "completed_low_kl"
@@ -120,7 +122,7 @@ class BoundedLearningRate:
         if direction and not self.epoch_completion:
             self.cooldown = self.cooldown_updates
         elif not direction and self.reason in ("low_kl", "completed_epochs", "high_kl",
-                                                "completed_low_kl", "incomplete_required_epochs"):
+                                                "completed_low_kl", "early_high_kl"):
             self.reason = "upper_bound" if self.reason in ("low_kl", "completed_epochs", "completed_low_kl") else "lower_bound"
         return after, direction
 

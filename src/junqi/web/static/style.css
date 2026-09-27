@@ -100,6 +100,8 @@ footer{font-size:11px;color:#71859b;border-top:1px solid #202d3d;margin-top:30px
 #notice.thinking{color:var(--amber)}
 .board-wrap{padding:12px 16px;background:radial-gradient(ellipse at center,#1b3040 0%,#142330 65%,#121d28 100%)}
 #board{width:100%;max-height:780px;display:block;touch-action:manipulation}
+body[data-console-mode="two_player"] .board-wrap{display:flex;justify-content:center}
+body[data-console-mode="two_player"] #board{max-width:410px;min-height:360px;aspect-ratio:6.2/13.4}
 .legend{display:flex;flex-wrap:wrap;gap:12px;padding:14px 20px;border-top:1px solid var(--line);font-size:10px;color:var(--muted)}
 .s0{color:#8bc9ff}
 .s1{color:#f2ba85}

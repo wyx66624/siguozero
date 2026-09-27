@@ -21,11 +21,17 @@ def observation_rows(game, mode):
     width = observation_width(mode, dead)
     rows = np.zeros((game.config.player_count, width + 14), dtype=np.int16)
     event = game._public_history[-1] if game._public_history else None
+    pieces = tuple(game._pieces.items())
     for viewer, row in enumerate(rows):
         board = game._boards[viewer]
         order = game._relative_player_order(viewer)
         relative = {owner: index for index, owner in enumerate(order)}
-        for point, piece in game._pieces.items():
+        masks = game._inventory.masks(game, viewer)
+        begin = points + (75 if dead else 0)
+        indices = np.fromiter((board.encode(point) for point, _ in pieces),
+                              dtype=np.intp, count=len(pieces))
+        codes, inventory_masks = [], []
+        for point, piece in pieces:
             owner = relative[piece.owner]
             # Reuse the public-observation knowledge contract, including
             # exact dead-rule deductions and double-open teammate visibility.
@@ -37,11 +43,14 @@ def observation_rows(game, mode):
                 if owner == 0 or (mode is TrainingMode.DOUBLE_OPEN and owner == 2):
                     raise ValueError('visible own/teammate identity unexpectedly hidden')
                 code = 2 if mode is TrainingMode.TWO_PLAYER else owner
-            index = board.encode(point)
-            row[index] = code
-            begin = points + (75 if dead else 0)
-            mask = game.inventory_mask(viewer, point)
-            row[begin + index], row[begin + points + index] = mask & 8191, mask >> 13
+            codes.append(code)
+            inventory_masks.append(masks[point])
+        # Scatter each field once; the public knowledge and copy-slot lookup
+        # above remains viewer-local and never reads hidden piece kinds.
+        packed_masks = np.asarray(inventory_masks, dtype=np.int32)
+        row[indices] = codes
+        row[begin + indices] = packed_masks & 8191
+        row[begin + points + indices] = packed_masks >> 13
         if dead:
             for owner in game._casualty_owner_order(viewer):
                 slot = 1 if mode is TrainingMode.TWO_PLAYER else relative[owner] - 1

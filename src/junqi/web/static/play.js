@@ -5,15 +5,17 @@ const outcomes={win:'你方获胜',loss:'你方落败',draw:'本局和棋'};
 const reasons={team_eliminated:'一方全部出局',no_capture_draw:'连续 70 步没有吃子',no_interaction_draw:'旧规则：连续 60 步无交战',max_plies_draw:'达到该对局配置的步数上限'};
 const combat={pass:'跳过回合',move:'行棋',attacker_wins:'进攻获胜',defender_wins:'进攻失利',both_removed:'双方移除'};
 const isPass=a=>a[0]===0&&a[1]===0;
+const consoleMode=document.body?.dataset?.consoleMode||'';
+const storageKey=name=>consoleMode?`junqi-${consoleMode}-${name}`:`junqi-${name}`;
 const canPass=()=>!!state?.your_turn&&!needsRuleRestart()&&!isSpectator()&&state.legal_actions.some(isPass)&&state.legal_actions.some(a=>!isPass(a));
 const moveText=e=>isPass(e.action)?'跳过回合':`${e.action[0]} → ${e.action[1]} · ${combat[e.combat]}`;
-let models=[],state=null,session=sessionStorage.getItem('junqi-session'),selected=null,busy=false;
+let models=[],state=null,session=sessionStorage.getItem(storageKey('session')),selected=null,busy=false;
 let spectatorPaused=false,spectatorTimer=null;
 let lastReview=null,reviewing=false,reviewIndex=0,reviewPlaying=false,reviewTimer=null,liveState=null;
 let reviewPieces=null,materializedIndex=-1,reviewStorageWarning='';
-try{const saved=JSON.parse(localStorage.getItem('junqi-last-review'));if(saved?.format_version===1&&saved.visibility==='all_pieces'&&saved.initial?.model&&Array.isArray(saved.steps))lastReview=saved;}catch{}
+try{const saved=JSON.parse(localStorage.getItem(storageKey('last-review')));if(saved?.format_version===1&&saved.visibility==='all_pieces'&&saved.initial?.model&&(!consoleMode||saved.initial.model.mode===consoleMode)&&Array.isArray(saved.steps))lastReview=saved;}catch{}
 const moveDelays=[500,1000,1500,2000];
-const savedMoveDelay=Number(localStorage.getItem('junqi-move-delay'));
+const savedMoveDelay=Number(localStorage.getItem(storageKey('move-delay')));
 if(moveDelays.includes(savedMoveDelay))$('move-delay').value=String(savedMoveDelay);
 const player=owner=>state?.model.mode==='two_player'?['你','对手'][owner]:['你','左方对手','对家队友','右方对手'][owner];
 function message(text,error=false){$('notice').textContent=text;$('notice').className=error?'error':busy?'thinking':'';}
@@ -64,7 +66,7 @@ async function retainReview(finish=false){
  if(!response.review)throw Error('整局尚未结束，不能查看明棋复盘');
  lastReview={...response.review,session_id:session};
  reviewStorageWarning='';
- try{localStorage.setItem('junqi-last-review',JSON.stringify(lastReview));}
+ try{localStorage.setItem(storageKey('last-review'),JSON.stringify(lastReview));}
  catch{reviewStorageWarning='浏览器存储空间不足，请导出棋谱保存；本页仍可复盘。';}
  updateReviewControls();
 }
@@ -106,7 +108,7 @@ function exitReview(){
  setBusy(false);
 }
 async function loadModels(){
- const previous=$('model').value;const response=await fetch('/api/models');if(!response.ok)throw Error('模型列表读取失败');models=(await response.json()).models;
+ const previous=$('model').value;const response=await fetch('/api/models');if(!response.ok)throw Error('模型列表读取失败');models=(await response.json()).models.filter(m=>!consoleMode||m.mode===consoleMode);
  // Read the run's policy when refreshing the model list. This also supports an
  // existing monitor process without interrupting any active CPU games.
  try{
@@ -222,12 +224,12 @@ async function choose(code){if(busy||reviewing||needsRuleRestart()||!state?.your
 }
 $('pass').addEventListener('click',async()=>{if(busy||!canPass())return;setBusy(true);message('已选择跳过，CPU 模型正在思考…');try{await presentTurn(await api('move',{action:[0,0],expected_ply:state.ply}));}catch(e){message(e.message,true)}finally{setBusy(false)}});
 $('new').addEventListener('click',async()=>{if(busy)return;exitReview();setBusy(true);message('正在启动独立 CPU 副本并生成布阵，首次加载需要数秒…');
- try{if(session){await retainReview(true);await api('close');session=null;sessionStorage.removeItem('junqi-session')}
+ try{if(session){await retainReview(true);await api('close');session=null;sessionStorage.removeItem(storageKey('session'))}
   spectatorPaused=false;
-  const created=await api('new',{checkpoint_id:$('model').value,seat:Number($('seat').value),temperature:Number($('temperature').value)});session=created.session_id;sessionStorage.setItem('junqi-session',session);await presentTurn(created);
+  const created=await api('new',{checkpoint_id:$('model').value,seat:Number($('seat').value),temperature:Number($('temperature').value)});session=created.session_id;sessionStorage.setItem(storageKey('session'),session);await presentTurn(created);
  }catch(e){message(e.message,true)}finally{setBusy(false)}
 });
-$('close').addEventListener('click',async()=>{if(busy||reviewing)return;setBusy(true);try{await retainReview(true);await api('close');session=null;sessionStorage.removeItem('junqi-session');state=null;$('turn').textContent='棋局已结束';$('board').replaceChildren();$('advance').hidden=true;message('CPU 对弈进程已释放。可查看上一局明棋复盘或重新开局。')}catch(e){message(e.message,true)}finally{setBusy(false)}});
+$('close').addEventListener('click',async()=>{if(busy||reviewing)return;setBusy(true);try{await retainReview(true);await api('close');session=null;sessionStorage.removeItem(storageKey('session'));state=null;$('turn').textContent='棋局已结束';$('board').replaceChildren();$('advance').hidden=true;message('CPU 对弈进程已释放。可查看上一局明棋复盘或重新开局。')}catch(e){message(e.message,true)}finally{setBusy(false)}});
 $('advance').addEventListener('click',()=>{
  if(!isSpectator()||(busy&&spectatorPaused))return;
  spectatorPaused=!spectatorPaused;updateSpectatorControls();scheduleSpectator();
@@ -241,5 +243,5 @@ $('review-seek').addEventListener('input',()=>{if(!reviewing)return;stopReview()
 $('review-toggle').addEventListener('click',()=>{if(!reviewing)return;if(reviewPlaying)stopReview();else{if(reviewIndex===lastReview.steps.length)showReview(0);reviewPlaying=true;scheduleReview();}updateReviewControls();});
 $('review-speed').addEventListener('change',scheduleReview);
 $('refresh-models').addEventListener('click',()=>loadModels().catch(e=>message(e.message,true)));$('model').addEventListener('change',updateModelInfo);
-$('move-delay').addEventListener('change',()=>localStorage.setItem('junqi-move-delay',$('move-delay').value));
-(async()=>{try{await loadModels();if(session){setBusy(true);state=viewedState(await api('state'));render();if(state.result||state.ended)await retainReview()}}catch(e){session=null;sessionStorage.removeItem('junqi-session');message(e.message,true)}finally{setBusy(false)}})();
+$('move-delay').addEventListener('change',()=>localStorage.setItem(storageKey('move-delay'),$('move-delay').value));
+(async()=>{try{await loadModels();if(session){setBusy(true);const restored=await api('state');if(consoleMode&&restored.model.mode!==consoleMode)throw Error('已忽略其他棋种的旧会话，请重新开局。');state=viewedState(restored);render();if(state.result||state.ended)await retainReview()}}catch(e){session=null;sessionStorage.removeItem(storageKey('session'));message(e.message,true)}finally{setBusy(false)}})();

@@ -57,13 +57,21 @@ def prepare(model, states):
 
 def forward(model, raw, positions, cu, queries, maximum, mode):
     tokens = model._embed_observation_rows(raw, mode, positions)[0]
-    for layer in model.temporal_layers:
+    for index, layer in enumerate(model.temporal_layers):
         norm = layer.attention_norm(tokens)
         qkv = F.linear(norm, layer.attention.in_proj_weight, layer.attention.in_proj_bias)
         heads = layer.attention.num_heads
         q, k, v = [part.view(-1, heads, tokens.shape[-1] // heads) for part in qkv.chunk(3, dim=-1)]
         attended = varlen_attn(q, k, v, cu, cu, maximum, maximum, window_size=(-1, 0)).flatten(1)
+        if index == len(model.temporal_layers) - 1:
+            # The final projection/residual/FFN acts independently per token.
+            # No later attention reads unqueried rows, so gather before these
+            # operations. Duplicate and padded queries retain their own loss
+            # weights, and autograd sums their contributions into the history.
+            tokens = tokens.index_select(0, queries)
+            attended = attended.index_select(0, queries)
         tokens = tokens + F.linear(attended, layer.attention.out_proj.weight, layer.attention.out_proj.bias)
         tokens = tokens + layer.ffn(layer.ffn_norm(tokens))
-    # LayerNorm acts independently per token. Only requested decisions need it.
-    return model.temporal_norm(tokens.index_select(0, queries))
+    if not model.temporal_layers:
+        tokens = tokens.index_select(0, queries)
+    return model.temporal_norm(tokens)
