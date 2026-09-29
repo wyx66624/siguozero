@@ -7,7 +7,7 @@ const combat={pass:'跳过回合',move:'行棋',attacker_wins:'进攻获胜',def
 const isPass=a=>a[0]===0&&a[1]===0;
 const consoleMode=document.body?.dataset?.consoleMode||'';
 const storageKey=name=>consoleMode?`junqi-${consoleMode}-${name}`:`junqi-${name}`;
-const canPass=()=>!!state?.your_turn&&!needsRuleRestart()&&!isSpectator()&&state.legal_actions.some(isPass)&&state.legal_actions.some(a=>!isPass(a));
+const canPass=()=>state?.model.mode!=='two_player'&&!!state?.your_turn&&!needsRuleRestart()&&!isSpectator()&&state.legal_actions.some(isPass)&&state.legal_actions.some(a=>!isPass(a));
 const moveText=e=>isPass(e.action)?'跳过回合':`${e.action[0]} → ${e.action[1]} · ${combat[e.combat]}`;
 let models=[],state=null,session=sessionStorage.getItem(storageKey('session')),selected=null,busy=false;
 let spectatorPaused=false,spectatorTimer=null;
@@ -31,7 +31,7 @@ function viewedState(next){
  }
  return {...next,spectator_reason:reason};
 }
-function needsRuleRestart(){return !reviewing&&!!session&&!!state&&!state.result&&!state.ended&&state.model.eliminate_no_moves!==true;}
+function needsRuleRestart(){return !reviewing&&!!session&&!!state&&!state.result&&!state.ended&&(state.model.eliminate_no_moves!==true||(state.model.mode==='two_player'&&state.max_passes_per_player!==0));}
 function isSpectator(){return !needsRuleRestart()&&!reviewing&&!!session&&!!state&&!state.result&&!state.ended&&['four_dark','double_open'].includes(state.model.mode)&&!!state.spectator_reason;}
 function updateSpectatorControls(){
  const watching=isSpectator();$('advance').hidden=!watching;
@@ -178,13 +178,14 @@ function render(){
  $('turn').textContent=reviewing?(reviewIndex?'明棋复盘':'明棋复盘 · 初始布阵'):state.result?outcomes[state.result.outcome]:state.ended?'棋局已结束':needsRuleRestart()?'规则已更新 · 请重新开局':isSpectator()&&state.spectator_reason==='no_legal_moves'?'观战中 · 无子可动':state.your_turn?'轮到你了':`${player(state.current_player)}的回合`;
  updateSpectatorControls();
  $('pass').disabled=busy||!canPass();
+ $('pass').hidden=state.model.mode==='two_player';
  $('pass').textContent=state.active_players?.[0]===false?'已出局':`跳过回合 · 剩余 ${state.passes_remaining?.[0]??0} 次`;
- $('pass-status').textContent=state.passes_remaining?`无子可动时立即出局。剩余跳过次数：${state.passes_remaining.map((n,i)=>`${player(i)} ${state.active_players?.[i]===false?'已出局':n}`).join(' · ')}。还差 ${Math.max(0,state.no_capture_draw_plies-state.no_capture_plies)} 步无吃子和棋。`:'';
+ $('pass-status').textContent=state.model.mode==='two_player'?`二人军棋不允许跳过，无子可动即判负。还差 ${Math.max(0,state.no_capture_draw_plies-state.no_capture_plies)} 步无吃子和棋。`:state.passes_remaining?`无子可动时立即出局。剩余跳过次数：${state.passes_remaining.map((n,i)=>`${player(i)} ${state.active_players?.[i]===false?'已出局':n}`).join(' · ')}。还差 ${Math.max(0,state.no_capture_draw_plies-state.no_capture_plies)} 步无吃子和棋。`:'';
  const m=state.model;$('model-details').replaceChildren();
  const rows=[['棋种',names[m.mode]],['训练轮次',`update ${m.update}`],['出招方式',m.temperature===0?'argmax · 最大概率':m.temperature==null?'—':`温度 ${m.temperature}`],['布阵温度',m.layout_temperature??'—'],['运行设备',`CPU · ${m.threads} 线程`],['对弈进程',`PID ${m.pid}`],['GPU 上下文',m.cuda_initialized?'异常':'未创建'],['本轮 AI 耗时',`${state.inference_seconds.toFixed(2)} 秒`],['随机种子',m.seed],['规则',m.dead_rules_enabled?'含确定性推断规则':'基础规则']];
  for(const [label,value]of rows){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=value;$('model-details').append(dt,dd);}
  $('moves').replaceChildren();for(const e of [...state.history].reverse()){const li=document.createElement('li');li.textContent=`${e.ply}. ${player(e.actor)} ${moveText(e)}`;$('moves').append(li);}
- message(reviewing?`${state.history.length?player(state.history.at(-1).actor)+' '+moveText(state.history.at(-1)):'双方初始布阵'}。已显示全部棋子的真实身份，仅供复盘。`:state.result?`${outcomes[state.result.outcome]} · ${reasons[state.result.reason]||state.result.reason}。可点击“明棋复盘”查看整局。`:state.ended?'棋局已结束，可点击“明棋复盘”查看已走过程。':needsRuleRestart()?'规则已更新：无子可动即出局。请开始新棋局应用新规则，当前棋局仍可结束并保存复盘。':isSpectator()?(spectatorPaused?'观战已暂停，点击“继续观战至终局”恢复。':state.spectator_reason==='no_legal_moves'?'你已无子可动，轮到你的回合时将直接出局，继续观战。':'你的席位已出局，正在自动观战，直至整局结束。'):state.your_turn?'点击有浅蓝标记的己方棋子，再选择绿色落点。':`等待${player(state.current_player)}行棋…`);
+ message(reviewing?`${state.history.length?player(state.history.at(-1).actor)+' '+moveText(state.history.at(-1)):'双方初始布阵'}。已显示全部棋子的真实身份，仅供复盘。`:state.result?`${outcomes[state.result.outcome]} · ${reasons[state.result.reason]||state.result.reason}。可点击“明棋复盘”查看整局。`:state.ended?'棋局已结束，可点击“明棋复盘”查看已走过程。':needsRuleRestart()?'规则已更新：无子可动即出局，二人军棋不允许跳过。请开始新棋局应用新规则，当前棋局仍可结束并保存复盘。':isSpectator()?(spectatorPaused?'观战已暂停，点击“继续观战至终局”恢复。':state.spectator_reason==='no_legal_moves'?'你已无子可动，轮到你的回合时将直接出局，继续观战。':'你的席位已出局，正在自动观战，直至整局结束。'):state.your_turn?'点击有浅蓝标记的己方棋子，再选择绿色落点。':`等待${player(state.current_player)}行棋…`);
  updateReviewControls();
 }
 async function presentTurn(response){

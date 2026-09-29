@@ -49,10 +49,11 @@ function chart(records,key,color,percentage=false,ariaLabel=null){
 }
 function renderTwoPlayerPlan(r){
  if(r.mode!=='two_player'||!r.training_plan||r.configuration_source==='unknown')return '';
- const p=r.training_plan,fields=['flag_capture_reward','known_nonflag_hq_penalty','bomb_commander_reward','bomb_army_commander_reward','bomb_division_commander_reward','futile_attack_penalty'];
- const terminalOnly=fields.every(k=>p[k]===0),planned=r.configuration_source==='planned';
+ const p={...r.training_plan},fields=['flag_capture_reward','known_nonflag_hq_penalty','bomb_commander_reward','bomb_army_commander_reward','bomb_division_commander_reward','futile_attack_penalty','flag_defense_missed_penalty','flag_defense_success_reward'];
+ for(const key of ['flag_defense_missed_penalty','flag_defense_success_reward'])p[key]??=r.metrics?.[`training/${key}`];
+ const terminalOnly=fields.every(k=>(p[k]??0)===0),planned=r.configuration_source==='planned';
  const algorithm=[p.ppo_clip_mode==='acpo'?'ACPO':null,r.algorithm?.toUpperCase()].filter(Boolean).join(' + ');
- return `<section class="outcome-section"><h3>双人训练配置 · ${planned?'预定配置':'已保存配置'}</h3><div class="stats">${stat('棋盘 / 席位','60 点 / 2 人')}${stat('训练算法',escapeHTML(algorithm||'待确认'))}${stat('终局奖励：胜 / 负 / 和',`+1 / -1 / ${fmt(p.draw_reward,2)}`)}${stat('奖励范围',terminalOnly?'仅终局奖励':'以当前训练配置为准')}</div><p class="hint">${planned?'启动训练并保存运行配置后，本页改用实际配置；曲线和对局统计只来自训练记录。':'本页读取双人运行目录中的配置、指标及检查点。'} 无历史队友；评测按两局换边组成完整对局组。</p></section>`;
+ return `<section class="outcome-section"><h3>双人训练配置 · ${planned?'预定配置':'已保存配置'}</h3><div class="stats">${stat('棋盘 / 席位','60 点 / 2 人')}${stat('训练算法',escapeHTML(algorithm||'待确认'))}${stat('终局奖励：胜 / 负 / 和',`+1 / -1 / ${fmt(p.draw_reward,2)}`)}${stat('奖励范围',terminalOnly?'仅终局奖励':'终局 + 即时奖励')}${terminalOnly?'':stat('炸大子：司令 / 军长 / 师长',`${fmt(p.bomb_commander_reward,3)} / ${fmt(p.bomb_army_commander_reward,3)} / ${fmt(p.bomb_division_commander_reward,3)}（初始，随步数衰减）`)}${(p.flag_defense_missed_penalty||p.flag_defense_success_reward)?stat('未守旗 / 成功守旗',`-${fmt(p.flag_defense_missed_penalty,2)} / +${fmt(p.flag_defense_success_reward,2)}（固定，任意子力）`):''}</div><p class="hint">${planned?'启动训练并保存运行配置后，本页改用实际配置；曲线和对局统计只来自训练记录。':'本页读取双人运行目录中的配置、指标及检查点。'} 无历史队友；评测按两局换边组成完整对局组。</p></section>`;
 }
 function renderTwoPlayerHistory(r){
  const h=r.historical_opponents||{},e=r.historical_evaluation||{},p=r.training_plan||{};
@@ -116,6 +117,16 @@ function renderExploration(m,entropy,sourceEntropy){
  const annealing=adaptive&&m['policy/entropy_target_schedule_enabled']?`<p class="hint">熵目标随累计环境步数逐步下降，到 ${fmt(m['policy/entropy_target_schedule_end_environment_plies'])} 步，开局目标 ${target(m['policy/opening_entropy_target_final'])}、后续目标 ${target(m['policy/other_entropy_target_final'])}；恢复训练沿用累计进度。</p>`:'';
  const coefficient=prefix=>`${fmt(m[prefix+'_coefficient'],5)} → ${fmt(m[prefix+'_coefficient_next'],5)}${m[prefix+'_coefficient_max']==null?'':` · 上限 ${fmt(m[prefix+'_coefficient_max'],5)}`}`;
  const rolling=entropy?`<div class="stats">${stat('本轮整体归一化熵',entropyPercent(entropy.latest_ratio))}${renderEntropyAverageStat(entropy)}${stat('移动窗口覆盖环境步',fmt(entropy.environment_plies))}</div><p class="hint">最近 ${fmt(entropy.window_updates)} 个已完成训练轮次中，${fmt(entropy.covered_updates)} / ${fmt(entropy.available_updates)} 轮有有效记录${entropy.start_update==null?'':` · update ${fmt(entropy.start_update)}–${fmt(entropy.end_update)}`}。每个状态先算 H / ln(合法动作数)，排除只有一个合法动作的状态；每轮按样本占比合并开局与后续阶段，再按环境步数计算移动平均。每轮数值取训练过程的观测平均。</p><div class="chart-title"><span>整体归一化动作熵 · ${fmt(entropy.window_updates)} 轮移动平均</span><span>历史日志自动恢复</span></div>${chart(entropy.history??[],'moving_average','#5bd9bc',true)}`:'';
+ if(m['policy/entropy_joint_source_control']){
+  const beta=m['policy/entropy_coefficient'],next=m['policy/entropy_coefficient_next'];
+  const goal=m['policy/entropy_target_ratio'],band=m['policy/entropy_deadband'];
+  const pair=(a,b)=>`${fmt(a,6)} → ${fmt(b,6)}`;
+  const sourceFeedback=Boolean(m['policy/entropy_feedback_source']);
+  const feedbackName=sourceFeedback?'选子归一化熵':'整体归一化熵';
+  const feedbackValue=m['policy/entropy_feedback_ratio']==null?'本轮无有效选子样本':pct(m['policy/entropy_feedback_ratio']);
+  const sourceHint=sourceFeedback?'每个状态先算 H(选子) / ln(合法起点数)，排除只有一个合法起点的状态，再对有效状态取平均。':'';
+  return `<section class="outcome-section"><h3>策略探索 · 共享 β 自适应</h3><p>${feedbackName}目标 ${target(goal)}，容忍区间 ${target(goal-band)}～${target(goal+band)}。控制 EMA 低于区间增加权重，高于区间降低权重，区间内保持。</p><div class="stats">${stat('更新后'+feedbackName+' / 控制 EMA',`${feedbackValue} / ${entropyPercent(m['policy/entropy_ratio_ema'])}`)}${sourceFeedback?stat('控制探针 · 有效选子状态数',fmt(m['policy/final_source_entropy_samples'])):''}${stat('条件落点系数 β · 本轮 → 下轮',pair(beta,next))}${stat('选子实际系数 2β · 本轮 → 下轮',pair(m['policy/effective_source_entropy_coefficient'],m['policy/effective_source_entropy_coefficient_next']))}${stat('β 下限 / 上限',`${fmt(m['policy/entropy_coefficient_min'],6)} / ${fmt(m['policy/entropy_coefficient_max'],6)}`)}${stat('熵奖励损失贡献',fmt(m['loss/policy_entropy'],5))}</div><p class="hint">每个完整更新结束后，用最终策略探针的${feedbackName}反馈一次。${sourceHint}EMA 保留旧值 ${target(m['policy/entropy_ema_decay'])}，单轮系数变化最多 ${target(m['policy/entropy_max_relative_change'])}。开局和后续共用 β，选子实际系数始终为条件落点的两倍。${sourceFeedback?'整体熵和战术选子统计仅供观测；':''}20 轮移动平均不参与控制。续训保留 β 和同口径 EMA，棋力以完整对局评测为准。</p>${rolling}${renderSourceExploration(sourceEntropy)}</section>`;
+ }
  const control=adaptive?`归一化熵：开局目标 ${target(openingTarget)}，后续目标 ${target(otherTarget)}`:'使用固定原始熵奖励，归一化熵仅用于观测，目标反馈已关闭';
  const phase=name=>adaptive?`${pct(m['policy/'+name+'_entropy_ratio'])} / ${entropyPercent(m['policy/'+(name==='opening'?'opening_entropy':'entropy')+'_ratio_ema'])}`:pct(m['policy/'+name+'_entropy_ratio']);
  const hint=adaptive?'阶段 EMA 为训练记录的指数移动平均。目标通过调节熵奖励系数影响探索，实测熵不会立即等于目标；棋力仍以完整对局评测为准。':'开局和后续阶段使用同一固定系数；实测熵变化不会调整系数。棋力仍以完整对局评测为准。';

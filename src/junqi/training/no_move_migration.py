@@ -24,6 +24,7 @@ def reconcile_no_move_rule(payload, *, adopt=False):
     changes, terminal_games, games = [], [], 0
     for rank, raw in enumerate(pools):
         pool = BaseGamePool(raw["mode"], pool_size=raw["pool_size"], max_transitions=raw["max_transitions"],
+            history_window_stride=raw.get("history_window_stride", 1),
             max_game_plies=raw["max_game_plies"], no_capture_draw_plies=raw["no_capture_draw_plies"],
             dead_rules_enabled=raw["dead_rules_enabled"], centralized_critic=raw.get("centralized_critic", False), seed=0)
         retained = []

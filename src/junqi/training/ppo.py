@@ -512,6 +512,7 @@ def policy_ppo_loss(
     opening_entropy_coefficient: float | None = None,
     entropy_opening_plies: int = 0,
     policy_clip=None,
+    source_entropy_diagnostics: bool = False,
 ) -> LossOutput:
     if not samples:
         raise ValueError("PPO requires a nonempty batch")
@@ -548,6 +549,9 @@ def policy_ppo_loss(
     rows = [(sample.old_log_prob, sample.advantage,
              math.log(len(sample.state.legal_actions)) if len(sample.state.legal_actions) > 1 else 0.,
              float(len(sample.state.records) <= entropy_opening_plies)) for sample in samples]
+    if source_entropy_diagnostics:
+        rows = [(*row, math.log(len({source for source, _ in state.legal_actions})))
+                for row, state in zip(rows, states, strict=True)]
     metadata = _upload_targets(rows, current)
     old, advantage = metadata[:, 0], metadata[:, 1]
     log_ratio = (current - old).clamp(-20.0, 20.0)
@@ -561,7 +565,7 @@ def policy_ppo_loss(
     entropy_bonus, exploration_metrics = policy_entropy_bonus(
         states, entropies, coefficient=entropy_coefficient,
         opening_coefficient=opening_entropy_coefficient, opening_plies=entropy_opening_plies,
-        metadata=metadata[:, 2:])
+        metadata=metadata[:, 2:4])
     # H(joint) = H(source) + E_source[H(destination | source)]. The extra
     # marginal bonus increases source exploration without raising the
     # conditional destination coefficient. Neither entropy is normalized.
@@ -573,6 +577,17 @@ def policy_ppo_loss(
         "policy/source_entropy": source_entropy.detach(),
         "policy/conditional_destination_entropy": (entropy - source_entropy).detach(),
     })
+    if source_entropy_diagnostics:
+        # Per-state normalization, then sum/count across microbatches and ranks.
+        # One movable piece is forced source selection even with many destinations.
+        maximum = metadata[:, 4]
+        eligible = (maximum > 0).float()
+        normalized = source_entropies.float().detach() / torch.where(
+            maximum > 0, maximum, torch.ones_like(maximum)) * eligible
+        exploration_metrics.update({
+            "policy/source_entropy_ratio_mass": normalized.mean(),
+            "policy/source_entropy_fraction": eligible.mean(),
+        })
     entropy_bonus = entropy_bonus + source_bonus
     exploration_metrics["loss/policy_entropy"] = -entropy_bonus.detach()
     loss = policy_loss - entropy_bonus

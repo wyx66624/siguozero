@@ -77,6 +77,41 @@ class LearnerGraphTests(unittest.TestCase):
         self.assertFalse(graph.host)
         self.assertEqual(len(samples),3)
 
+    def test_expanded_actor_graph_preserves_more_than_32_histories(self):
+        model = GamePolicyTransformer(ModelConfig.tiny())
+        reference = copy.deepcopy(model)
+        seed = self.batch()
+        samples = []
+        for i in range(40):
+            sample = seed[i % len(seed)]
+            state = replace(sample.state, records=ArrayHistory(sample.state.mode,
+                list(sample.state.records), 16, (100 + i, 0)).view())
+            samples.append(replace(sample, state=state))
+        graph = self.graph(model, False)
+        graph.TOKENS, graph.SEQUENCES, graph.SAMPLES = 256, 64, 64
+        graph.ACTIONS, graph.SOURCES = 16384, 2048
+        contexts = torch.randn(64, model.config.temporal_dim)
+        graph.callable = lambda *args: contexts
+        self.assertTrue(graph.stage(model, samples, clip=.2, coefficient=.01,
+                                    opening_coefficient=None, opening_plies=16))
+        self.assertEqual(int(graph.device['targets'][:, 4].sum()), 40)
+        self.assertEqual(int(graph.device['cu'][-1]), 256)
+        lengths = graph.device['cu'].diff()
+        self.assertTrue(bool((lengths > 0).all()))
+        self.assertLessEqual(int(lengths.max()), model.config.max_sequence_tokens)
+        loss, _ = graph._loss(model)
+        features = PolicyFeatures(contexts[:40], torch.ones(40,129,dtype=torch.bool))
+        with patch.object(reference, '_encode_full', return_value=features):
+            expected = policy_ppo_loss(reference, samples, clip_epsilon=.2,
+                entropy_coefficient=.01, sequence_training=True, defer_metrics=True).loss
+        torch.testing.assert_close(loss, expected, rtol=2e-6, atol=2e-7)
+        loss.backward()
+        expected.backward()
+        for actual, wanted in zip(model.parameters(), reference.parameters(), strict=True):
+            self.assertEqual(actual.grad is None, wanted.grad is None)
+            if wanted.grad is not None:
+                torch.testing.assert_close(actual.grad, wanted.grad, rtol=2e-5, atol=3e-7)
+
     def test_staging_waits_before_reusing_pinned_host_targets(self):
         model = GamePolicyTransformer(ModelConfig.tiny())
         graph = self.graph(model, False)

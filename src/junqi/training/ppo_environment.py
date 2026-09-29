@@ -23,7 +23,7 @@ import numpy as np
 from ..game import GameConfig, JunqiGame
 from .packed_observation import observation_rows
 from .futile_attack import step_with_evidence
-from .tactical_rewards import bomb_event, known_nonflag_hq_entry
+from .tactical_rewards import bomb_event, known_nonflag_hq_entry, flag_defense_context, flag_defense_event
 
 
 class EnvironmentState(NamedTuple):
@@ -49,6 +49,7 @@ class EnvironmentStep(NamedTuple):
     bombed_kind: str | None = None
     tactical: dict | None = None
     known_nonflag_hq: bool = False
+    flag_defense: str | None = None
 
 
 def environment_state(game):
@@ -56,7 +57,7 @@ def environment_state(game):
 
 
 def _advance(index, game, action, mode, *, track_futile_attacks=False, centralized_critic=False,
-             tactical_logging=False, track_known_nonflag_hq=False):
+             tactical_logging=False, track_known_nonflag_hq=False, track_flag_defense=False):
     player = game.current_player
     if player is None:
         raise RuntimeError('terminal game remained in PPO environment')
@@ -68,7 +69,10 @@ def _advance(index, game, action, mode, *, track_futile_attacks=False, centraliz
         tactical = public_tactical_event(game, action)
         tactical["diagnostic_seconds"] = time.perf_counter() - started
     nonflag_hq = track_known_nonflag_hq and known_nonflag_hq_entry(game, action)
+    defense_context = flag_defense_context(game) if track_flag_defense else None
     result, futile_attack = step_with_evidence(game, action, enabled=track_futile_attacks)
+    defense = (flag_defense_event(game, player, action, result, defense_context)
+               if defense_context is not None else None)
     rows = observation_rows(game, mode)
     terminal = game.is_terminal
     rewards = tuple(game.rewards()) if terminal else ()
@@ -84,7 +88,7 @@ def _advance(index, game, action, mode, *, track_futile_attacks=False, centraliz
                            rewards[player] if terminal else 0., rewards,
                            1 if terminal or game.team_of(game.current_player) == team else -1,
                            result.flag_captured_owner, futile_attack, centralized_rows,
-                           bomb_owner, bombed_kind, tactical, nonflag_hq)
+                           bomb_owner, bombed_kind, tactical, nonflag_hq, defense)
 
 
 @lru_cache(maxsize=2)
@@ -149,6 +153,7 @@ def _worker():
     centralized_critic = False
     tactical_indices = frozenset()
     track_known_nonflag_hq = False
+    track_flag_defense = False
     try:
         while True:
             command, payload = _receive(sys.stdin.buffer)
@@ -159,6 +164,7 @@ def _worker():
                 centralized_critic = payload[3] if len(payload) >= 4 else False
                 tactical_indices = frozenset(payload[4]) if len(payload) >= 5 else frozenset()
                 track_known_nonflag_hq = payload[5] if len(payload) >= 6 else False
+                track_flag_defense = payload[6] if len(payload) >= 7 else False
                 games = dict(replacements)
                 value = [(index, environment_state(game)) for index, game in games.items()]
             elif command == 'step':
@@ -169,6 +175,7 @@ def _worker():
                                    track_futile_attacks=track_futile_attacks,
                                    centralized_critic=centralized_critic,
                                    track_known_nonflag_hq=track_known_nonflag_hq,
+                                   track_flag_defense=track_flag_defense,
                                    tactical_logging=index in tactical_indices) for index, action in actions],
                          time.perf_counter() - started)
             elif command == 'snapshot':
@@ -227,7 +234,7 @@ class ParallelPPOEnvironment:
         return value
 
     def begin(self, pool, *, track_futile_attacks=False, centralized_critic=False, tactical_indices=(),
-              track_known_nonflag_hq=False):
+              track_known_nonflag_hq=False, track_flag_defense=False):
         if self.active_workers:
             raise RuntimeError('cannot replace a PPO pool during an outstanding step')
         self._start(len(pool.slots))
@@ -236,9 +243,11 @@ class ParallelPPOEnvironment:
         for worker, process in enumerate(self.processes):
             games = [(i, slot.game) for i, slot in enumerate(pool.slots) if i % len(self.processes) == worker]
             payload = (pool.mode, games, track_futile_attacks)
-            if centralized_critic or tactical_indices or track_known_nonflag_hq:
+            if centralized_critic or tactical_indices or track_known_nonflag_hq or track_flag_defense:
                 payload += (centralized_critic, tuple(tactical_indices))
-            if track_known_nonflag_hq:
+            if track_known_nonflag_hq or track_flag_defense:
+                payload += (track_known_nonflag_hq,)
+            if track_flag_defense:
                 payload += (True,)
             _send(process.stdin, ('initialize', payload))
         for worker in range(len(self.processes)):

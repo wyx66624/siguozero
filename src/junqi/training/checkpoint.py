@@ -20,6 +20,7 @@ from .accelerator import (
 
 
 from .checkpoint_format import (ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION, CHECKPOINT_FORMAT_VERSION,
+                                TWO_PLAYER_NO_PASS_CHECKPOINT_FORMAT_VERSION,
                                 CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION,
                                 SUPPORTED_CHECKPOINT_FORMAT_VERSIONS, checkpoint_format_for_model)
 
@@ -28,11 +29,14 @@ def require_current_checkpoint(payload: dict[str, Any]) -> None:
     if payload.get("format_version") not in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS:
         raise ValueError(
             f"unsupported checkpoint format: {payload.get('format_version')!r}; "
-            "exclusive-slot inventory multihot checkpoint architectures require version 15, 16 or 17. "
+            "exclusive-slot inventory multihot checkpoint architectures require version 15, 16, 17 or 18. "
             "Use a new run directory; old board/action encoder weights are incompatible."
         )
     version = payload.get("format_version")
     model = payload.get("config", {}).get("model", {})
+    if version == TWO_PLAYER_NO_PASS_CHECKPOINT_FORMAT_VERSION and (
+            model.get("board_point_capacity") != 60 or payload.get("mode") != "two_player"):
+        raise ValueError("version 18 requires 60-point two-player board inputs")
     architecture = checkpoint_format_for_model(model)
     if version != architecture:
         raise ValueError("checkpoint version does not match board/action encoding; use a new run directory")
@@ -41,10 +45,12 @@ def require_current_checkpoint(payload: dict[str, Any]) -> None:
             weights = payload.get(name) or {}
             action = weights.get("action_encoder.projection.weight")
             expected_action = (14 if version == CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION else
-                               10 if version == ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION else 6)
+                               10 if version in (ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION,
+                                                 TWO_PLAYER_NO_PASS_CHECKPOINT_FORMAT_VERSION) else 6)
             if action is not None and (action.ndim != 2 or action.shape[1] != expected_action):
                 raise ValueError(f"version {version} checkpoint requires {expected_action} action inputs")
-            if version in (ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION, CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION) and any(key in weights for key in (
+            if version in (ACTION_CONTEXT_CHECKPOINT_FORMAT_VERSION, CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION,
+                           TWO_PLAYER_NO_PASS_CHECKPOINT_FORMAT_VERSION) and any(key in weights for key in (
                     "no_interaction_embedding.weight", "active_embedding.weight", "revealed_embedding.weight")):
                 raise ValueError("joint action checkpoint must not contain separate countdown/alive/revealed embeddings")
             board = weights.get("board_encoder.projection.weight")
@@ -54,7 +60,8 @@ def require_current_checkpoint(payload: dict[str, Any]) -> None:
                     raise ValueError("checkpoint board point capacity must be 60 or 129")
                 if points == 60 and payload.get("mode") != "two_player":
                     raise ValueError("60-point checkpoints require two-player mode")
-                expected = points * 26 + 3 + (0 if version == CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION else 75 + 4)
+                expected = points * 26 + 3 + (0 if version in (CANDIDATE_CONTEXT_CHECKPOINT_FORMAT_VERSION,
+                                                            TWO_PLAYER_NO_PASS_CHECKPOINT_FORMAT_VERSION) else 75 + 4)
                 if board.ndim != 2 or board.shape[1] != expected:
                     raise ValueError(f"inventory multihot checkpoint requires {expected} board inputs")
     if version in SUPPORTED_CHECKPOINT_FORMAT_VERSIONS:

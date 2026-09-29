@@ -136,6 +136,12 @@ class HistoricalOpponents:
         return result
 
     def _compatible_contract(self, saved, progress):
+        # v17 two-player snapshots remain immutable. Their four pass columns
+        # are projected away on load, so they can stay in the v18 library.
+        if (isinstance(saved, dict) and saved.get("mode") == "two_player"
+                and saved.get("checkpoint_format") == 17
+                and self.contract().get("checkpoint_format") == 18):
+            saved = dict(saved, checkpoint_format=18)
         if saved == self.contract():
             return True
         # The current run can replace the old stage mixture before mixed games
@@ -461,6 +467,9 @@ class HistoricalOpponents:
                     raise ValueError("frozen historical snapshot hash changed")
                 self._verified.add(entry["sha256"])
             payload = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
+            if checkpoint_format_for_model(self.settings.model) == 18:
+                from .no_pass_features import remove_two_player_pass_inputs
+                remove_two_player_pass_inputs(payload)
             if (payload["mode"] != self.settings.mode.value or payload["format_version"] != checkpoint_format_for_model(self.settings.model)
                     or payload["config"]["no_capture_draw_plies"] != self.settings.no_capture_draw_plies):
                 raise ValueError("historical opponent checkpoint contract mismatch")

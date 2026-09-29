@@ -27,7 +27,7 @@ def one_cpu_thread():
     torch.set_num_threads(1)
 
 
-@pytest.mark.parametrize("mode", list(TrainingMode))
+@pytest.mark.parametrize("mode", [m for m in TrainingMode if m is not TrainingMode.TWO_PLAYER])
 def test_four_opportunities_are_independent_noops_and_then_hard_masked(mode):
     game = new_game(mode, seed=29)
     before = dict(game.pieces)
@@ -73,7 +73,7 @@ def test_four_opportunities_are_independent_noops_and_then_hard_masked(mode):
     assert cloned.state_key() == key and cloned._passes_remaining is not game._passes_remaining
 
 
-@pytest.mark.parametrize("mode", list(TrainingMode))
+@pytest.mark.parametrize("mode", [m for m in TrainingMode if m is not TrainingMode.TWO_PLAYER])
 @pytest.mark.parametrize("dead", [True])
 def test_pass_inputs_match_workers_array_history_and_cached_policy(mode, dead):
     game = new_game(mode, seed=32, dead_rules_enabled=dead)

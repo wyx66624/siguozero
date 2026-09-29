@@ -37,7 +37,7 @@ class PackedLearnerGraph:
     SOURCES = 16384
 
     def __init__(self, model, *, critic, amp_dtype, tokens=4096, sources=16384, pool=None,
-                 value_samples=None, policy_samples=None, gradient_cache=None):
+                 value_samples=None, policy_samples=None, gradient_cache=None, sequences=32):
         # MAPPO supplies two team or four player values per transition. The
         # gathered value rows grow; the packed temporal-token budget stays.
         self.SAMPLES = 1024 if critic and not hasattr(model, 'draw_value_head') else 512
@@ -50,6 +50,9 @@ class PackedLearnerGraph:
                 raise ValueError("invalid policy graph sample capacity")
             self.SAMPLES = policy_samples
         self.TOKENS = tokens
+        if type(sequences) is not int or sequences < 2:
+            raise ValueError('learner graph requires at least two sequence slots')
+        self.SEQUENCES = sequences
         self.SOURCES = sources
         self.pool = pool
         self.critic, self.amp_dtype = critic, amp_dtype
@@ -83,7 +86,7 @@ class PackedLearnerGraph:
         return self.host[name].numpy()
 
     def stage(self, model, samples, *, clip, coefficient, opening_coefficient, opening_plies,
-              action_metadata=None, policy_clip=None, source_coefficient=0.0):
+              action_metadata=None, policy_clip=None, source_coefficient=0.0, history_groups=None):
         n = len(samples)
         if not 0 < n <= self.SAMPLES or model.config.max_sequence_tokens < self.TOKENS // self.SEQUENCES:
             return False
@@ -95,7 +98,7 @@ class PackedLearnerGraph:
             raise ValueError('a scalar MAPPO critic cannot receive auxiliary draw targets')
         if any(not hasattr(s.records, 'copy_rows') for s in states):
             return False
-        groups = history_prefix_groups(states)
+        groups = history_prefix_groups(states) if history_groups is None else history_groups
         lengths = np.asarray([len(states[g[0]].records) for g in groups], dtype=np.int64)
         total = int(lengths.sum())
         dummy = self.SEQUENCES - len(groups)

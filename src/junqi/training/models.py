@@ -114,6 +114,8 @@ class ModelConfig:
     layout_heads: int = 8
     layout_ffn_dim: int = 1024
     max_transitions: int = 1000
+    position_embedding_capacity: int | None = None
+    history_window_stride: int = 1
     dropout: float = 0.0
     board_chunk_size: int = 256
     inference_board_cache_entries: int = 65536
@@ -139,7 +141,10 @@ class ModelConfig:
             raise ValueError("unsupported action encoder")
         if self.board_encoder_type not in (INVENTORY_ENCODER_TYPE, INVENTORY_ONLY_ENCODER_TYPE):
             raise ValueError("unsupported board encoder: only inventory multihot encoding is supported")
-        if ((self.board_encoder_type == INVENTORY_ONLY_ENCODER_TYPE)
+        no_pass_two_player = (self.board_encoder_type == INVENTORY_ONLY_ENCODER_TYPE
+                             and self.board_point_capacity == 60
+                             and self.action_encoder_type == CONTEXT_ACTION_ENCODER_TYPE)
+        if (not no_pass_two_player and (self.board_encoder_type == INVENTORY_ONLY_ENCODER_TYPE)
                 != (self.action_encoder_type == PASS_CONTEXT_ACTION_ENCODER_TYPE)):
             raise ValueError("candidate-only board encoding requires the action encoder with pass counts")
         if not self.dead_rules_enabled:
@@ -162,6 +167,12 @@ class ModelConfig:
                 raise ValueError(f"{label} dimension must be divisible by heads")
         if self.max_transitions < 1:
             raise ValueError("max_transitions must be positive")
+        if type(self.history_window_stride) is not int or not 1 <= self.history_window_stride <= self.max_transitions:
+            raise ValueError("history window stride must be within the history window")
+        if self.position_embedding_capacity is not None and (
+                type(self.position_embedding_capacity) is not int
+                or self.position_embedding_capacity < self.max_sequence_tokens):
+            raise ValueError("position embedding capacity must cover the context window")
         if self.inference_board_cache_entries < 0:
             raise ValueError("inference board cache size cannot be negative")
         if self.inference_temporal_cache_entries < 0:
@@ -688,7 +699,7 @@ class GamePolicyTransformer(nn.Module):
         self.token_fusion = (SwiGLU(temporal_dim, self.config.token_fusion_hidden_dim, self.config.dropout)
                              if self.config.token_fusion_hidden_dim else nn.Identity())
         self.position_embedding = nn.Embedding(
-            self.config.max_sequence_tokens, temporal_dim
+            self.config.position_embedding_capacity or self.config.max_sequence_tokens, temporal_dim
         )
         self.mode_embedding = nn.Embedding(3, temporal_dim)
         if not self.config.joint_action_context:

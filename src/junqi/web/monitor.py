@@ -305,6 +305,7 @@ class Monitor:
                 "training_plan": {key: settings.get(key) for key in (
                     "ppo_clip_mode", "draw_reward", "flag_capture_reward", "known_nonflag_hq_penalty",
                     "bomb_commander_reward", "bomb_army_commander_reward", "bomb_division_commander_reward",
+                    "flag_defense_missed_penalty", "flag_defense_success_reward",
                     "futile_attack_penalty", "historical_enabled", "historical_start_environment_plies",
                     "historical_start_fraction", "historical_training_fraction", "historical_sampling")},
                 "update": update,

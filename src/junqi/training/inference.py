@@ -55,6 +55,8 @@ class InferenceEngine:
             Path(checkpoint), map_location="cpu", mmap=True, weights_only=False
         )
         require_current_checkpoint(payload)
+        from .no_pass_features import remove_two_player_pass_inputs
+        remove_two_player_pass_inputs(payload)
         checkpoint_dead_rules = payload.get("dead_rules_enabled")
         if not isinstance(checkpoint_dead_rules, bool):
             raise ValueError("checkpoint has no valid dead-rule variant marker")
@@ -130,6 +132,7 @@ class InferenceEngine:
             game,
             self.mode,
             max_transitions=self.policy.config.max_transitions,
+            history_window_stride=self.policy.config.history_window_stride,
         )
         return game, history
 

@@ -78,6 +78,9 @@ class RolloutMetrics:
     futile_attack_reward_abs_sum: float = 0.0
     known_nonflag_hq_entries: int = 0
     known_nonflag_hq_reward_sum: float = 0.0
+    flag_defense_missed: int = 0
+    flag_defense_successes: int = 0
+    flag_defense_reward_sum: float = 0.0
     bombed_commanders: int = 0
     bombed_army_commanders: int = 0
     bombed_division_commanders: int = 0
@@ -130,6 +133,20 @@ class RolloutMetrics:
         self.known_nonflag_hq_reward_sum -= coefficient
         return -coefficient
 
+    def record_flag_defense(self, event, missed_penalty, success_reward, *, learnable=True):
+        if not learnable or event is None:
+            return 0.0
+        if event == "success":
+            self.flag_defense_successes += 1
+            reward = success_reward
+        elif event == "missed":
+            self.flag_defense_missed += 1
+            reward = -missed_penalty
+        else:
+            raise ValueError(f"invalid flag defense event: {event}")
+        self.flag_defense_reward_sum += reward
+        return reward
+
     def as_dict(self) -> dict[str, float | int]:
         return {
             "rollout/policy_samples": self.policy_samples,
@@ -152,6 +169,9 @@ class RolloutMetrics:
             "rollout/futile_attack_reward_abs_sum": self.futile_attack_reward_abs_sum,
             "rollout/known_nonflag_hq_entries": self.known_nonflag_hq_entries,
             "rollout/known_nonflag_hq_reward_sum": self.known_nonflag_hq_reward_sum,
+            "rollout/flag_defense_missed": self.flag_defense_missed,
+            "rollout/flag_defense_successes": self.flag_defense_successes,
+            "rollout/flag_defense_reward_sum": self.flag_defense_reward_sum,
             "rollout/bombed_commanders": self.bombed_commanders,
             "rollout/bombed_army_commanders": self.bombed_army_commanders,
             "rollout/bombed_division_commanders": self.bombed_division_commanders,
@@ -356,6 +376,7 @@ class BaseGamePool:
         layout_prefetch_games: int = 1,
         no_capture_draw_plies: int = 70,
         centralized_critic: bool = False,
+        history_window_stride: int = 1,
     ) -> None:
         if pool_size <= 0:
             raise ValueError("base game pool size must be positive")
@@ -365,6 +386,7 @@ class BaseGamePool:
         self.centralized_critic = centralized_critic
         self.pool_size = pool_size
         self.max_transitions = max_transitions
+        self.history_window_stride = history_window_stride
         self.max_game_plies = max_game_plies
         self.no_capture_draw_plies = no_capture_draw_plies
         if not isinstance(dead_rules_enabled, bool):
@@ -419,6 +441,7 @@ class BaseGamePool:
         )
         history = GameHistory.initialize(
             game, self.mode, max_transitions=self.max_transitions,
+            history_window_stride=self.history_window_stride,
         )
         scenario = None
         if self.historical is not None and self.historical.active:
@@ -427,7 +450,8 @@ class BaseGamePool:
         critic_history = None
         if self.centralized_critic:
             from .mappo_encoding import CentralizedHistory
-            critic_history = CentralizedHistory.initialize(game, self.mode, max_transitions=self.max_transitions)
+            critic_history = CentralizedHistory.initialize(game, self.mode, max_transitions=self.max_transitions,
+                history_window_stride=self.history_window_stride)
         return BaseGameSlot(game, history, samples, behavior_version, opponent_id, learner_team,
                             teammate_id, learner_seat, scenario, critic_history)
 
@@ -452,6 +476,7 @@ class BaseGamePool:
             "dead_rules_enabled": self.dead_rules_enabled,
             "pool_size": self.pool_size,
             "max_transitions": self.max_transitions,
+            "history_window_stride": self.history_window_stride,
             "max_game_plies": self.max_game_plies,
             "no_capture_draw_plies": self.no_capture_draw_plies,
             "rng_state": self.rng.getstate(),
@@ -480,6 +505,8 @@ class BaseGamePool:
             raise ValueError("base-game-pool size changed across resume")
         if int(state["max_transitions"]) != self.max_transitions:
             raise ValueError("history window changed across resume")
+        if state.get("history_window_stride", 1) != self.history_window_stride:
+            raise ValueError("history stride changed across resume; use --shrink-context-window")
         if state["max_game_plies"] != self.max_game_plies:
             raise ValueError("maximum game plies changed across resume")
         if state.get("no_capture_draw_plies", 60) != self.no_capture_draw_plies:
@@ -576,6 +603,9 @@ class BaseGamePool:
             raise ValueError("checkpoint base-game slot unexpectedly terminal")
         restore_evidence(game, raw_game.get("futile_attack_evidence"))
         history = GameHistory.from_state_dict(state["history"])
+        if any(player.max_transitions != self.max_transitions
+               or player.history_window_stride != self.history_window_stride for player in history.players):
+            raise ValueError("player history window differs from pool")
         if game._inventory is None:
             raise ValueError("inventory knowledge/history does not match the pool")
         if raw_game["inventory_knowledge"].get("version") != 3:
@@ -629,7 +659,8 @@ class BaseGamePool:
                     raise ValueError("critic piece slots do not match the saved global history")
             if (global_history.mode is not self.mode
                     or any(a.dead_rules_enabled != b.dead_rules_enabled
-                           or a.max_transitions != b.max_transitions or len(a.records) != len(b.records)
+                           or a.max_transitions != b.max_transitions
+                           or a.history_window_stride != b.history_window_stride or len(a.records) != len(b.records)
                            for a, b in zip(history.players, global_history.players, strict=True))):
                 raise ValueError("actor and centralized histories are inconsistent")
         elif state.get("critic_history") is not None:

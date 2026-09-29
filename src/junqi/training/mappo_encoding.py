@@ -71,7 +71,7 @@ class CentralizedHistory:
         self.history = history
 
     @classmethod
-    def initialize(cls, game, mode, *, max_transitions=1000):
+    def initialize(cls, game, mode, *, max_transitions=1000, history_window_stride=1):
         mode = normalize_mode(mode)
         rows = centralized_observation_rows(game, mode)
         width = observation_width(mode, game.config.dead_rules_enabled)
@@ -80,6 +80,7 @@ class CentralizedHistory:
             mode, HistoryArrayView(mode, game.config.dead_rules_enabled, (0, seat), 0,
                                    (rows[seat:seat + 1],))[0],
             max_transitions=max_transitions,
+            history_window_stride=history_window_stride,
         ) for seat in range(game.config.player_count))
         return cls(GameHistory(mode, players))
 

@@ -82,6 +82,9 @@ class HistoricalWeightCache:
             self._trim_locked()
 
     def _prepare(self, payload):
+        if checkpoint_format_for_model(self.settings.model) == 18:
+            from .no_pass_features import remove_two_player_pass_inputs
+            remove_two_player_pass_inputs(payload)
         if (payload.get("mode") != self.settings.mode.value
                 or payload.get("format_version") != checkpoint_format_for_model(self.settings.model)
                 or payload.get("dead_rules_enabled") != self.settings.dead_rules_enabled

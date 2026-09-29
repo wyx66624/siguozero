@@ -49,6 +49,8 @@ class AdaptiveEntropyCoefficient:
     adaptation_rate: float
     ema_decay: float
     enabled: bool = True
+    deadband: float = 0.0
+    max_relative_change: float | None = None
     coefficient: float = field(init=False)
     entropy_ema: float | None = field(default=None, init=False)
     updates: int = field(default=0, init=False)
@@ -67,8 +69,16 @@ class AdaptiveEntropyCoefficient:
                             self.ema_decay * self.entropy_ema + (1 - self.ema_decay) * ratio)
         # Positive target error increases the entropy reward. Log-space updates
         # preserve positivity; configured bounds limit both feedback directions.
+        error = self.target_ratio - self.entropy_ema
+        # Include both endpoints despite floating-point subtraction at the edges.
+        if abs(error) <= self.deadband + 1e-12:
+            error = 0.0
+        log_step = self.adaptation_rate * error
+        if self.max_relative_change is not None:
+            log_step = min(math.log1p(self.max_relative_change),
+                           max(math.log1p(-self.max_relative_change), log_step))
         self.coefficient = min(self.maximum, max(self.minimum,
-            self.coefficient * math.exp(self.adaptation_rate * (self.target_ratio - self.entropy_ema))))
+            self.coefficient * math.exp(log_step)))
         self.updates += 1
 
     def state_dict(self) -> dict[str, Any]:

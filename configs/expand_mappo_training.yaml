@@ -23,6 +23,7 @@ rules:
   gamma: 1.0
   no_capture_draw_plies: 70
   max_passes_per_player: 4
+  two_player_max_passes_per_player: 0
 board_piece_codes:
   empty: 0
   unknown_previous_player: 1
@@ -143,6 +144,9 @@ models:
   two_player:
     <<: *expanded_policy
     board_point_capacity: 60
+    # Two-player has no pass action or remaining-pass input dimensions.
+    action_encoder_type: coordinates_player_countdown_active_linear
+    action_input_dim: 10
     # Same inventory candidates/owner and mode encoding on the two-player board.
     board_input_dim: 1563  # 60 * 26 + 3
   layout:
@@ -253,6 +257,14 @@ history:
   max_previous_decisions: 1000
   max_sequence_tokens: 1001
   position_capacity: 1024
+  mode_overrides:
+    two_player:
+      max_previous_decisions: 300
+      max_sequence_tokens: 301
+      window_shift_steps: 32
+      # Keep trained position rows and Adam moments compatible with 1000-step runs.
+      # Attention and KV storage still use only max_sequence_tokens above.
+      position_embedding_capacity: 1001
   board_snapshot_after_every_action: true
   store_raw_board_integer_chain: true
   recompute_board_embedding_in_learner: true
@@ -282,12 +294,11 @@ ppo:
   mode_overrides:
     two_player:
       algorithm: mappo
-      # Two-player training uses terminal outcomes only: +1 / -1 / -0.15.
+      # Same bomb rewards and decay as four-player; fixed personal flag defense.
       flag_capture_reward: 0.0
       known_nonflag_hq_penalty: 0.0
-      bomb_commander_reward: 0.0
-      bomb_army_commander_reward: 0.0
-      bomb_division_commander_reward: 0.0
+      flag_defense_missed_penalty: 0.1
+      flag_defense_success_reward: 0.05
       futile_attack_penalty: 0.0
   critic_layers: 16
   discount: 1.0
@@ -448,6 +459,24 @@ learner:
         target_schedule: []
       two_player:
         <<: *expanded_entropy
+        # Shared beta: beta H(joint) + beta H(source)
+        # = 2 beta H(source) + beta E_source[H(destination | source)].
+        # Feedback: mean H(source)/ln(legal sources) from the final policy probe,
+        # excluding states with only one legal source. Layout entropy stays fixed.
+        initial: 0.0075
+        source_coefficient: 0.0075
+        adaptive_to_target_entropy: true
+        control_mode: joint_source
+        feedback: source
+        minimum: 0.005
+        maximum: 0.020
+        opening_maximum: 0.020
+        target_ratio: 0.50
+        opening_target_ratio: 0.50
+        deadband: 0.03
+        adaptation_rate: 0.05
+        ema_decay: 0.95
+        max_relative_change: 0.02
   kl:
     initial_coefficient: 0.02
     target_per_action: 0.02

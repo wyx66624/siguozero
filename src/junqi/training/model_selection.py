@@ -427,6 +427,7 @@ class ModelSelection:
                    layout: PieceConditionedLayoutPointerDecoder, *,
                    update: int, cumulative: Mapping[str, int],
                    adopt_current_draw_rules: bool = False, adopt_pass_rule: bool = False,
+                   adopt_two_player_no_pass: bool = False,
                    adopt_champion_evaluation: bool = False) -> None:
         if not self.settings.arena_enabled:
             return
@@ -447,6 +448,29 @@ class ModelSelection:
                     if self.state["last_evaluated_update"] > update:
                         raise ValueError("model selection is newer than the training checkpoint")
                     version = 2 if self.environment_schedule else 1
+                    if (contract.get("mode") == "two_player" and
+                            contract.get("max_passes_per_player") == 4 and adopt_two_player_no_pass):
+                        desired = self._contract()
+                        if dict(contract, max_passes_per_player=0) != desired:
+                            raise ValueError("no-pass migration requires an otherwise unchanged evaluation protocol")
+                        if self.due_milestone(update=update, cumulative=cumulative) is not None:
+                            raise ValueError("finish the pending evaluation before adopting two-player no-pass")
+                        self._repair_views()
+                        slots = len(self.state.get("evaluation_seed_milestones", self.milestones))
+                        groups = max(contract["games"], contract.get("historical_eval_total_games", 0),
+                                     self.settings.historical_eval_games) // 2
+                        old_base = self.state.get("schedule_seed_base", contract["seed"])
+                        new_base = old_base + (slots + 1) * 4 * groups
+                        if new_base + (slots + 1) * 4 * groups + 8 * 1_000_003 >= 2**63:
+                            raise ValueError("no-pass evaluation seed range exceeds int64")
+                        self.state["two_player_no_pass_migration"] = dict(
+                            previous_contract=dict(contract), update=update,
+                            environment_plies=cumulative.get("environment_plies", 0),
+                            previous_rounds=list(self.state["rounds"]),
+                            previous_seed_base=old_base, next_seed_base=new_base)
+                        self.state["schedule_seed_base"] = new_base
+                        self.state["statistical_family"] = "two_player_no_pass"
+                        contract = desired
                     if contract.get("max_passes_per_player", 0) != 4 and adopt_pass_rule:
                         if self.state.get("rounds") or contract.get("max_passes_per_player", 0) != 0:
                             raise ValueError("pass-rule adoption requires an unevaluated no-pass protocol")

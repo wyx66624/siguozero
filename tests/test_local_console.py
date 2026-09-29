@@ -292,14 +292,24 @@ class CpuWorkerTests(unittest.TestCase):
                         worker.request({"op":"move", "action":[1,1], "expected_ply":before})
                     unchanged = worker.request({"op":"state"})
                     self.assertEqual(unchanged["ply"], before)
-                    moved = worker.request({"op":"move", "action":0, "expected_ply":before})
+                    if mode == "two_player":
+                        self.assertEqual(state["passes_remaining"], [0, 0])
+                        self.assertEqual(state["max_passes_per_player"], 0)
+                        with self.assertRaises(ValueError):
+                            worker.request({"op":"move", "action":0, "expected_ply":before})
+                    moved = worker.request({"op":"move", "action":state["legal_actions"][0] if mode == "two_player" else 0,
+                                            "expected_ply":before})
                     self.assertGreater(moved["ply"], before)
                     self.assertTrue(moved["your_turn"] or moved["result"])
                     frames = moved["frames"]
-                    self.assertEqual(frames[0]["history"][-1]["action"], [0, 0])
-                    self.assertEqual(frames[0]["history"][-1]["combat"], "pass")
-                    self.assertEqual(frames[0]["pieces"], state["pieces"])
-                    self.assertEqual(frames[0]["passes_remaining"][0], 3)
+                    if mode == "two_player":
+                        self.assertNotEqual(frames[0]["history"][-1]["action"], [0, 0])
+                        self.assertEqual(frames[0]["passes_remaining"][0], 0)
+                    else:
+                        self.assertEqual(frames[0]["history"][-1]["action"], [0, 0])
+                        self.assertEqual(frames[0]["history"][-1]["combat"], "pass")
+                        self.assertEqual(frames[0]["pieces"], state["pieces"])
+                        self.assertEqual(frames[0]["passes_remaining"][0], 3)
                     self.assertEqual([frame["ply"] for frame in frames],
                                      list(range(before + 1, moved["ply"] + 1)))
                     self.assertEqual(frames[0]["history"][-1]["actor"], 0)

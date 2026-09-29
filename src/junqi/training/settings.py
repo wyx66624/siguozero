@@ -88,6 +88,8 @@ class TrainingSettings:
     ppo_pipeline_groups: int = 1
     ppo_fused_optimizer: bool = False
     ppo_learner_cuda_graphs: bool = False
+    ppo_actor_graph_tokens: int = 4096
+    ppo_actor_graph_sequences: int = 32
     ppo_cuda_memory_fraction: float | None = None
     ppo_adaptive_clip: bool = False
     ppo_clip_mode: str = "scheduled"
@@ -123,11 +125,13 @@ class TrainingSettings:
     checkpoint_policy: str = "periodic"
     inference_snapshot_every_updates: int = 0
     no_capture_draw_plies: int = 70
-    max_passes_per_player: int = 4
+    max_passes_per_player: int | None = None
     checkpoint_interval_environment_plies: int | None = None
     draw_reward: float = DEFAULT_DRAW_REWARD
     flag_capture_reward: float = 0.0
     known_nonflag_hq_penalty: float = 0.0
+    flag_defense_missed_penalty: float = 0.0
+    flag_defense_success_reward: float = 0.0
     bomb_commander_reward: float = 0.0
     bomb_army_commander_reward: float = 0.0
     bomb_division_commander_reward: float = 0.0
@@ -170,6 +174,10 @@ class TrainingSettings:
     entropy_adaptation_rate: float = 0.1
     entropy_ema_decay: float = 0.9
     entropy_opening_plies: int = 16
+    entropy_control_mode: str = "phase"
+    entropy_feedback: str = "joint"
+    entropy_deadband: float = 0.0
+    entropy_max_relative_change: float | None = None
     adaptive_learning_rate: bool = False
     maximum_learning_rate: float = 1.0e-4
     lr_increase_factor: float = 1.03
@@ -192,6 +200,11 @@ class TrainingSettings:
     early_stop_kl_threshold: float | None = None
     mappo_advantage_mode: str = "team_steps"
     mappo_reward_scope: str = "team"
+
+    def __post_init__(self) -> None:
+        if self.max_passes_per_player is None:
+            object.__setattr__(self, "max_passes_per_player",
+                               0 if self.mode == TrainingMode.TWO_PLAYER else 4)
 
     @classmethod
     def from_yaml(
@@ -227,6 +240,15 @@ class TrainingSettings:
             raise ValueError("entropy mode_overrides must map training modes to settings")
         entropy = {**entropy, **entropy_overrides.get(normalized.value, {})}
         runtime = data.get("runtime", {})
+        history = data["history"]
+        history_overrides = history.get("mode_overrides", {})
+        if (not isinstance(history_overrides, dict) or any(
+                key not in {mode.value for mode in TrainingMode} or not isinstance(value, dict)
+                for key, value in history_overrides.items())):
+            raise ValueError("history mode_overrides must map training modes to settings")
+        history = {**history, **history_overrides.get(normalized.value, {})}
+        if history["max_sequence_tokens"] != history["max_previous_decisions"] + 1:
+            raise ValueError("history must pin one initial token before its decision window")
         ppo = data.get("ppo", {})
         # Legacy profiles retain their GRPO two-player default; the expanded
         # profile explicitly opts both board variants into the shared learner.
@@ -324,6 +346,13 @@ class TrainingSettings:
             if profile.get("board_encoder_type") in (
                     INVENTORY_ENCODER_TYPE, INVENTORY_ONLY_ENCODER_TYPE):
                 model = replace(model, board_dim=48, action_dim=16)
+        if not tiny:
+            model = replace(
+                model,
+                max_transitions=int(history["max_previous_decisions"]),
+                position_embedding_capacity=history.get("position_embedding_capacity"),
+                history_window_stride=history.get("window_shift_steps", 1),
+            )
         model = replace(
             model,
             inference_board_cache_entries=int(
@@ -352,7 +381,8 @@ class TrainingSettings:
             activation_checkpointing=ppo.get('activation_checkpointing', model.activation_checkpointing)
                 if algorithm in ("ppo", "mappo") else model.activation_checkpointing,
             paged_kv_length_bucket_tokens=int(
-                runtime.get("paged_kv_length_bucket_tokens", 1001)
+                min(runtime.get("paged_kv_length_bucket_tokens", 1001), model.max_sequence_tokens)
+                if not tiny else runtime.get("paged_kv_length_bucket_tokens", 1001)
             ),
         )
         profile_pool = runtime.get("base_game_pool_size", {})
@@ -404,6 +434,8 @@ class TrainingSettings:
             "historical_pinned_mib": historical.get("pinned_mib", 256),
             "ppo_fused_optimizer": ppo.get("fused_optimizer", False) if algorithm in ("ppo", "mappo") else False,
             "ppo_learner_cuda_graphs": ppo.get("learner_cuda_graphs", False) if algorithm in ("ppo", "mappo") else False,
+            "ppo_actor_graph_tokens": ppo.get("actor_graph_tokens", 4096),
+            "ppo_actor_graph_sequences": ppo.get("actor_graph_sequences", 32),
             "ppo_cuda_memory_fraction": ppo.get("cuda_memory_fraction") if algorithm in ("ppo", "mappo") else None,
             "ppo_adaptive_clip": adaptive_clip.get("enabled", False) if algorithm in ("ppo", "mappo") else False,
             "ppo_clip_mode": clip_mode,
@@ -432,10 +464,14 @@ class TrainingSettings:
             "arena_games": model_selection.get("games", 1000),
             "arena_max_plies": model_selection.get("max_plies"),
             "no_capture_draw_plies": data.get("rules", {}).get("no_capture_draw_plies", 70),
-            "max_passes_per_player": data.get("rules", {}).get("max_passes_per_player", 4),
+            "max_passes_per_player": (data.get("rules", {}).get("two_player_max_passes_per_player", 0)
+                                      if normalized is TrainingMode.TWO_PLAYER else
+                                      data.get("rules", {}).get("max_passes_per_player", 4)),
             "draw_reward": data.get("rules", {}).get("terminal_reward", {}).get("draw", DEFAULT_DRAW_REWARD),
             "flag_capture_reward": ppo.get("flag_capture_reward", 0.0) if algorithm in ("ppo", "mappo") else 0.0,
             "known_nonflag_hq_penalty": ppo.get("known_nonflag_hq_penalty", 0.0) if algorithm == "mappo" else 0.0,
+            "flag_defense_missed_penalty": ppo.get("flag_defense_missed_penalty", 0.0) if algorithm == "mappo" else 0.0,
+            "flag_defense_success_reward": ppo.get("flag_defense_success_reward", 0.0) if algorithm == "mappo" else 0.0,
             "bomb_commander_reward": ppo.get("bomb_commander_reward", 0.0) if algorithm == "mappo" else 0.0,
             "bomb_army_commander_reward": ppo.get("bomb_army_commander_reward", 0.0) if algorithm == "mappo" else 0.0,
             "bomb_division_commander_reward": ppo.get("bomb_division_commander_reward", 0.0) if algorithm == "mappo" else 0.0,
@@ -528,6 +564,10 @@ class TrainingSettings:
             "entropy_adaptation_rate": float(entropy.get("adaptation_rate", 0.1)),
             "entropy_ema_decay": float(entropy.get("ema_decay", 0.9)),
             "entropy_opening_plies": entropy.get("opening_plies", 16),
+            "entropy_control_mode": entropy.get("control_mode", "phase"),
+            "entropy_feedback": entropy.get("feedback", "joint"),
+            "entropy_deadband": entropy.get("deadband", 0.0),
+            "entropy_max_relative_change": entropy.get("max_relative_change"),
             "kl_coefficient": float(learner["kl"]["initial_coefficient"]),
             "target_kl": float(learner["kl"]["target_per_action"]),
             "early_stop_kl_multiple": float(
@@ -628,6 +668,8 @@ class TrainingSettings:
                     "historical_tactical_current": False,
                     "futile_attack_penalty": 0.0,
                     "known_nonflag_hq_penalty": 0.0,
+                    "flag_defense_missed_penalty": 0.0,
+                    "flag_defense_success_reward": 0.0,
                     "bomb_commander_reward": 0.0,
                     "bomb_army_commander_reward": 0.0,
                     "bomb_division_commander_reward": 0.0,
@@ -828,6 +870,25 @@ class TrainingSettings:
             raise ValueError("invalid adaptive entropy settings")
         if self.source_entropy_coefficient and self.algorithm not in ("ppo", "mappo"):
             raise ValueError("source entropy bonus requires PPO or MAPPO")
+        if (self.entropy_control_mode not in ("phase", "joint_source")
+                or type(self.entropy_deadband) not in (int, float)
+                or not math.isfinite(self.entropy_deadband) or not 0 <= self.entropy_deadband < 1):
+            raise ValueError("invalid entropy control mode or deadband")
+        change = self.entropy_max_relative_change
+        if (self.entropy_feedback not in ("joint", "source")
+                or self.entropy_feedback == "source" and self.entropy_control_mode != "joint_source"):
+            raise ValueError("source entropy feedback requires the shared joint_source controller")
+        if change is not None and (type(change) not in (int, float)
+                or not math.isfinite(change) or not 0 < change < 1):
+            raise ValueError("invalid entropy maximum relative change")
+        if self.entropy_control_mode == "joint_source" and (
+                not self.adaptive_entropy or self.algorithm not in ("ppo", "mappo")
+                or self.source_entropy_coefficient != self.entropy_coefficient
+                or self.entropy_opening_maximum not in (None, self.entropy_maximum)
+                or self.entropy_opening_target_ratio not in (None, self.entropy_target_ratio)
+                or self.entropy_target_schedule
+                or not self.entropy_deadband < min(self.entropy_target_ratio, 1 - self.entropy_target_ratio)):
+            raise ValueError("joint_source entropy requires shared bounds/target, equal initial bonuses and adaptive PPO")
         if self.layout_entropy_coefficient is not None and (
                 type(self.layout_entropy_coefficient) not in (int, float)
                 or not math.isfinite(self.layout_entropy_coefficient)
@@ -875,6 +936,13 @@ class TrainingSettings:
             raise ValueError("known_nonflag_hq_penalty must be finite and nonnegative")
         if self.known_nonflag_hq_penalty and self.algorithm != "mappo":
             raise ValueError("known_nonflag_hq_penalty requires MAPPO")
+        from .tactical_rewards import FLAG_DEFENSE_REWARD_FIELDS
+        for field in FLAG_DEFENSE_REWARD_FIELDS:
+            value = getattr(self, field)
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{field} must be finite and nonnegative")
+            if value and (self.algorithm != "mappo" or self.mode is not TrainingMode.TWO_PLAYER):
+                raise ValueError(f"{field} requires two-player MAPPO")
         from .tactical_rewards import BOMB_REWARD_FIELDS
         for field in BOMB_REWARD_FIELDS.values():
             value = getattr(self, field)
@@ -973,8 +1041,9 @@ class TrainingSettings:
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value <= 0):
                 raise ValueError(f"{name} must be a positive integer or None")
-        if type(self.max_passes_per_player) is not int or self.max_passes_per_player != 4:
-            raise ValueError("the current rules require exactly four passes per player")
+        expected_passes = 0 if self.mode is TrainingMode.TWO_PLAYER else 4
+        if type(self.max_passes_per_player) is not int or self.max_passes_per_player != expected_passes:
+            raise ValueError(f"{self.mode.value} requires {expected_passes} passes per player")
         if type(self.no_capture_draw_plies) is not int or not 1 <= self.no_capture_draw_plies <= 70:
             raise ValueError("no_capture_draw_plies must be an integer in [1, 70]")
         if not isinstance(self.learner_length_bucketing, bool):
@@ -987,6 +1056,10 @@ class TrainingSettings:
             raise ValueError("ppo_fused_optimizer must be a boolean")
         if type(self.ppo_learner_cuda_graphs) is not bool:
             raise ValueError("ppo_learner_cuda_graphs must be a boolean")
+        if type(self.ppo_actor_graph_tokens) is not int or self.ppo_actor_graph_tokens not in (4096, 6144, 8192, 10240, 12288, 16384):
+            raise ValueError("ppo_actor_graph_tokens must be a supported bounded token capacity")
+        if type(self.ppo_actor_graph_sequences) is not int or self.ppo_actor_graph_sequences not in (32, 64, 128):
+            raise ValueError("ppo_actor_graph_sequences must be 32, 64 or 128")
         if self.ppo_cuda_memory_fraction is not None and (
                 type(self.ppo_cuda_memory_fraction) not in (int, float)
                 or not math.isfinite(self.ppo_cuda_memory_fraction)

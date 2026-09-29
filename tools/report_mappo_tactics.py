@@ -23,7 +23,7 @@ from junqi.training.tactical_rewards import BOMB_REWARD_FIELDS
 
 
 def verify_replay(payload):
-    """Check legal moves, public inputs, all four rewards/targets and personal GAE."""
+    """Check legal moves, public inputs, all player rewards/targets and personal GAE."""
     objective = payload["objective"]
     if objective["advantage_mode"] != "player_decisions":
         raise ValueError("this verifier requires personal MAPPO advantages")
@@ -31,8 +31,10 @@ def verify_replay(payload):
     for saved in payload["games"]:
         initial = saved["initial_slot"]
         config = initial["game"]["config"]
+        players = config.player_count
         pool = BaseGamePool(payload["mode"], pool_size=1,
             max_transitions=initial["history"]["players"][0]["max_transitions"],
+            history_window_stride=initial["history"]["players"][0].get("history_window_stride", 1),
             max_game_plies=config.max_plies, dead_rules_enabled=config.dead_rules_enabled,
             no_capture_draw_plies=config.no_interaction_draw_plies, seed=0, centralized_critic=True)
         slot = pool._slot_from_state_dict(initial)
@@ -45,21 +47,29 @@ def verify_replay(payload):
             assert slot.game.current_player == actor, "actor mismatch"
             assert list(slot.game.legal_actions()) == record["legal_actions"], "legal moves mismatch"
             state = slot.history.state_for(slot.game)
-            values = tuple(slot.critic_history.value_state_for(p) for p in range(4))
+            values = tuple(slot.critic_history.value_state_for(p) for p in range(players))
             public = public_tactical_event(slot.game, action)
             assert public == {k: v for k, v in record["event"].items()
                               if k not in ("diagnostic_seconds", "referee_outcome")}, "public labels mismatch"
             row = _advance(0, slot.game, action, pool.mode,
                 centralized_critic=True, track_futile_attacks=objective["futile_attack_penalty"] > 0,
-                tactical_logging=True)
+                tactical_logging=True,
+                track_known_nonflag_hq=bool(objective.get("known_nonflag_hq_penalty", 0)),
+                track_flag_defense=bool(objective.get("flag_defense_missed_penalty", 0)
+                                       or objective.get("flag_defense_success_reward", 0)))
             np.testing.assert_array_equal(row.records, step["public_rows"])
             np.testing.assert_array_equal(row.centralized_records, step["critic_rows"])
             assert row.tactical["referee_outcome"] == record["event"]["referee_outcome"], "outcome mismatch"
             futile = -objective["futile_attack_penalty"] if row.futile_attack and record["learnable"] else 0.
-            rewards = player_step_rewards(row, player=actor, player_count=4,
+            rewards = player_step_rewards(row, player=actor, player_count=players,
                 draw_reward=objective["draw_reward"], flag_capture_reward=objective["flag_capture_reward"],
                 bomb_rewards={kind: objective[field] for kind, field in BOMB_REWARD_FIELDS.items()},
-                futile_reward=futile, reward_scope=objective["reward_scope"])
+                futile_reward=futile, reward_scope=objective["reward_scope"],
+                known_nonflag_hq_reward=(-objective.get("known_nonflag_hq_penalty", 0.)
+                    if row.known_nonflag_hq and record["learnable"] else 0.),
+                flag_defense_reward=((objective.get("flag_defense_success_reward", 0.) if row.flag_defense == "success"
+                    else -objective.get("flag_defense_missed_penalty", 0.) if row.flag_defense == "missed" else 0.)
+                    if record["learnable"] else 0.))
             np.testing.assert_allclose(rewards, record["rewards"], atol=1e-10, rtol=0)
             old_values = {v["player"]: v["old_value"] for v in record["critic_values"]}
             virtual_turns = ()
@@ -67,15 +77,15 @@ def verify_replay(payload):
                 assert record["actor_gae_clock"] == "player_turns_including_eliminated", "unknown Actor GAE clock"
                 assert record["critic_gae_clock"] in ("player_decisions", "player_turns_including_eliminated"), "unknown Critic GAE clock"
                 virtual_turns = virtual_player_turns(player=actor, next_player=row.state.player,
-                    player_count=4, turn_step=config.turn_step)
+                    player_count=players, turn_step=config.turn_step)
                 assert list(virtual_turns) == record["virtual_player_turns"], "virtual turns mismatch"
             trace.append(PlayerMAPPOTransition(state, action, record["old_log_probability"], values,
-                rewards, row.terminal, actor, record["learnable"], tuple(old_values[p] for p in range(4)),
+                rewards, row.terminal, actor, record["learnable"], tuple(old_values[p] for p in range(players)),
                 virtual_turns=virtual_turns))
             slot.history.append_encoded_rows(row.records)
             slot.critic_history.append_encoded_rows(row.centralized_records)
             checked += 1
-        gae_options = dict(bootstrap_values=tuple(saved.get("bootstrap_values", [0.]*4)),
+        gae_options = dict(bootstrap_values=tuple(saved.get("bootstrap_values", [0.]*players)),
             discount=objective["discount"], gae_lambda=objective["gae_lambda"], behavior_version=payload["update"]-1)
         samples = player_generalized_advantages(trace, **gae_options)
         # Actor-only archives used virtual turns for policy advantages but the
@@ -99,8 +109,8 @@ def verify_replay(payload):
                             if norm["std"] >= norm["epsilon"] else sample.advantage)
                 np.testing.assert_allclose(expected, record["normalized_advantage"], rtol=0, atol=1e-8)
     return {"verified_games_or_segments": len(payload["games"]), "verified_decisions": checked,
-            "checks": ["legal moves", "four public histories", "four critic histories", "public tactical labels",
-                       "realized rewards", "personal raw and normalized advantages", "all four value targets"]}
+            "checks": ["legal moves", "all public histories", "all critic histories", "public tactical labels",
+                       "realized rewards", "personal raw and normalized advantages", "all player value targets"]}
 
 
 def summarize(run_dir, last_updates):

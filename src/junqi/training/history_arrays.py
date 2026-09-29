@@ -15,7 +15,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from .encoding import ActionFeatures, StateTokenRecord
+from .encoding import ActionFeatures, StateTokenRecord, retained_transition_count
 from .modes import TrainingMode, mode_spec
 
 
@@ -207,8 +207,11 @@ class ArrayHistory:
     """Preallocated observation blocks; writes never modify an existing row."""
 
     def __init__(self, mode: TrainingMode, records: Sequence[StateTokenRecord],
-                 max_transitions: int, identity: tuple[int, int]) -> None:
+                 max_transitions: int, identity: tuple[int, int], *, history_window_stride: int = 1) -> None:
         self.mode, self.identity, self.max_transitions = mode, identity, max_transitions
+        if type(history_window_stride) is not int or not 1 <= history_window_stride <= max_transitions:
+            raise ValueError('invalid array history window stride')
+        self.history_window_stride = history_window_stride
         self.dead_rules = records[0].known_casualty_bits is not None
         self.initial = record_array(records[0], mode, self.dead_rules)[None, :]
         self.initial.setflags(write=False)
@@ -233,12 +236,13 @@ class ArrayHistory:
             self.blocks.append((self.end + 1, readonly))
         self._write_block[position] = row
         self.end += 1
-        start = max(1, self.end - self.max_transitions + 1)
+        start = self.end - retained_transition_count(self.end, self.max_transitions, self.history_window_stride) + 1
         while self.blocks and self.blocks[0][0] + BLOCK_ROWS <= start:
             self.blocks.popleft()
 
     def view(self) -> HistoryArrayView:
-        start = max(1, self.end - self.max_transitions + 1)
+        count = retained_transition_count(self.end, self.max_transitions, self.history_window_stride)
+        start = self.end - count + 1
         chunks = [self.initial]
         for first, block in self.blocks:
             left, right = max(start, first), min(self.end + 1, first + BLOCK_ROWS)
@@ -248,4 +252,4 @@ class ArrayHistory:
         # appends unpublished rows, so older snapshots remain immutable.
         return HistoryArrayView._from_readonly_chunks(
             self.mode, self.dead_rules, self.identity, start, tuple(chunks),
-            1 + min(self.end, self.max_transitions))
+            1 + count)

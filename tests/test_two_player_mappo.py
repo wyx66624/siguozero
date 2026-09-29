@@ -1,4 +1,4 @@
-"""Two-player expanded encoding, terminal-only MAPPO and frozen opponents."""
+"""Two-player expanded encoding, MAPPO rewards and frozen opponents."""
 from __future__ import annotations
 
 import copy
@@ -51,14 +51,21 @@ def test_training_contract_matches_four_except_explicit_two_player_rules():
     two = config(model_scale="main")
     four = TrainingSettings.from_yaml(CONFIG, "four_dark", model_scale="main")
     allowed = {"mode", "model", "flag_capture_reward", "known_nonflag_hq_penalty",
+               "flag_defense_missed_penalty", "flag_defense_success_reward",
                "bomb_commander_reward", "bomb_army_commander_reward", "bomb_division_commander_reward",
                "futile_attack_penalty", "historical_tactical_current", "historical_start_fraction",
                "historical_start_environment_plies", "historical_checkpoint_start_fraction",
-               "arena_historical_teammate_fraction"}
+               "arena_historical_teammate_fraction", "max_passes_per_player"}
     for field, value in asdict(two).items():
         if field not in allowed:
             assert value == asdict(four)[field], field
-    assert replace(two.model, board_point_capacity=129) == four.model
+    assert replace(two.model, board_point_capacity=129, max_transitions=1000,
+                   action_encoder_type=four.model.action_encoder_type,
+                   position_embedding_capacity=None, history_window_stride=1,
+                   paged_kv_length_bucket_tokens=1001) == four.model
+    assert two.model.max_transitions == 300 and two.model.max_sequence_tokens == 301
+    assert two.model.position_embedding_capacity == 1001
+    assert two.model.paged_kv_length_bucket_tokens == 301
     assert two.algorithm == "mappo" and two.ppo_clip_mode == "acpo"
     assert two.mappo_advantage_mode == "player_decisions" and two.mappo_reward_scope == "player"
     assert two.historical_teammate_fraction == two.arena_historical_teammate_fraction == 0
@@ -66,10 +73,13 @@ def test_training_contract_matches_four_except_explicit_two_player_rules():
     assert two.checkpoint_interval_environment_plies == 25_000_000
     assert two.historical_start_environment_plies == 500_000_000
     assert two.draw_reward == -.15
-    for field in ("flag_capture_reward", "known_nonflag_hq_penalty", "bomb_commander_reward",
-                  "bomb_army_commander_reward", "bomb_division_commander_reward", "futile_attack_penalty"):
+    for field in ("flag_capture_reward", "known_nonflag_hq_penalty", "futile_attack_penalty"):
         assert getattr(two, field) == 0
         assert getattr(four, field) > 0
+    for field in ("bomb_commander_reward", "bomb_army_commander_reward", "bomb_division_commander_reward"):
+        assert getattr(two, field) == getattr(four, field)
+    assert (two.flag_defense_missed_penalty, two.flag_defense_success_reward) == (.1, .05)
+    assert (four.flag_defense_missed_penalty, four.flag_defense_success_reward) == (0., 0.)
     assert [four.bomb_commander_reward, four.bomb_army_commander_reward,
             four.bomb_division_commander_reward, four.futile_attack_penalty] == [.03, .01, .003, .01]
     for step in (0, 500_000_000, 3_000_000_000):
@@ -77,9 +87,10 @@ def test_training_contract_matches_four_except_explicit_two_player_rules():
     assert build_parser(MODE).parse_args([]).mode == "two_player"
 
 
-def test_60_point_encoding_matches_tensor_packed_and_fixed_kv():
+@pytest.mark.parametrize("stride", [1, 3])
+def test_60_point_encoding_matches_tensor_packed_and_fixed_kv(stride):
     model = replace(config(tiny=True).model, ppo_tensor_learner=False,
-                    ppo_cuda_graphs=False, max_transitions=7)
+                    ppo_cuda_graphs=False, max_transitions=7, history_window_stride=stride)
     ordinary = GamePolicyTransformer(model).eval()
     tensor = GamePolicyTransformer(replace(model, ppo_tensor_learner=True)).eval()
     cached = copy.deepcopy(ordinary)
@@ -90,7 +101,7 @@ def test_60_point_encoding_matches_tensor_packed_and_fixed_kv():
     assert ordinary.destination_query[-1].out_features == 60
     cached.start_ppo_inference_cache(capacity=2, behavior_version=0)
     game = new_game(MODE, seed=29)
-    history = GameHistory.initialize(game, MODE, max_transitions=7)
+    history = GameHistory.initialize(game, MODE, max_transitions=7, history_window_stride=stride)
     history.enable_array_storage()
     central = CentralizedHistory.initialize(game, MODE, max_transitions=7)
     private_masks = history.state_for(game).records[0].inventory_masks
@@ -205,7 +216,7 @@ def test_training_resume_and_actor_only_inference(tmp_path):
     path = trainer.checkpoints.latest_path
     payload = torch.load(path, map_location="cpu", weights_only=False)
     require_current_checkpoint(payload)
-    assert payload["algorithm"] == "mappo" and payload["format_version"] == 17
+    assert payload["algorithm"] == "mappo" and payload["format_version"] == 18
     assert trainer.cumulative["environment_plies"] == 8
     assert payload["critic"]["board_encoder.projection.weight"].shape[1] == 1563
     assert payload["policy_optimizer"]["state"] and payload["critic_optimizer"]["state"]

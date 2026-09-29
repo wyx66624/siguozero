@@ -18,6 +18,63 @@ NONFLAG_HQ_PENALIZED_KINDS = frozenset({
     PieceType.ENGINEER, PieceType.BOMB,
 })
 
+FLAG_DEFENSE_REWARD_FIELDS = ("flag_defense_missed_penalty", "flag_defense_success_reward")
+
+
+def flag_defense_context(game):
+    """Confirmed one-move flag threats and guaranteed legal removal actions.
+
+    Only pre-action player knowledge decides whether declining defense costs
+    a reward. No rank preference: capturing or trading with any piece counts.
+    HQs have road links only, so the common no-adjacent-enemy case is cheap.
+    """
+    from .tactical_events import PublicThreats
+    player = game.current_player
+    board = game.board_for(player)
+    flags = [board.encode(point) for point, piece in game.pieces.items()
+             if piece.owner == player and piece.kind is PieceType.FLAG]
+    if not any((piece := game.piece_at(board.decode(code))) is not None
+               and piece.owner != player and not game.are_allies(player, piece.owner)
+               for flag in flags for code in board.neighbors(flag)):
+        return frozenset(), frozenset()
+    public = PublicThreats(game, player)
+    threats = public.attackers(public.pieces)
+    targets = frozenset(start for flag in flags for start in threats.get(flag, ()))
+    removals = frozenset(pair for pair in game.legal_actions()
+        if pair != PASS_ACTION and pair[1] in targets
+        and all(game._combat_outcome_for_kinds(public.pieces[pair[0]].known, kind) in (
+            CombatOutcome.ATTACKER_WINS, CombatOutcome.BOTH_REMOVED)
+            for kind in public.pieces[pair[1]].kinds))
+    return targets, removals
+
+
+def flag_defense_event(game, player, action, result, context):
+    """Return success/missed/None without changing observations or game rules.
+
+    Success removes a confirmed flag attacker and leaves no confirmed direct
+    flag threat. Winning immediately also secures the flag. A failed/ignored
+    defense is penalized only if a guaranteed removal was available beforehand.
+    """
+    targets, removals = context
+    if not targets:
+        return None
+    if game.is_terminal and game.rewards()[player] > 0:
+        return "success"
+    action = tuple(action)
+    removed = (action != PASS_ACTION and action[1] in targets
+               and result.combat in (CombatOutcome.ATTACKER_WINS, CombatOutcome.BOTH_REMOVED))
+    if removed and game.active_players[player]:
+        from .tactical_events import PublicThreats
+        public = PublicThreats(game, player)
+        threats = public.attackers(public.pieces)
+        flags = [code for code, piece in public.pieces.items()
+                 if piece.owner == player and piece.known is PieceType.FLAG]
+        if flags and not any(threats.get(flag) for flag in flags):
+            return "success"
+    if removals and not removed:
+        return "missed"
+    return None
+
 
 def known_nonflag_hq_entry(game, action) -> bool:
     """Judge the chosen HQ entry/attack from the acting player's prior knowledge.

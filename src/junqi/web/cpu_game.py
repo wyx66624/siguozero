@@ -79,6 +79,7 @@ class CpuGame:
                          "temperature": self.temperature,
                          "layout_temperature": PLAY_LAYOUT_TEMPERATURE,
                          "eliminate_no_moves": self.game.config.eliminate_no_moves,
+                         "max_passes_per_player": self.game.config.max_passes_per_player,
                          "dead_rules_enabled": self.engine.policy.config.dead_rules_enabled}
         self.inference_seconds = 0.0
         self.ai_moves = 0
@@ -189,7 +190,7 @@ class CpuGame:
                 "no_capture_plies": self.game.no_interaction_plies,
                 "no_capture_draw_plies": self.game.config.no_interaction_draw_plies,
                 "passes_remaining": list(observation.passes_remaining),
-                "max_passes_per_player": 4,
+                "max_passes_per_player": self.game.config.max_passes_per_player,
                 "ai_moves": self.ai_moves, "inference_seconds": self.inference_seconds,
                 "board": board_geometry(self.game.board_for(self.human)),
                 "pieces": [None if p is None else {"owner": p.owner,

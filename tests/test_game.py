@@ -346,11 +346,11 @@ class LifecycleAndTrainingTests(unittest.TestCase):
     def test_player_with_no_move_is_eliminated_when_turn_arrives(self) -> None:
         pieces = flags(2)
         pieces[ArmPoint(0, 2, 3)] = Piece(0, PieceType.ENGINEER)
-        game = JunqiGame.from_position(two_config(), pieces, passes_remaining=(4, 4))
+        game = JunqiGame.from_position(two_config(), pieces, passes_remaining=(0, 0))
 
         result = game.step((7, 6))
         self.assertEqual(result.eliminated_players, (1,))
-        self.assertEqual(game.passes_remaining, (4, 4))
+        self.assertEqual(game.passes_remaining, (0, 0))
         self.assertTrue(game.is_terminal)
         self.assertEqual(game.result.winner_team, 0)
 

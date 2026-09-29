@@ -303,16 +303,20 @@ def policy_history_key(state: PolicyState) -> object:
 def history_prefix_groups(states: Sequence[PolicyState]) -> list[list[int]]:
     """Group exact history prefixes; each group's first index is its longest.
 
-    A shared initial board alone is insufficient: windows after the 1000-step
+    A shared initial board alone is insufficient: windows after the configured
     cutoff and divergent continuations must stay separate. Full record equality
     also checks actions, public counters and casualties, not just board codes.
     """
     groups: list[list[int]] = []
-    if all(hasattr(state.records, "cache_key") for state in states):
+    # A rollout batch is regrouped for shuffling, loss packing and graph staging.
+    # Read each immutable view's metadata once, avoiding repeated property/len
+    # dispatch and temporary tuples across millions of history references.
+    array_keys = [getattr(state.records, "cache_key", None) for state in states]
+    if all(key is not None for key in array_keys):
         windows: dict[object, int] = {}
-        for index in sorted(range(len(states)), key=lambda i: len(states[i].records), reverse=True):
+        for index in sorted(range(len(states)), key=lambda i: array_keys[i][2], reverse=True):
             state = states[index]
-            identity, start, _length = state.records.cache_key
+            identity, start, _length = array_keys[index]
             key = state.mode, identity, start
             group = windows.get(key)
             if group is None:
@@ -344,12 +348,19 @@ def history_prefix_groups(states: Sequence[PolicyState]) -> list[list[int]]:
     return groups
 
 
+def retained_transition_count(length: int, maximum: int, stride: int = 1) -> int:
+    """Drop complete stride blocks only when the context reaches its bound."""
+    overflow = max(0, length - maximum)
+    return length - ((overflow + stride - 1) // stride) * stride
+
+
 class PlayerHistory:
     """One player's pinned initial state plus a sliding transition history."""
 
     __slots__ = (
         "mode",
         "max_transitions",
+        "history_window_stride",
         "dead_rules_enabled",
         "_initial",
         "_transition_tail",
@@ -363,6 +374,7 @@ class PlayerHistory:
         initial: StateTokenRecord,
         *,
         max_transitions: int = 1000,
+        history_window_stride: int = 1,
     ) -> None:
         if max_transitions <= 0:
             raise ValueError("max_transitions must be positive")
@@ -370,6 +382,9 @@ class PlayerHistory:
             raise ValueError("initial state token cannot contain an action")
         self.mode = normalize_mode(mode)
         self.max_transitions = max_transitions
+        if type(history_window_stride) is not int or not 1 <= history_window_stride <= max_transitions:
+            raise ValueError("invalid history window stride")
+        self.history_window_stride = history_window_stride
         self.dead_rules_enabled = initial.known_casualty_bits is not None
         self._initial = initial
         self._transition_tail: _HistoryNode | None = None
@@ -383,11 +398,13 @@ class PlayerHistory:
         observation: Observation,
         *,
         max_transitions: int = 1000,
+        history_window_stride: int = 1,
     ) -> PlayerHistory:
         return cls(
             normalize_mode(mode),
             _record_from_observation(observation, None),
             max_transitions=max_transitions,
+            history_window_stride=history_window_stride,
         )
 
     @property
@@ -398,7 +415,9 @@ class PlayerHistory:
             return self._records_cache
         recent: list[StateTokenRecord] = []
         node = self._transition_tail
-        while node is not None and len(recent) < self.max_transitions:
+        keep = retained_transition_count(0 if node is None else node.length,
+                                         self.max_transitions, self.history_window_stride)
+        while node is not None and len(recent) < keep:
             recent.append(node.record)
             node = node.previous
         recent.reverse()
@@ -444,6 +463,7 @@ class PlayerHistory:
             self.mode,
             self._initial,
             max_transitions=self.max_transitions,
+            history_window_stride=self.history_window_stride,
         )
         # Immutable linked nodes provide O(1) structural sharing.  The first
         # append on a child creates only one new node (true copy-on-write),
@@ -458,6 +478,7 @@ class PlayerHistory:
             "action_encoding": ACTION_ENCODER_TYPE,
             "inventory_mask_encoding": INVENTORY_MASK_ENCODING,
             "max_transitions": self.max_transitions,
+            "history_window_stride": self.history_window_stride,
             "dead_rules_enabled": self.dead_rules_enabled,
             "records": [_record_state_dict(record) for record in self.records],
         }
@@ -477,6 +498,7 @@ class PlayerHistory:
             normalize_mode(state["mode"]),
             records[0],
             max_transitions=int(state["max_transitions"]),
+            history_window_stride=state.get("history_window_stride", 1),
         )
         serialized_dead_rules = state["dead_rules_enabled"]
         if not isinstance(serialized_dead_rules, bool):
@@ -522,6 +544,7 @@ class GameHistory:
         for seat, player in enumerate(self.players):
             player._array_history = ArrayHistory(
                 self.mode, player.records, player.max_transitions, (identity, seat),
+                history_window_stride=player.history_window_stride,
             )
             player._transition_tail = None
             player._records_cache = None
@@ -533,6 +556,7 @@ class GameHistory:
         mode: TrainingMode | str,
         *,
         max_transitions: int = 1000,
+        history_window_stride: int = 1,
     ) -> GameHistory:
         normalized = normalize_mode(mode)
         game.enable_inventory_tracking()
@@ -547,6 +571,7 @@ class GameHistory:
                     include_inventory_masks=True,
                 ),
                 max_transitions=max_transitions,
+                history_window_stride=history_window_stride,
             )
             for player in range(game.config.player_count)
         )

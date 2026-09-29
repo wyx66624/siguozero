@@ -52,7 +52,7 @@ def test_legacy_config_pickle_keeps_original_rule_and_new_roundtrip_keeps_new_ru
     current = GameConfig()
     values = [getattr(current,f.name) for f in fields(current)]
     old = GameConfig.__new__(GameConfig)
-    old.__setstate__(values[:-1])
+    old.__setstate__(values[:6])
     assert old.eliminate_no_moves is False
     assert pickle.loads(pickle.dumps(current)).eliminate_no_moves is True
     assert pickle.loads(pickle.dumps(old)).eliminate_no_moves is False

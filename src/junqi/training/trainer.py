@@ -90,15 +90,18 @@ class SelfPlayTrainer:
         distributed: DistributedContext | None = None,
         initialize_from: str | Path | None = None,
         adopt_current_draw_rules: bool = False,
+        shrink_context_window: bool = False,
         adopt_draw_penalty: bool = False,
         adopt_flag_capture_reward: bool = False,
         adopt_futile_attack_penalty: bool = False,
         adopt_bomb_rewards: bool = False,
+        adopt_flag_defense_rewards: bool = False,
         adopt_known_nonflag_hq_penalty: bool = False,
         adopt_player_advantages: bool = False,
         adopt_champion_evaluation: bool = False,
         adopt_pass_rule: bool = False,
         adopt_no_move_elimination: bool = False,
+        adopt_two_player_no_pass: bool = False,
         expand_game_pool: bool = False,
         reset_oom_batch_limits: bool = False,
     ) -> None:
@@ -107,14 +110,20 @@ class SelfPlayTrainer:
         self.resumed_from_update = 0
         self.resumed_from_cumulative = {}
         self.adopt_current_draw_rules = adopt_current_draw_rules
+        self.shrink_context_window = shrink_context_window
+        self.context_window_migration = None
+        self.context_shrunk_on_resume = False
         self.adopt_draw_penalty = adopt_draw_penalty
         self.adopt_flag_capture_reward = adopt_flag_capture_reward
         self.adopt_futile_attack_penalty = adopt_futile_attack_penalty
         self.adopt_bomb_rewards = adopt_bomb_rewards
+        self.adopt_flag_defense_rewards = adopt_flag_defense_rewards
         self.adopt_known_nonflag_hq_penalty = adopt_known_nonflag_hq_penalty
         self.adopt_player_advantages = adopt_player_advantages
         self.adopt_pass_rule = adopt_pass_rule
         self.adopt_no_move_elimination = adopt_no_move_elimination
+        self.adopt_two_player_no_pass = adopt_two_player_no_pass
+        self.two_player_no_pass_migration = None
         self.expand_game_pool = expand_game_pool
         self.reset_oom_batch_limits = reset_oom_batch_limits
         self.pool_expanded_on_resume = False
@@ -126,6 +135,7 @@ class SelfPlayTrainer:
         self.flag_capture_objective_migration = None
         self.futile_attack_objective_migration = None
         self.bomb_objective_migration = None
+        self.flag_defense_objective_migration = None
         self.known_nonflag_hq_objective_migration = None
         self.player_advantage_migration = None
         from .futile_attack import FutileAttackPenalty
@@ -246,9 +256,13 @@ class SelfPlayTrainer:
                          else settings.entropy_maximum),
                 target_ratio=entropy_targets[phase],
                 adaptation_rate=settings.entropy_adaptation_rate, ema_decay=settings.entropy_ema_decay,
-                enabled=settings.adaptive_entropy)
+                enabled=settings.adaptive_entropy, deadband=settings.entropy_deadband,
+                max_relative_change=settings.entropy_max_relative_change)
             for phase in ("opening", "other")
         }
+        if settings.entropy_control_mode == "joint_source":
+            # One shared beta for all phases and the extra source bonus.
+            self.entropy_controllers["opening"] = self.entropy_controllers["other"]
         self.cumulative: dict[str, int] = {
             "policy_samples": 0,
             "environment_plies": 0,
@@ -359,6 +373,7 @@ class SelfPlayTrainer:
             settings.mode,
             pool_size=self.local_base_game_pool_size,
             max_transitions=settings.model.max_transitions,
+            history_window_stride=settings.model.history_window_stride,
             max_game_plies=settings.max_game_plies,
             dead_rules_enabled=settings.dead_rules_enabled,
             seed=settings.seed + 17 + 1_000_003 * self.distributed.rank,
@@ -382,6 +397,7 @@ class SelfPlayTrainer:
                     self.policy, self.layout, update=self.update, cumulative=self.cumulative,
                     adopt_current_draw_rules=adopt_current_draw_rules,
                     adopt_pass_rule=adopt_pass_rule,
+                    adopt_two_player_no_pass=adopt_two_player_no_pass,
                     adopt_champion_evaluation=adopt_champion_evaluation,
                 )
             self.historical.update_progress(self.policy, self.layout,
@@ -394,13 +410,17 @@ class SelfPlayTrainer:
         self._write_run_config()
         self._export_live_inference()
         self._install_signal_handlers()
-        if resumed and (adopt_current_draw_rules or adopt_draw_penalty or adopt_pass_rule or adopt_no_move_elimination or
+        if resumed and self.context_shrunk_on_resume:
+            self.save_checkpoint(reason="context_window_migration", archive=False)
+        if resumed and (adopt_current_draw_rules or adopt_draw_penalty or adopt_pass_rule or adopt_no_move_elimination or adopt_two_player_no_pass or
                         adopt_flag_capture_reward or adopt_champion_evaluation or adopt_futile_attack_penalty or
-                        adopt_bomb_rewards or adopt_player_advantages or adopt_known_nonflag_hq_penalty):
-            self.save_checkpoint(reason="no_move_rule_migration" if adopt_no_move_elimination else
+                        adopt_bomb_rewards or adopt_flag_defense_rewards or adopt_player_advantages or adopt_known_nonflag_hq_penalty):
+            self.save_checkpoint(reason="two_player_no_pass_migration" if adopt_two_player_no_pass else
+                                 "no_move_rule_migration" if adopt_no_move_elimination else
                                  "known_nonflag_hq_objective_migration" if adopt_known_nonflag_hq_penalty else
                                  "player_advantage_migration" if adopt_player_advantages else
                                  "champion_evaluation_migration" if adopt_champion_evaluation else
+                                 "flag_defense_objective_migration" if adopt_flag_defense_rewards else
                                  "bomb_objective_migration" if adopt_bomb_rewards else
                                  "futile_attack_objective_migration" if adopt_futile_attack_penalty else
                                  "flag_capture_objective_migration" if adopt_flag_capture_reward else
@@ -555,13 +575,16 @@ class SelfPlayTrainer:
         temporary = self.run_directory / ".resolved_config.json.tmp"
         resolved = self.settings.serializable()
         resolved["draw_objective_migration"] = self.draw_objective_migration
+        resolved["context_window_migration"] = self.context_window_migration
         resolved["flag_capture_objective_migration"] = self.flag_capture_objective_migration
         resolved["futile_attack_objective_migration"] = self.futile_attack_objective_migration
         resolved["bomb_objective_migration"] = self.bomb_objective_migration
+        resolved["flag_defense_objective_migration"] = self.flag_defense_objective_migration
         resolved["known_nonflag_hq_objective_migration"] = self.known_nonflag_hq_objective_migration
         resolved["player_advantage_migration"] = self.player_advantage_migration
         resolved["pass_rule_migration"] = self.pass_rule_migration
         resolved["no_move_rule_migration"] = self.no_move_rule_migration
+        resolved["two_player_no_pass_migration"] = self.two_player_no_pass_migration
         resolved["initialized_from"] = (
             None if self.initialize_from is None else str(self.initialize_from)
         )
@@ -616,6 +639,9 @@ class SelfPlayTrainer:
                 )
             self.logger.event("no checkpoint found; starting a new run")
             return False
+        from .context_migration import reconcile_context_window
+        self.context_shrunk_on_resume = reconcile_context_window(
+            payload, self.settings, adopt=self.shrink_context_window)
         if self.adopt_current_draw_rules:
             from .rule_migration import adopt_draw_rules
             adopt_draw_rules(payload, self.settings)
@@ -623,6 +649,18 @@ class SelfPlayTrainer:
         reconcile_pass_rule(payload, adopt=self.adopt_pass_rule)
         from .no_move_migration import reconcile_no_move_rule
         reconcile_no_move_rule(payload, adopt=self.adopt_no_move_elimination)
+        from .two_player_no_pass_migration import reconcile_two_player_no_pass
+        reconcile_two_player_no_pass(payload, self.settings, adopt=self.adopt_two_player_no_pass)
+        from .checkpoint_format import checkpoint_format_for_model
+        from .no_pass_features import remove_two_player_pass_inputs
+        if (payload.get("mode") == "two_player" and payload.get("format_version") == 17
+                and checkpoint_format_for_model(self.settings.model) == 18):
+            if not self.adopt_two_player_no_pass:
+                raise ValueError("removing pass input dimensions requires --adopt-two-player-no-pass")
+            remove_two_player_pass_inputs(payload, optimizer_modules={"policy": self.policy, "critic": self.critic})
+            payload["trainer_state"].setdefault("two_player_no_pass_migration", {"update": payload["update"]}).update(
+                action_inputs_from=14, action_inputs_to=10,
+                projected="Actor/Critic action weight and Adam moment columns; all other tensors unchanged")
         from .objective_migration import reconcile_draw_objective, reconcile_flag_capture_objective
         reconcile_draw_objective(payload, self.settings, adopt=self.adopt_draw_penalty)
         reconcile_flag_capture_objective(payload, self.settings, adopt=self.adopt_flag_capture_reward)
@@ -630,6 +668,8 @@ class SelfPlayTrainer:
         # updates it, so neither objective silently adopts a new decay horizon.
         from .objective_migration import reconcile_bomb_objective
         reconcile_bomb_objective(payload, self.settings, adopt=self.adopt_bomb_rewards)
+        from .objective_migration import reconcile_flag_defense_objective
+        reconcile_flag_defense_objective(payload, self.settings, adopt=self.adopt_flag_defense_rewards)
         from .objective_migration import reconcile_futile_attack_objective
         reconcile_futile_attack_objective(payload, self.settings, adopt=self.adopt_futile_attack_penalty)
         from .objective_migration import reconcile_player_advantages
@@ -692,8 +732,23 @@ class SelfPlayTrainer:
                 self.lr_controller.scale = rate / self.settings.maximum_learning_rate
                 self.lr_controller.rate(self.settings.maximum_learning_rate)
             self.policy_lr_scale = self.lr_controller.scale
-        for phase, controller in self.entropy_controllers.items():
-            controller.load_state_dict(trainer_state.get("adaptive_entropy", {}).get(phase))
+        if self.settings.entropy_control_mode == "joint_source":
+            if payload.get("config", {}).get("entropy_control_mode") == "joint_source":
+                self.entropy_controllers["other"].load_state_dict(
+                    trainer_state.get("adaptive_entropy", {}).get("other"))
+                saved_feedback = payload.get("config", {}).get("entropy_feedback", "joint")
+                if saved_feedback != self.settings.entropy_feedback:
+                    controller = self.entropy_controllers["other"]
+                    controller.entropy_ema = None
+                    controller.updates = 0
+                    self.logger.event(
+                        f"entropy feedback changed {saved_feedback} -> {self.settings.entropy_feedback}; "
+                        f"preserved beta={controller.coefficient:.9g}; new EMA starts at first final probe")
+            else:
+                self.logger.event("enabled shared entropy feedback from configured beta; new EMA starts at first final probe")
+        else:
+            for phase, controller in self.entropy_controllers.items():
+                controller.load_state_dict(trainer_state.get("adaptive_entropy", {}).get(phase))
         saved_source_coefficient = payload.get("config", {}).get("source_entropy_coefficient", 0.0)
         if saved_source_coefficient != self.settings.source_entropy_coefficient:
             self.logger.event(
@@ -758,12 +813,18 @@ class SelfPlayTrainer:
             self.critic_grad_scaler.load_state_dict(trainer_state["critic_grad_scaler"])
         restored_cumulative = trainer_state.get("cumulative", {})
         self.draw_rule_migration = trainer_state.get("draw_rule_migration")
+        self.context_window_migration = trainer_state.get("context_window_migration")
+        if self.context_shrunk_on_resume:
+            self.logger.event(f"context window shrunk {self.context_window_migration['from']} -> "
+                              f"{self.context_window_migration['to']}; all model/optimizer tensors retained")
         self.pass_rule_migration = trainer_state.get("pass_rule_migration")
         self.no_move_rule_migration = trainer_state.get("no_move_rule_migration")
+        self.two_player_no_pass_migration = trainer_state.get("two_player_no_pass_migration")
         self.draw_objective_migration = trainer_state.get("draw_objective_migration")
         self.flag_capture_objective_migration = trainer_state.get("flag_capture_objective_migration")
         self.futile_attack_objective_migration = trainer_state.get("futile_attack_objective_migration")
         self.bomb_objective_migration = trainer_state.get("bomb_objective_migration")
+        self.flag_defense_objective_migration = trainer_state.get("flag_defense_objective_migration")
         self.known_nonflag_hq_objective_migration = trainer_state.get("known_nonflag_hq_objective_migration")
         self.player_advantage_migration = trainer_state.get("player_advantage_migration")
         if self.settings.futile_attack_penalty and "futile_attack_penalty" not in trainer_state:
@@ -1026,7 +1087,7 @@ class SelfPlayTrainer:
                             self.policy_parallel, chunk,
                             clip_epsilon=self.settings.clip_epsilon,
                             entropy_coefficient=self.entropy_controllers["other"].coefficient,
-                            source_entropy_coefficient=self.settings.source_entropy_coefficient,
+                            source_entropy_coefficient=self._source_entropy_coefficient(),
                             policy_clip=self._policy_clip(),
                             sequence_training=self._sequence_training_enabled(),
                             defer_metrics=True,
@@ -1103,9 +1164,12 @@ class SelfPlayTrainer:
         states = [s.value_state or s.state for s in samples] if critic else [s.state for s in samples]
         groups = history_prefix_groups(states)
         tokens = sum(len(states[g[0]].records) for g in groups)
-        required_tokens = tokens + 32 - len(groups)
-        capacity = next((size for size in (1024, 2048, 3072, 4096) if required_tokens <= size), None)
-        if capacity is None or len(groups) >= 32:
+        sequences = 32 if critic else getattr(self.settings, 'ppo_actor_graph_sequences', 32)
+        token_limit = 4096 if critic else getattr(self.settings, 'ppo_actor_graph_tokens', 4096)
+        required_tokens = tokens + sequences - len(groups)
+        capacity = next((size for size in (1024, 2048, 3072, 4096, 6144, 8192, 10240, 12288, 16384)
+                         if required_tokens <= size <= token_limit), None)
+        if capacity is None or len(groups) >= sequences:
             return None
         action_metadata = None
         source_capacity = 16384
@@ -1116,7 +1180,7 @@ class SelfPlayTrainer:
                                     if required_sources <= size), 16384)
         value_capacity = (4096 if len(samples) > 2048 else 2048 if len(samples) > 1024 else None) if critic else None
         policy_capacity = 1024 if not critic and len(samples) > 512 else None
-        key = (capacity, source_capacity, value_capacity, policy_capacity)
+        key = (capacity, source_capacity, value_capacity, policy_capacity, sequences)
         if graphs is None:
             graphs = {}
             setattr(self, name, graphs)
@@ -1131,16 +1195,16 @@ class SelfPlayTrainer:
             # replay. Inputs and optimizer state live outside the scratch pool.
             graph = graphs[key] = PackedLearnerGraph(model, critic=critic, amp_dtype=self.amp_dtype,
                 value_samples=value_capacity, policy_samples=policy_capacity,
-                tokens=capacity, sources=source_capacity, pool=self._learner_graph_pool,
+                tokens=capacity, sequences=sequences, sources=source_capacity, pool=self._learner_graph_pool,
                 gradient_cache=self._learner_graph_gradient_caches.setdefault(critic, {}))
         try:
             ready = graph.stage(model, samples,
                 clip=self.settings.value_clip_epsilon if critic else self.settings.clip_epsilon,
                 coefficient=self.settings.value_coefficient if critic else self.entropy_controllers['other'].coefficient,
-                source_coefficient=0.0 if critic else self.settings.source_entropy_coefficient,
+                source_coefficient=0.0 if critic else self._source_entropy_coefficient(),
                 opening_coefficient=(self.entropy_controllers['opening'].coefficient
                                      if not critic else None),
-                opening_plies=self.entropy_opening_plies, action_metadata=action_metadata,
+                opening_plies=self.entropy_opening_plies, action_metadata=action_metadata, history_groups=groups,
                 policy_clip=None if critic else self._policy_clip())
             if not ready:
                 return None
@@ -1243,6 +1307,11 @@ class SelfPlayTrainer:
         # the restored counter, never a stale log or the process lifetime.
         return scheduled_policy_clip(self.settings, self.cumulative["environment_plies"])
 
+    def _source_entropy_coefficient(self) -> float:
+        if self.settings.entropy_control_mode == "joint_source":
+            return self.entropy_controllers["other"].coefficient
+        return self.settings.source_entropy_coefficient
+
     def _sync_entropy_targets(self) -> dict[str, float]:
         targets = scheduled_entropy_targets(self.settings, self.cumulative["environment_plies"])
         for phase, controller in self.entropy_controllers.items():
@@ -1262,8 +1331,12 @@ class SelfPlayTrainer:
         else:
             metrics = self._update_policy_batch(groups)
         ratios = phase_entropy_ratios(metrics)
+        source_coefficient = self._source_entropy_coefficient()
+        shared_entropy = self.settings.entropy_control_mode == "joint_source"
         metrics.update({"policy/adaptive_entropy_enabled": float(self.settings.adaptive_entropy),
-                        "policy/source_entropy_coefficient": self.settings.source_entropy_coefficient,
+                        "policy/entropy_joint_source_control": float(shared_entropy),
+                        "policy/entropy_feedback_source": float(self.settings.entropy_feedback == "source"),
+                        "policy/source_entropy_coefficient": source_coefficient,
                         "policy/entropy_target_ratio": targets["other"],
                         "policy/opening_entropy_target_ratio": targets["opening"],
                         "policy/other_entropy_target_ratio": targets["other"],
@@ -1275,12 +1348,34 @@ class SelfPlayTrainer:
             metrics.update({"policy/entropy_target_schedule_end_environment_plies": float(end),
                             "policy/opening_entropy_target_final": opening_final,
                             "policy/other_entropy_target_final": other_final})
+        if shared_entropy and metrics.get("optimizer/policy_steps", 0) > 0:
+            # Reuse the final PPO probe when available; never feed epoch averages
+            # or a tactical subset into the shared controller.
+            if "policy/final_probe_samples" not in metrics:
+                metrics.update(self._final_policy_diagnostics(groups))
+            feedback = metrics.get("policy/final_source_entropy_ratio" if self.settings.entropy_feedback == "source"
+                                   else "policy/final_entropy_ratio")
+        else:
+            feedback = None
+        used_coefficients = {phase: controller.coefficient
+                             for phase, controller in self.entropy_controllers.items()}
+        if shared_entropy:
+            self.entropy_controllers["other"].observe(feedback)
+            metrics.update({"policy/entropy_deadband": self.settings.entropy_deadband,
+                            "policy/entropy_ema_decay": self.settings.entropy_ema_decay,
+                            "policy/entropy_adaptation_rate": self.settings.entropy_adaptation_rate,
+                            "policy/entropy_max_relative_change": self.settings.entropy_max_relative_change or 0.,
+                            "policy/effective_source_entropy_coefficient": 2 * source_coefficient,
+                            "policy/effective_source_entropy_coefficient_next": 2 * self._source_entropy_coefficient()})
+            if feedback is not None:
+                metrics["policy/entropy_feedback_ratio"] = feedback
+        metrics["policy/source_entropy_coefficient_next"] = self._source_entropy_coefficient()
         for phase, controller in self.entropy_controllers.items():
             prefix = "policy/opening_entropy" if phase == "opening" else "policy/entropy"
-            metrics[f"{prefix}_coefficient"] = controller.coefficient
+            metrics[f"{prefix}_coefficient"] = used_coefficients[phase]
             metrics[f"{prefix}_coefficient_min"] = controller.minimum
             metrics[f"{prefix}_coefficient_max"] = controller.maximum
-            if metrics.get("optimizer/policy_steps", 0) > 0:
+            if not shared_entropy and metrics.get("optimizer/policy_steps", 0) > 0:
                 controller.observe(ratios[phase])
             metrics[f"{prefix}_coefficient_next"] = controller.coefficient
             if controller.entropy_ema is not None:
@@ -1311,6 +1406,11 @@ class SelfPlayTrainer:
         moment_names = ("policy/approx_kl_old", "policy/clip_fraction", "policy/entropy",
                         "policy/opening_entropy_ratio_mass", "policy/opening_entropy_fraction",
                         "policy/other_entropy_ratio_mass", "policy/other_entropy_fraction")
+        sum_names = ("kl", "clip", "entropy", "opening_ratio", "opening_count", "other_ratio", "other_count")
+        source_feedback = self.settings.entropy_feedback == "source"
+        if source_feedback:
+            moment_names += ("policy/source_entropy_ratio_mass", "policy/source_entropy_fraction")
+            sum_names += ("source_ratio", "source_count")
         totals = torch.zeros(len(moment_names), device=self.device)
         was_training = self.policy.training
         self.policy.eval()
@@ -1324,18 +1424,21 @@ class SelfPlayTrainer:
                             clip_epsilon=self.settings.clip_epsilon, entropy_coefficient=0.,
                             opening_entropy_coefficient=0., entropy_opening_plies=self.entropy_opening_plies,
                             policy_clip=self._policy_clip(),
+                            source_entropy_diagnostics=source_feedback,
                             sequence_training=self._sequence_training_enabled(), defer_metrics=True)
                     totals += torch.stack([output.metrics[key] for key in moment_names]) * len(chunk)
         finally:
             self.policy.train(was_training)
         values = totals.cpu().tolist()  # one transfer, scalar moments only
-        sums = self.distributed.sum_metrics(dict(zip(
-            ("kl", "clip", "entropy", "opening_ratio", "opening_count", "other_ratio", "other_count"),
-            values, strict=True)) | {"count": len(probe)})
+        sums = self.distributed.sum_metrics(dict(zip(sum_names, values, strict=True)) | {"count": len(probe)})
         count = sums["count"]
         result = {"policy/final_probe_samples": count,
                   "timing/lr_probe_seconds": self.distributed.reduce_float(
                       time.perf_counter() - started, operation="max")}
+        if source_feedback:
+            result["policy/final_source_entropy_samples"] = sums["source_count"]
+            if sums["source_count"]:
+                result["policy/final_source_entropy_ratio"] = sums["source_ratio"] / sums["source_count"]
         if count:
             result.update({"policy/final_kl": sums["kl"] / count,
                            "policy/final_clip_fraction": sums["clip"] / count,
@@ -1839,7 +1942,8 @@ class SelfPlayTrainer:
 
     def _layout_minimum_version(self) -> int:
         return max((int((getattr(self, name, None) or {}).get("update", 0)) for name in
-                    ("draw_rule_migration", "draw_objective_migration", "pass_rule_migration", "no_move_rule_migration")), default=0)
+                    ("draw_rule_migration", "draw_objective_migration", "pass_rule_migration", "no_move_rule_migration",
+                     "two_player_no_pass_migration")), default=0)
 
     def _update_layout(self) -> dict[str, float]:
         entropy_coefficient = (self.settings.entropy_coefficient
@@ -1896,12 +2000,15 @@ class SelfPlayTrainer:
             "model_selection": self.model_selection.state_dict(),
             "last_checkpoint_environment_plies": self.cumulative["environment_plies"],
             "draw_rule_migration": self.draw_rule_migration,
+            "context_window_migration": self.context_window_migration,
             "pass_rule_migration": self.pass_rule_migration,
             "no_move_rule_migration": self.no_move_rule_migration,
+            "two_player_no_pass_migration": self.two_player_no_pass_migration,
             "draw_objective_migration": self.draw_objective_migration,
             "flag_capture_objective_migration": self.flag_capture_objective_migration,
             "futile_attack_objective_migration": self.futile_attack_objective_migration,
             "bomb_objective_migration": self.bomb_objective_migration,
+            "flag_defense_objective_migration": self.flag_defense_objective_migration,
             "known_nonflag_hq_objective_migration": self.known_nonflag_hq_objective_migration,
             "player_advantage_migration": self.player_advantage_migration,
             "futile_attack_penalty": self.futile_attack_controller.state_dict(),
@@ -2110,6 +2217,8 @@ class SelfPlayTrainer:
             "nonterminal_flag_captures",
             "futile_attacks",
             "known_nonflag_hq_entries",
+            "flag_defense_missed",
+            "flag_defense_successes",
             "bombed_commanders",
             "bombed_army_commanders",
             "bombed_division_commanders",
@@ -2132,6 +2241,7 @@ class SelfPlayTrainer:
             metrics.futile_attack_reward_abs_sum, operation="sum"
         )
         aggregated.bomb_reward_sum = self.distributed.reduce_float(metrics.bomb_reward_sum, operation="sum")
+        aggregated.flag_defense_reward_sum = self.distributed.reduce_float(metrics.flag_defense_reward_sum, operation="sum")
         aggregated.known_nonflag_hq_reward_sum = self.distributed.reduce_float(
             metrics.known_nonflag_hq_reward_sum, operation="sum")
         aggregated.actor_inference_seconds = self.distributed.reduce_float(
@@ -2275,6 +2385,8 @@ class SelfPlayTrainer:
                         futile_attack_penalty=futile_attack_coefficient,
                         **({**bomb_rewards, "advantage_mode": self.settings.mappo_advantage_mode,
                             "known_nonflag_hq_penalty": self.settings.known_nonflag_hq_penalty,
+                            "flag_defense_missed_penalty": self.settings.flag_defense_missed_penalty,
+                            "flag_defense_success_reward": self.settings.flag_defense_success_reward,
                             "reward_scope": self.settings.mappo_reward_scope,
                             "training_audit": self.training_audit}
                            if self.settings.algorithm == "mappo" else {}),
@@ -2290,6 +2402,8 @@ class SelfPlayTrainer:
                             gae_lambda=self.settings.gae_lambda, draw_reward=self.settings.draw_reward,
                             flag_capture_reward=self.settings.flag_capture_reward,
                             futile_attack_penalty=futile_attack_coefficient,
+                            flag_defense_missed_penalty=self.settings.flag_defense_missed_penalty,
+                            flag_defense_success_reward=self.settings.flag_defense_success_reward,
                             known_nonflag_hq_penalty=self.settings.known_nonflag_hq_penalty, **bomb_rewards))
                     del samples  # Normalized samples retain every required history.
                     if not self.settings.ppo_deferred_values:
@@ -2451,6 +2565,8 @@ class SelfPlayTrainer:
                     "training/draw_reward": self.settings.draw_reward,
                     "training/flag_capture_reward": self.settings.flag_capture_reward,
                     "training/known_nonflag_hq_penalty": self.settings.known_nonflag_hq_penalty,
+                    "training/flag_defense_missed_penalty": self.settings.flag_defense_missed_penalty,
+                    "training/flag_defense_success_reward": self.settings.flag_defense_success_reward,
                     **{f"training/{field}": value for field, value in bomb_rewards.items()},
                     **{f"training/{field}_initial": getattr(self.settings, field) for field in bomb_rewards},
                     "training/bomb_reward_stop_environment_plies": (self.settings.target_environment_plies or 0) // 2,

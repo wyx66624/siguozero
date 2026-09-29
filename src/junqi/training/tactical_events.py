@@ -64,7 +64,8 @@ class PublicThreats:
         occupied = frozenset(pieces)
         result = {}
         for start, piece in pieces.items():
-            if self.game.are_allies(self.player, piece.owner) or not self.game.active_players[piece.owner]:
+            if (piece.owner == self.player or self.game.are_allies(self.player, piece.owner)
+                    or not self.game.active_players[piece.owner]):
                 continue
             if (not piece.kinds or piece.kinds.intersection((PieceType.FLAG, PieceType.MINE))
                     or self.board.point(start).kind is PointKind.HEADQUARTERS):
@@ -77,7 +78,8 @@ class PublicThreats:
                 targets = geometric if targets is None else targets.intersection(geometric)
             for target in targets or ():
                 defender = pieces.get(target)
-                if defender is None or self.game.are_allies(piece.owner, defender.owner):
+                if (defender is None or defender.owner == piece.owner
+                        or self.game.are_allies(piece.owner, defender.owner)):
                     continue
                 if self.board.point(target).kind is PointKind.CAMP:
                     continue

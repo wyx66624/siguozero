@@ -256,13 +256,24 @@ test('an eliminated seat displays elimination instead of an available pass budge
 });
 
 test('a voluntary pass remains a player choice when there are movable pieces',async()=>{
-  for(const mode of ['four_dark','double_open','two_player']){
+  for(const mode of ['four_dark','double_open']){
     const extra={model:{mode,eliminate_no_moves:true},legal_actions:[[0,0],[0,1]]};
     const ui=await mount({initial:state(260,{active_players:[true,true,true,true],your_turn:true,...extra})});
     assert.equal(ui.timers.size,0);
     assert.equal(ui.element('advance').hidden,true);
     assert.equal(ui.element('pass').disabled,false);
   }
+});
+
+test('legacy two-player games hide pass counts and block play until restarted',async()=>{
+  const ui=await mount({initial:state(12,{model:{mode:'two_player',eliminate_no_moves:true},
+    your_turn:true,current_player:0,active_players:[true,true],passes_remaining:[2,3],
+    max_passes_per_player:4,legal_actions:[[0,0],[0,1]]})});
+  assert.equal(ui.element('pass').hidden,true);
+  assert.equal(ui.element('pass').disabled,true);
+  assert.ok(!ui.element('pass-status').textContent.includes('剩余跳过次数'));
+  assert.match(ui.element('notice').textContent,/请开始新棋局/);
+  assert.equal(ui.calls.filter(c=>c.op==='move').length,0);
 });
 
 test('a completed game saves a revealed replay, plays every step, and supports rewind',async()=>{
@@ -344,7 +355,7 @@ test('starting a new game archives the old game before closing and keeps its rep
 
 test('dedicated two-player room filters models and keeps four-player sessions and replays separate',async()=>{
   const initial=state(0,{model:{mode:'two_player',update:7,eliminate_no_moves:true},
-    your_turn:true,current_player:0,active_players:[true,true],passes_remaining:[4,4],legal_actions:[[0,0],[0,1]]});
+    max_passes_per_player:0,your_turn:true,current_player:0,active_players:[true,true],passes_remaining:[0,0],legal_actions:[[0,1]]});
   const ui=await mount({consoleMode:'two_player',initial,savedReview:reviewFixture(),
     created:{...initial,session_id:'two-game'},catalog:[
       {id:'four',available:true,mode:'four_dark'}, {id:'two',available:true,mode:'two_player'}]});
@@ -355,6 +366,9 @@ test('dedicated two-player room filters models and keeps four-player sessions an
   assert.equal(ui.element('review-open').disabled,true);
   await ui.click('new');
   assert.equal(ui.storage.get('junqi-two_player-session'),'two-game');
+  assert.equal(ui.element('pass').hidden,true);
+  assert.equal(ui.element('pass').disabled,true);
+  assert.match(ui.element('pass-status').textContent,/不允许跳过/);
   assert.equal(ui.storage.get('junqi-session'),'game');
   assert.ok(ui.saved.has('junqi-last-review'));
   assert.ok(!ui.element('legend').innerHTML.includes('队友'));

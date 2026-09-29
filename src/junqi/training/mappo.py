@@ -184,7 +184,8 @@ def player_generalized_advantages(transitions: Sequence[PlayerMAPPOTransition], 
 
 def player_step_rewards(row, *, player: int, player_count: int, draw_reward: float,
                         flag_capture_reward: float, bomb_rewards, futile_reward: float,
-                        reward_scope: str = "player", known_nonflag_hq_reward: float = 0.) -> tuple[float, ...]:
+                        reward_scope: str = "player", known_nonflag_hq_reward: float = 0.,
+                        flag_defense_reward: float = 0.) -> tuple[float, ...]:
     """Same terminal result for allies; configurable ownership of event rewards."""
     if reward_scope not in ("player", "team"):
         raise ValueError("MAPPO reward scope must be player or team")
@@ -202,7 +203,7 @@ def player_step_rewards(row, *, player: int, player_count: int, draw_reward: flo
         credit(row.bomb_owner, bomb_rewards[row.bombed_kind])
     credit(player, futile_reward)
     # A personal action cost; do not punish the ally or reward the opponents.
-    rewards[player] += known_nonflag_hq_reward
+    rewards[player] += known_nonflag_hq_reward + flag_defense_reward
     return tuple(rewards)
 
 
@@ -212,6 +213,7 @@ def collect_mappo_samples(
     draw_reward=DEFAULT_DRAW_REWARD, flag_capture_reward=0.0, futile_attack_penalty=0.0,
     bomb_commander_reward=0.0, bomb_army_commander_reward=0.0, bomb_division_commander_reward=0.0,
     known_nonflag_hq_penalty=0.0,
+    flag_defense_missed_penalty=0.0, flag_defense_success_reward=0.0,
     advantage_mode="team_steps", reward_scope="team",
     training_audit=None,
 ):
@@ -247,6 +249,8 @@ def collect_mappo_samples(
                           groups=pipeline_groups, draw_reward=draw_reward,
                           flag_capture_reward=flag_capture_reward, futile_attack_penalty=futile_attack_penalty,
                           known_nonflag_hq_penalty=known_nonflag_hq_penalty,
+                          flag_defense_missed_penalty=flag_defense_missed_penalty,
+                          flag_defense_success_reward=flag_defense_success_reward,
                           advantage_mode=advantage_mode, reward_scope=reward_scope,
                           training_audit=training_audit,
                           bomb_rewards=dict(zip(BOMB_REWARD_FIELDS, (
@@ -269,7 +273,8 @@ def collect_mappo_samples(
 
 def _collect(pool, actor, critic, layout, *, count, behavior_version, discount, gae_lambda,
              environment, groups, draw_reward, flag_capture_reward, futile_attack_penalty, bomb_rewards,
-             advantage_mode, reward_scope, known_nonflag_hq_penalty, training_audit=None):
+             advantage_mode, reward_scope, known_nonflag_hq_penalty,
+             flag_defense_missed_penalty, flag_defense_success_reward, training_audit=None):
     started = time.perf_counter()
     historical = pool.historical
     if historical is not None:
@@ -296,6 +301,7 @@ def _collect(pool, actor, critic, layout, *, count, behavior_version, discount, 
     boundary = time.perf_counter()
     environment.begin(pool, track_futile_attacks=futile_attack_penalty > 0, centralized_critic=True,
                       **({"track_known_nonflag_hq": True} if known_nonflag_hq_penalty else {}),
+                      **({"track_flag_defense": True} if flag_defense_missed_penalty or flag_defense_success_reward else {}),
                       **({"tactical_indices": training_audit.indices} if training_audit is not None else {}))
     metrics.environment_sync_seconds += time.perf_counter() - boundary
     metrics.environment_workers = len(environment.processes)
@@ -382,6 +388,8 @@ def _collect(pool, actor, critic, layout, *, count, behavior_version, discount, 
                                                          learnable=learnable)
             hq_reward = metrics.record_known_nonflag_hq(row.known_nonflag_hq, known_nonflag_hq_penalty,
                                                        learnable=learnable)
+            defense_reward = metrics.record_flag_defense(row.flag_defense,
+                flag_defense_missed_penalty, flag_defense_success_reward, learnable=learnable)
             captures = [flag_capture_utility(slot.game, row.flag_captured_owner,
                                             player=t, coefficient=flag_capture_reward) for t in (0, 1)]
             metrics.record_flag_capture(row.flag_captured_owner, captures[owner % 2], terminal=row.terminal)
@@ -392,7 +400,7 @@ def _collect(pool, actor, critic, layout, *, count, behavior_version, discount, 
                 rewards = player_step_rewards(row, player=owner, player_count=perspectives,
                     draw_reward=draw_reward, flag_capture_reward=flag_capture_reward,
                     bomb_rewards=bomb_rewards, futile_reward=futile_reward, reward_scope=reward_scope,
-                    known_nonflag_hq_reward=hq_reward)
+                    known_nonflag_hq_reward=hq_reward, flag_defense_reward=defense_reward)
                 transition = PlayerMAPPOTransition(state, action[0], float(log[0]), global_states,
                     rewards, row.terminal, owner, learnable,
                     virtual_turns=virtual_player_turns(player=owner, next_player=row.state.player,
@@ -402,7 +410,7 @@ def _collect(pool, actor, critic, layout, *, count, behavior_version, discount, 
                            + captures[t] for t in (0, 1)]
                 if row.bombed_kind is not None:
                     rewards[slot.game.team_of(row.bomb_owner)] += bomb_reward
-                rewards[owner] += futile_reward + hq_reward
+                rewards[owner] += futile_reward + hq_reward + defense_reward
                 transition = MAPPOTransition(state, action[0], float(log[0]), global_states,
                                              tuple(rewards), row.terminal, owner, learnable)
             if training_audit is not None:
@@ -416,7 +424,8 @@ def _collect(pool, actor, critic, layout, *, count, behavior_version, discount, 
                         bomb_owner=row.bomb_owner, bombed_kind=row.bombed_kind,
                         bomb_reward=bomb_rewards.get(row.bombed_kind, 0.),
                         futile_attack=row.futile_attack, futile_attack_reward=futile_reward,
-                        known_nonflag_hq=row.known_nonflag_hq, known_nonflag_hq_reward=hq_reward))
+                        known_nonflag_hq=row.known_nonflag_hq, known_nonflag_hq_reward=hq_reward,
+                        flag_defense=row.flag_defense, flag_defense_reward=defense_reward))
                 if diagnostic is not None:
                     transition = replace(transition, training_diagnostic=diagnostic)
             slot.history.append_encoded_rows(row.records)

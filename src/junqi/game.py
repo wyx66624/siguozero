@@ -108,6 +108,8 @@ class GameConfig:
     max_plies: int | None = None
     # False is retained only for replaying positions saved under the old rule.
     eliminate_no_moves: bool = True
+    # Explicit True is only for legacy two-player positions/replays.
+    allow_passes: bool | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -115,6 +117,10 @@ class GameConfig:
         except ValueError as error:
             raise GameRuleError(f"unknown game variant: {self.variant!r}") from error
         object.__setattr__(self, "variant", variant)
+        if self.allow_passes is None:
+            object.__setattr__(self, "allow_passes", variant is GameVariant.FOUR_PLAYER)
+        if type(self.allow_passes) is not bool:
+            raise GameRuleError("allow_passes must be a boolean")
 
         default_mode = (
             InformationMode.FOUR_DARK
@@ -177,16 +183,22 @@ class GameConfig:
     def player_count(self) -> int:
         return 4 if self.variant is GameVariant.FOUR_PLAYER else 2
 
+    @property
+    def max_passes_per_player(self) -> int:
+        return MAX_PASSES_PER_PLAYER if self.allow_passes else 0
+
     def __setstate__(self, state) -> None:
         # Frozen/slots dataclasses pickle fields in declaration order. Old
         # checkpoints have six fields and must retain their replay semantics.
         names = [field.name for field in fields(self)]
-        if len(state) not in (len(names), len(names) - 1):
+        if len(state) not in (6, 7, len(names)):
             raise GameRuleError("unsupported saved game configuration")
         for name, value in zip(names, state):
             object.__setattr__(self, name, value)
-        if len(state) < len(names):
+        if len(state) < 7:
             object.__setattr__(self, "eliminate_no_moves", False)
+        if len(state) < 8:
+            object.__setattr__(self, "allow_passes", True)
 
     @property
     def turn_step(self) -> int:
@@ -410,14 +422,14 @@ class JunqiGame:
         if any(count > MAX_PASSES_PER_PLAYER for count in recorded_passes.values()):
             raise GameRuleError("public history exceeds the per-player pass budget")
         if passes_remaining is None:
-            passes_remaining = [MAX_PASSES_PER_PLAYER - recorded_passes[player]
+            passes_remaining = [MAX_PASSES_PER_PLAYER - recorded_passes[player] if config.allow_passes else 0
                                 for player in range(config.player_count)]
         if passes_remaining is not None:
             if (len(passes_remaining) != config.player_count or any(
-                type(value) is not int or not 0 <= value <= MAX_PASSES_PER_PLAYER
+                type(value) is not int or not 0 <= value <= config.max_passes_per_player
                 for value in passes_remaining
             )):
-                raise GameRuleError("remaining passes require one integer in 0..4 per player")
+                raise GameRuleError("remaining passes exceed the configured per-player budget")
             game._passes_remaining = list(passes_remaining)
             if any(game._passes_remaining[player] + recorded_passes[player] > MAX_PASSES_PER_PLAYER
                    for player in range(config.player_count)):
@@ -521,7 +533,7 @@ class JunqiGame:
             for _ in range(config.player_count)
         ]
         self._public_history: list[PublicEvent] = []
-        self._passes_remaining = [MAX_PASSES_PER_PLAYER] * config.player_count
+        self._passes_remaining = [config.max_passes_per_player] * config.player_count
         self._active = [True] * config.player_count
         self._flag_revealed = [False] * config.player_count
         self._current_player: int | None = config.first_player
@@ -1585,7 +1597,7 @@ class JunqiGame:
 
         # A voluntary pass cannot keep an immobile player alive. Keep the
         # action order stable for policies and old replay probability vectors.
-        if self._passes_remaining[player] > 0 and (actions or not self.config.eliminate_no_moves):
+        if self.config.allow_passes and self._passes_remaining[player] > 0 and (actions or not self.config.eliminate_no_moves):
             actions.insert(0, PASS_ACTION)
         result = tuple(actions)
         self._legal_actions_cache[player] = result
@@ -2113,6 +2125,7 @@ class JunqiGame:
             self.config.information_mode.value,
             self.config.dead_rules_enabled,
             self.config.eliminate_no_moves,
+            self.config.allow_passes,
             self._current_player,
             tuple(self._active),
             tuple(self._flag_revealed),

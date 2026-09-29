@@ -49,7 +49,7 @@ class MatchSettings:
     layout_temperature: float = 0.7
     max_plies: int | None = None
     no_capture_draw_plies: int = 70
-    max_passes_per_player: int = 4
+    max_passes_per_player: int | None = None
     temporal_cache_entries: int = 8
     smoke_test: bool = False
     mode: str = TrainingMode.TWO_PLAYER.value
@@ -64,8 +64,11 @@ class MatchSettings:
                 or self.historical_teammate_fraction not in (0, 0.5)
                 or (self.mode == TrainingMode.TWO_PLAYER.value and self.historical_teammate_fraction)):
             raise ValueError("historical teammate evaluation requires four-player mode and fraction 0 or 0.5")
-        if type(self.max_passes_per_player) is not int or self.max_passes_per_player != 4:
-            raise ValueError("the current match protocol requires four passes per player")
+        expected_passes = 0 if self.mode == TrainingMode.TWO_PLAYER.value else 4
+        if self.max_passes_per_player is None:
+            object.__setattr__(self, "max_passes_per_player", expected_passes)
+        if type(self.max_passes_per_player) is not int or self.max_passes_per_player != expected_passes:
+            raise ValueError(f"{self.mode} match protocol requires {expected_passes} passes per player")
         if self.max_plies is not None and (type(self.max_plies) is not int or self.max_plies <= 0):
             raise ValueError("max_plies must be a positive integer or None")
         for name in ("pairs", "no_capture_draw_plies", "temporal_cache_entries", "parallel_games",
@@ -235,10 +238,11 @@ class _ArenaGame:
         self.histories = []
         for engine in (candidate, opponent):
             window = engine.policy.config.max_transitions
-            key = window
+            stride = engine.policy.config.history_window_stride
+            key = window, stride
             if key not in by_window:
                 by_window[key] = GameHistory.initialize(self.game, engine.mode,
-                    max_transitions=window)
+                    max_transitions=window, history_window_stride=stride)
             self.histories.append(by_window[key])
         self.unique_histories = list(by_window.values())
         self.actions: list[dict[str, Any]] = []

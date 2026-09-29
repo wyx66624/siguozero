@@ -2,6 +2,29 @@
 from __future__ import annotations
 
 
+def reconcile_flag_defense_objective(payload, settings, *, adopt: bool = False):
+    from .tactical_rewards import FLAG_DEFENSE_REWARD_FIELDS
+    config = payload["config"]
+    old = {field: float(config.get(field, 0.)) for field in FLAG_DEFENSE_REWARD_FIELDS}
+    target = {field: float(getattr(settings, field)) for field in FLAG_DEFENSE_REWARD_FIELDS}
+    if old == target:
+        return
+    if not adopt:
+        raise RuntimeError("flag defense rewards changed across resume; use --adopt-flag-defense-rewards "
+                           "to preserve state and adopt them explicitly")
+    state = payload["trainer_state"]
+    state["flag_defense_objective_migration"] = {
+        "update": int(payload["update"]),
+        "environment_plies": state.get("cumulative", {}).get("environment_plies", 0),
+        "from_rewards": old, "to_rewards": target,
+        "scope": "future_mappo_transitions_only", "perspective": "acting_learner_only",
+        "evidence": "pre_action_public_one_move_flag_threat_and_guaranteed_removal",
+        "piece_rank_preference": None, "schedule": "constant",
+        "terminal_reward": "additive", "weights_and_optimizer": "preserved",
+    }
+    config.update(target)
+
+
 def reconcile_known_nonflag_hq_objective(payload, settings, *, adopt: bool = False):
     config = payload["config"]
     old = float(config.get("known_nonflag_hq_penalty", 0.0))
