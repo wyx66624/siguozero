@@ -2364,8 +2364,8 @@ class SelfPlayTrainer:
                 if self.settings.algorithm in ("ppo", "mappo"):
                     self.phase = f"{self.settings.algorithm}_trajectory_collection"
                     if (self.settings.rollout_environment_workers > 1 or self.settings.algorithm == "mappo") and self._ppo_environment is None:
-                        from .ppo_environment import ParallelPPOEnvironment
-                        self._ppo_environment = ParallelPPOEnvironment(self.settings.rollout_environment_workers)
+                        from .ppo_environment import make_parallel_environment
+                        self._ppo_environment = make_parallel_environment(self.settings.rollout_environment_workers)
                     assert self.critic is not None
                     value_actor = FrozenValueActor(
                         self.critic, amp_dtype=self.amp_dtype,

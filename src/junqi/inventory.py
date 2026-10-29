@@ -9,6 +9,13 @@ Mutual-removal pairs remain linked so later evidence can resolve old exchanges.
 from __future__ import annotations
 
 from collections import Counter
+import os
+try:
+    from . import _inventory_native as _native_inventory
+except ImportError:
+    _native_inventory = None
+if os.environ.get("SIGUOZERO_NATIVE_INVENTORY", "1") == "0":
+    _native_inventory = None
 from dataclasses import dataclass, replace
 from functools import lru_cache
 
@@ -29,6 +36,13 @@ INVENTORY_ENCODER_TYPE = "whole_board_inventory_multihot_linear"
 # Same public candidate semantics, without direct casualty/pass board features.
 INVENTORY_ONLY_ENCODER_TYPE = "whole_board_inventory_candidates_linear"
 INVENTORY_MASK_ENCODING = "confirmed_exclusive_slots_v2"
+_NATIVE_SLOT_BITS = tuple(TYPE_BITS[kind] for kind in INVENTORY_SLOTS)
+_NATIVE_TYPE_BITS = tuple(TYPE_BITS[kind] for kind in PIECE_TYPE_ORDER)
+
+@lru_cache(maxsize=4096)
+def _domain_from_bits(bits):
+    return frozenset(kind for kind in PIECE_TYPE_ORDER if bits & TYPE_BITS[kind])
+
 SLOTS_BY_TYPE = {kind: tuple(i for i, item in enumerate(INVENTORY_SLOTS) if item is kind)
                  for kind in PIECE_TYPE_ORDER}
 REMAINING_SLOT_MASKS = {kind: tuple(sum(1 << slot for slot in slots[:count])
@@ -89,6 +103,8 @@ def _supported_domains(masks: tuple[int, ...]) -> tuple[frozenset[PieceType], ..
     """
     if len(masks) != 25:
         raise ValueError("inventory requires exactly 25 live/removed variables")
+    if _native_inventory is not None:
+        return tuple(_domain_from_bits(bits) for bits in _native_inventory.supported(masks, _NATIVE_SLOT_BITS))
     edges = [tuple(j for j, kind in enumerate(INVENTORY_SLOTS) if mask & TYPE_BITS[kind])
              for mask in masks]
     right = [-1] * 25
@@ -155,6 +171,8 @@ def guaranteed_casualties(live_masks: tuple[int, ...], dead_masks: tuple[int, ..
     """
     if not dead_masks:
         return (0,) * len(PIECE_TYPE_ORDER)
+    if _native_inventory is not None:
+        return _native_inventory.casualties(live_masks, dead_masks, _NATIVE_SLOT_BITS, _NATIVE_TYPE_BITS)
     masks = live_masks + dead_masks
     edges = [sum(1 << j for j, kind in enumerate(INVENTORY_SLOTS) if mask & TYPE_BITS[kind]) for mask in masks]
 

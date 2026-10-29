@@ -1477,6 +1477,9 @@ class JunqiGame:
         *,
         can_turn: bool,
     ) -> set[int]:
+        from .native_rules import enabled, railway_targets
+        if enabled(board):
+            return railway_targets(board, start, occupied, can_turn)
         reachable: set[int] = set()
         if not board.neighbors(start, PathKind.RAILWAY):
             return reachable
@@ -1559,6 +1562,12 @@ class JunqiGame:
             return ()
 
         board = self._boards[player]
+        from .native_rules import enabled, legal_actions
+        if enabled(board):
+            result = legal_actions(self, player)
+            self._legal_actions_cache[player] = result
+            self._legal_action_sets[player] = frozenset(result)
+            return result
         encoded_pieces = tuple(
             (board.encode(point), point, piece)
             for point, piece in self._pieces.items()

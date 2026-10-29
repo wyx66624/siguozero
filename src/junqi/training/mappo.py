@@ -232,9 +232,9 @@ def collect_mappo_samples(
         raise ValueError("MAPPO requires deferred values and array histories")
     if hasattr(critic.critic, "draw_value_head"):
         raise ValueError("MAPPO requires a single V head")
-    from .ppo_environment import ParallelPPOEnvironment
+    from .ppo_environment import make_parallel_environment
     owned = environment is None
-    environment = environment or ParallelPPOEnvironment(environment_workers)
+    environment = environment or make_parallel_environment(environment_workers)
     # Collection creates many acyclic history views and IPC tuples. Reference
     # counts still reclaim them immediately; defer only cyclic scans until the
     # temporary traces have gone away, rather than repeatedly scanning a growing
@@ -362,10 +362,13 @@ def _collect(pool, actor, critic, layout, *, count, behavior_version, discount, 
         return wave
 
     ready = finish_sample(sample(waves[0]))
+    submitted = None
     for wave_index, indices in enumerate(waves):
         states, actions, logs, owned, globals_, owners = ready
         boundary = time.perf_counter()
-        environment.submit(indices, [a[0] for a in actions])
+        lookahead = getattr(environment, 'supports_lookahead', False)
+        ticket = submitted if submitted is not None else environment.submit(indices, [a[0] for a in actions])
+        submitted = None
         metrics.environment_step_seconds += time.perf_counter() - boundary
         next_indices = waves[wave_index + 1] if wave_index + 1 < len(waves) else None
         can_overlap = next_indices is not None and not set(indices).intersection(next_indices)
@@ -374,7 +377,14 @@ def _collect(pool, actor, critic, layout, *, count, behavior_version, discount, 
         # randomness and game ordering remain identical to synchronous sampling.
         pending = sample(next_indices, defer_result=True) if can_overlap else None
         boundary = time.perf_counter()
-        responses = environment.receive()
+        if can_overlap and lookahead:
+            prepared = finish_sample(pending)
+            queue_started = time.perf_counter()
+            submitted = environment.submit(next_indices, [a[0] for a in prepared[1]])
+            metrics.environment_step_seconds += time.perf_counter() - queue_started
+            pending = (prepared, [])
+            boundary = time.perf_counter()
+        responses = environment.receive(ticket) if lookahead else environment.receive()
         if [row.index for row in responses] != indices:
             raise RuntimeError("MAPPO workers returned an incomplete wave")
         for index, state, action, log, learnable, global_states, owner, row in zip(

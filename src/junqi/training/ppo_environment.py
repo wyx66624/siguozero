@@ -149,6 +149,7 @@ def _receive(stream):
 
 def _worker():
     games, mode = {}, None
+    shared_observations = None
     track_futile_attacks = False
     centralized_critic = False
     tactical_indices = frozenset()
@@ -166,6 +167,11 @@ def _worker():
                 track_known_nonflag_hq = payload[5] if len(payload) >= 6 else False
                 track_flag_defense = payload[6] if len(payload) >= 7 else False
                 games = dict(replacements)
+                descriptor = payload[8] if len(payload) > 8 else None
+                if descriptor is not None and (shared_observations is None or shared_observations.descriptor != descriptor):
+                    from .shared_observation import SharedObservationBuffer
+                    if shared_observations is not None: shared_observations.close()
+                    shared_observations = SharedObservationBuffer(descriptor)
                 value = [(index, environment_state(game)) for index, game in games.items()]
             elif command == 'step':
                 replacements, actions = payload
@@ -183,6 +189,8 @@ def _worker():
                 value = list(games.items())
             else:
                 raise ValueError(f'unknown PPO environment command: {command}')
+            if command == 'step' and shared_observations is not None:
+                value = (shared_observations.pack(value[0]), value[1])
             _send(sys.stdout.buffer, (True, value))
     except BaseException:
         try:
@@ -203,6 +211,7 @@ class ParallelPPOEnvironment:
         self.active_workers = []
         self.states = []
         self.worker_seconds = 0.
+        self.shared_observations = None
 
     def _start(self, count):
         if self.processes:
@@ -238,6 +247,9 @@ class ParallelPPOEnvironment:
         if self.active_workers:
             raise RuntimeError('cannot replace a PPO pool during an outstanding step')
         self._start(len(pool.slots))
+        if self.shared_observations is None and os.name == "posix" and os.environ.get("SIGUOZERO_SHARED_OBSERVATIONS", "1") != "0":
+            from .shared_observation import SharedObservationBuffer
+            self.shared_observations = SharedObservationBuffer.create(pool)
         self.pending.clear()
         self.states = [None] * len(pool.slots)
         for worker, process in enumerate(self.processes):
@@ -249,6 +261,9 @@ class ParallelPPOEnvironment:
                 payload += (track_known_nonflag_hq,)
             if track_flag_defense:
                 payload += (True,)
+            defaults = (False, (), False, False, False)
+            payload = (*payload, *defaults[len(payload)-3:],
+                       self.shared_observations.descriptor if self.shared_observations is not None else None)
             _send(process.stdin, ('initialize', payload))
         for worker in range(len(self.processes)):
             for index, state in self._result(worker):
@@ -275,6 +290,7 @@ class ParallelPPOEnvironment:
         results = []
         for worker in self.active_workers:
             rows, seconds = self._result(worker)
+            if self.shared_observations is not None: rows = self.shared_observations.unpack(rows)
             self.worker_seconds += seconds
             results.extend(rows)
         self.active_workers.clear()
@@ -319,6 +335,8 @@ class ParallelPPOEnvironment:
                 for stream in (process.stdin, process.stdout, process.stderr):
                     stream.close()
         self.processes.clear()
+        if self.shared_observations is not None:
+            self.shared_observations.close(); self.shared_observations = None
         self.active_workers.clear()
 
     def __enter__(self):
@@ -326,3 +344,10 @@ class ParallelPPOEnvironment:
 
     def __exit__(self, *_):
         self.close()
+
+
+def make_parallel_environment(workers):
+    if os.name == "posix" and os.environ.get("SIGUOZERO_QUEUED_ENVIRONMENT", "0") == "1":
+        from .queued_environment import QueuedPPOEnvironment
+        return QueuedPPOEnvironment(workers)
+    return ParallelPPOEnvironment(workers)

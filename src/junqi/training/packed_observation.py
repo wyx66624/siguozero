@@ -7,6 +7,7 @@ hidden piece identities are never read to construct a player's board codes.
 from __future__ import annotations
 
 import numpy as np
+import os
 
 from .encoding import ACTION_PLAYER_PAD, EXACT_PIECE_CODE_STRIDE, NO_CAPTURE_COUNTER_MAX, OWN_PIECE_CODES, ActionFeatures
 from .modes import TrainingMode, mode_spec
@@ -14,6 +15,12 @@ from .history_arrays import observation_width
 
 
 def observation_rows(game, mode):
+    if mode is TrainingMode.TWO_PLAYER and os.environ.get("SIGUOZERO_FAST_OBSERVATIONS", "1") != "0":
+        from .fast_observation import public_rows
+        return public_rows(game,mode)
+    return _observation_rows_reference(game,mode)
+
+def _observation_rows_reference(game, mode):
     if game._inventory is None:
         raise ValueError("actor observations require inventory tracking from game initialization")
     points = mode_spec(mode).point_count

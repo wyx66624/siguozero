@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import Counter
 
 import numpy as np
+import os
 
 from ..pieces import DEPLOYMENT_PIECE_SEQUENCE
 from .encoding import EXACT_PIECE_CODE_STRIDE, OWN_PIECE_CODES, GameHistory, PlayerHistory, PolicyState
@@ -17,6 +18,12 @@ from .packed_observation import observation_rows
 
 
 def centralized_observation_rows(game, mode, *, public_rows=None):
+    if normalize_mode(mode) is TrainingMode.TWO_PLAYER and os.environ.get("SIGUOZERO_FAST_OBSERVATIONS", "1") != "0":
+        from .fast_observation import centralized_rows
+        return centralized_rows(game,normalize_mode(mode),public_rows)
+    return _centralized_observation_rows_reference(game,mode,public_rows=public_rows)
+
+def _centralized_observation_rows_reference(game, mode, *, public_rows=None):
     """Encode true current pieces, casualties and public rule state, per seat.
 
     Start with a separate allocation of public auxiliary fields; reading hidden
